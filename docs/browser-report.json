@@ -1,0 +1,18 @@
+{
+  "mode": "offline Chromium DOM + real FastAPI TestClient bridge",
+  "browser_network_tested": false,
+  "external_network_tested": false,
+  "completed": [
+    "initial_empty_state",
+    "load_fictional_demo",
+    "search_select_compare",
+    "graph_from_saved_relations",
+    "open_evidence_history",
+    "create_paper_and_escape_html",
+    "edit_notes_and_record_unsupported_check",
+    "csl_file_preview_and_import",
+    "persistent_data_and_export",
+    "mobile_layout_and_detail"
+  ],
+  "page_errors": []
+}

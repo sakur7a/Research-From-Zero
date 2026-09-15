@@ -1,0 +1,16 @@
+services:
+  re0:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      RE0_DB: /app/.data/re0.sqlite3
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    volumes:
+      - re0_data:/app/.data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+volumes:
+  re0_data:
