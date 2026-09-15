@@ -1,37 +1,40 @@
-[
-  {
-    "path": "/api/health",
-    "status": 200,
-    "bytes": 80,
-    "content_type": "application/json",
-    "csp": true
-  },
-  {
-    "path": "/",
-    "status": 200,
-    "bytes": 829,
-    "content_type": "text/html; charset=utf-8",
-    "csp": true
-  },
-  {
-    "path": "/static/app.js",
-    "status": 200,
-    "bytes": 44493,
-    "content_type": "text/javascript; charset=utf-8",
-    "csp": true
-  },
-  {
-    "path": "/static/styles.css",
-    "status": 200,
-    "bytes": 31948,
-    "content_type": "text/css; charset=utf-8",
-    "csp": true
-  },
-  {
-    "path": "/openapi.json",
-    "status": 200,
-    "bytes": 10572,
-    "content_type": "application/json",
-    "csp": true
-  }
-]
+{
+  "mode": "actual loopback HTTP process; no browser, external APIs or model",
+  "version": "0.2.0",
+  "paths": [
+    {
+      "path": "/api/health",
+      "status": 200
+    },
+    {
+      "path": "/",
+      "status": 200
+    },
+    {
+      "path": "/library",
+      "status": 200
+    },
+    {
+      "path": "/static/agent.js",
+      "status": 200
+    },
+    {
+      "path": "/static/agent.css",
+      "status": 200
+    },
+    {
+      "path": "/api/agent/config",
+      "status": 200
+    },
+    {
+      "path": "/openapi.json",
+      "status": 200
+    }
+  ],
+  "guards": [
+    "missing-client-header:403",
+    "no-model:422",
+    "cross-origin:403"
+  ],
+  "tasks_created": 0
+}

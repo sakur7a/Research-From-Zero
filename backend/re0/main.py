@@ -2,17 +2,22 @@
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 import threading
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from .agent.api import agent_router
+from .agent.runtime import AgentRuntime
+from .agent.model import ModelError
 from . import __version__
 from .db import Database
 from .models import MetadataRequest, PaperInput, ResourceInput, TopicInput
@@ -29,9 +34,28 @@ class CslImport(BaseModel):
     dry_run: bool = True
 
 
-def create_app(db_path: str | None = None, transport=None) -> FastAPI:
-    app = FastAPI(title="re0 research workspace", version=__version__)
+def create_app(db_path: str | None = None, transport=None, model_factory=None) -> FastAPI:
     store = Store(Database(db_path or os.getenv("RE0_DB", str(ROOT / ".data/re0.sqlite3"))))
+    agent = AgentRuntime(store, transport=transport, model_factory=model_factory)
+
+    @asynccontextmanager
+    async def lifespan(app):
+        agent.start()
+        yield
+        agent.close()
+
+    app = FastAPI(title="re0 research agent", version=__version__, lifespan=lifespan)
+    app.state.agent = agent
+    app.include_router(agent_router(agent))
+
+    @app.exception_handler(ModelError)
+    async def model_error(request, exc):
+        return JSONResponse({"detail": str(exc)}, status_code=422)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request, exc):
+        # FastAPI normally echoes invalid input; configuration payloads contain secrets.
+        return JSONResponse({"detail": [{"loc": e["loc"], "msg": "输入格式或取值不符合要求", "type": e["type"]} for e in exc.errors()]}, status_code=422)
     app.state.store = store
     audit_slots = threading.BoundedSemaphore(2)
     active_resources: set[str] = set()
@@ -74,7 +98,7 @@ def create_app(db_path: str | None = None, transport=None) -> FastAPI:
 
     @app.get("/api/health")
     def health():
-        return {"status": "ok", "version": __version__, "mode": "local-single-user", "llm_enabled": False}
+        return {"status": "ok", "version": __version__, "mode": "local-single-user", "llm_enabled": agent.vault.public()["configured"], "agent_runtime": "native-durable-tool-loop"}
 
     @app.get("/api/papers")
     def papers():
@@ -186,6 +210,10 @@ def create_app(db_path: str | None = None, transport=None) -> FastAPI:
 
     @app.get("/")
     def index():
+        return FileResponse(WEB / "agent.html")
+
+    @app.get("/library")
+    def library_index():
         return FileResponse(WEB / "index.html")
 
     app.mount("/static", StaticFiles(directory=WEB), name="static")

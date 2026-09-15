@@ -1,39 +1,83 @@
-# 验证记录 · v0.1.0 · 2026-09-15
+# 验证记录 · v0.2.0 · 2026-09-15
 
-## 实际执行
+## 本地实际执行
 
-| 层次 | 命令/方式 | 结果 |
+| 层次 | 命令／方式 | 结果 |
 |---|---|---|
-| 后端与备份 | `python -m pytest` | 60 passed |
-| 前端纯逻辑 | `npm test` | 17 passed |
-| JS 语法 | `npm run check` | 通过 |
+| Python 后端、网关、执行器、工具、数据与备份 | `python -m pytest` | **92 passed**（原 60 项＋agent 32 项，含参数化案例） |
+| JavaScript 纯逻辑 | `npm test` | **20 passed**（原 17 项＋agent 3 项） |
+| JS 语法 | `npm run check` | 5 个模块通过 |
 | Python 语法 | `python -m compileall -q backend/re0 run.py scripts` | 通过 |
-| 浏览器 DOM / API 联调 | `CHROMIUM_PATH=/usr/bin/chromium python scripts/browser_smoke.py` | 10 组流程通过，0 个 pageerror |
-| 本地 HTTP 服务 | 实际启动 `python run.py`，请求 health、首页、JS、CSS、OpenAPI | 5 个路径均 HTTP 200 |
+| Agent 桌面／移动浏览器 | `scripts/agent_browser_smoke.py` | 6 组通过，0 个 pageerror |
+| 原文献库浏览器回归 | `scripts/browser_smoke.py` | 10 组通过，0 个 pageerror |
+| 真实本地 HTTP 服务 | `scripts/http_smoke.py` | 7 个路径 HTTP 200；3 项拒绝／配置缺失检查符合预期 |
 
-本次环境：Python 3.13.5、Node.js 22.16.0；FastAPI 0.128.2、Pydantic 2.13.4、HTTPX 0.28.1、Uvicorn 0.48.0、pytest 9.0.2。
+本地版本：Python 3.13.5、Node.js 22.16.0。原有依赖保持不变：FastAPI
+0.128.2、Pydantic 2.13.4、HTTPX 0.28.1、Uvicorn 0.48.0、pytest 9.0.2。
+Python 3.11 是声明支持目标与原 CI 配置，不是本轮实机验证版本。
 
-机器可读记录：[browser-report.json](browser-report.json)、[http-smoke.json](http-smoke.json)。
-交付的界面截图来自实际 DOM 渲染，全部论文/状态为显式虚构的演示数据。
+机器可读记录：[agent-browser-report.json](agent-browser-report.json)、
+[browser-report.json](browser-report.json)、[http-smoke.json](http-smoke.json)。
 
-## 测试覆盖
+## 新增覆盖
 
-后端覆盖 CRUD、持久化、DOI/arXiv 去重、版本冲突、写入失败回滚、人工声明依据、检查缓存、追加历史、级联删除、演示数据隔离、CSL 预览/部分导入、导出、请求头与 Origin 校验、请求大小、URL 校验、SQLite WAL 备份与拒绝覆盖。
+真实应用、真实 gateway、真实 agent loop 和真实 SQLite 在测试中运行；只有
+模型／外部提供商 HTTP 被 `httpx.MockTransport` 替换。覆盖：
 
-提供商用 HTTPX MockTransport 测试：提交版本固定、截断树、README 失败保留局部证据、限流/403/404/重定向/超时、候选文件名而非运行断言、HF gated 与文件列表分离、标识符匹配、明确 arXiv 版本不自动替换、拒绝 XML 实体、响应预算、token 主机范围。**Mock 测试通过不能证明真实上游接口当下可用。**
+- 未设置模型不可提交；任务材料发送授权、工具作用域；旧库保留；
+- 凭证不出现在配置响应、错误输入回显、数据库与导出中；远程 endpoint
+  scheme/host/port/path 限制，本地和部署者允许的自定义地址；
+- Chat Completions 工具协议、多轮 tool_call_id 对应关系、模型重复 call ID
+  的规范化、可选 token 参数、无 usage、普通聊天不能通过工具测试；
+- 模型响应 HTTP 302/400/401/429/500 不跟随、不重试、不泄漏远端错误体；
+- 公开计划→论文检索→实际证据→结构化报告的多轮流程；
+- 虚构引用不通过并返回工具错误供模型修正；未授权／未知工具不能执行；
+- 运行中设置锁、并发提交拒绝、在模型请求期间取消后不执行后续工具；
+- 应用重开后手动恢复，原模型匹配与累计调用数，已完成工具不重新检索；
+- Crossref/Hugging Face／按 commit 固定的有界文本读取；
+- 人工审批、幂等入库、已有 DOI/arXiv 和私人笔记不覆盖。
 
-浏览器流程覆盖空库、只触发一次演示导入、搜索和选择对比、分类关系图、查看证据历史、新建与 HTML 转义、修改笔记、保存不支持链接并记录观测、CSL 文件预览导入、持久化/导出、390px 移动端无横向溢出和详情打开。另检查了桌面及移动端截图。
+这些测试验证执行和约束行为，不验证模型能否正确识别官方仓库、理解论文，
+也不能得出科学判断准确率。生产路径没有 fixture 模式或预置“成功报告”。
 
-## 没有声称完成的验证
+## 浏览器与 HTTP 的区别
 
-运行环境的 Chromium 网络导航被管理员策略禁止；没有修改或绕过该策略。浏览器测试采用离线页面载入与 TestClient 桥接，真实 API、校验与数据库仍被执行，但**不覆盖浏览器 TCP、模块网络加载、CSP 执行或部署端到端网络行为**。单独 HTTP 冒烟只验证服务和资源能返回，不能替代完整浏览器部署测试。
+浏览器测试使用离线 Chromium DOM＋真实 FastAPI TestClient 桥接，不修改
+环境网络政策。它验证用户点击、设置、任务历史、引用定位、批准入库、390px
+移动布局和前端错误，不覆盖浏览器真实 TCP 导航、ES module 网络加载或实际
+CSP 生效。Agent 浏览器示例报告均带 `Fixture` 标记，不是真实研究结果。
 
-环境外部 DNS 不可用，因此 GitHub / Hugging Face / arXiv / Crossref 的实时成功路径尚未在此环境跑通。需要在用户环境验证网络、权限、提供商变化和代理需求。
+独立 HTTP 脚本确实启动 `python run.py` 子进程并向 loopback 发起 HTTP 请求，
+验证 `/`、`/library`、静态 JS/CSS、API 与 OpenAPI 能返回，并检查无模型、无
+客户端头、跨来源写入被拒绝。没有用它冒充完整的浏览器部署端到端测试。
 
-没有全新虚拟环境从公网安装的验证，没有 Docker 镜像构建测试，没有公网部署。CI 文件已编写；该记录仅报告本地实际测试，不预先声称 GitHub Actions 成功。Python 3.11 仅配置进 CI 矩阵，本次本机运行验证的是 3.13。
+## 复跑
 
-没有自动理论分析、LLM 评测、实际模型加载、训练/评测运行或实验复现；不要把这些当作已测试能力。
+```bash
+python -m pip install -e '.[test]'
+python -m pytest
+npm test
+npm run check
+python scripts/http_smoke.py
 
-## 首次真实使用检查
+# 可选浏览器测试：需要 Playwright 和 Chromium
+python -m pip install playwright
+python -m playwright install chromium
+python scripts/agent_browser_smoke.py
+python scripts/browser_smoke.py
+```
 
-启动后先检查演示是否正常，再导入少量自己的论文，使用一个自己能访问的公开仓库进行检查。对照提供商界面核对版本、文件和访问门槛；真实失败应保留为 unknown/access_failed，并在问题记录中提供检查时间与脱敏上下文。
+已有 Chromium 时可设置 `CHROMIUM_PATH`，本轮使用 `/usr/bin/chromium`。
+浏览器测试依赖测试 extras，因为 agent fixture 来自后端测试模块。
+
+## 尚未验证
+
+**没有真实 LLM Key，也没有真实本地模型。** 未运行真实模型成功调用、模型
+科研质量评测、真实外网搜索成功链路或收费核对。模型可用性／兼容性需要在
+用户环境中选择实际 Model ID，通过工具调用测试后再用真实论文评估。
+
+本环境外部 DNS 不可用；没有绕过网络限制。没有干净虚拟环境公网安装测试、
+Docker 构建、多用户隔离、PDF 全文读取或任意代码执行验证。初次本地交付时没有推送远端。
+发布前在相同依赖下重新执行：92 项 Python 测试、20 项 JavaScript 测试和
+`npm run check` 均通过。新版远端 CI 请查看本提交对应的 GitHub Actions；
+旧版 CI 结果或本地测试不代表新版远端 CI 已通过。

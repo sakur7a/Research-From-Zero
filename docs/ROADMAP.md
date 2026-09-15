@@ -1,44 +1,47 @@
-# Roadmap
+# Roadmap · Agent-first
 
-先通过真实使用发现问题，不将规划功能包装成已完成。
+## Implemented in v0.2
 
-## v0.1.0 — 可体验闭环
+The unit of work is now a research task. The application includes a BYOK model
+gateway, dynamic tool-calling loop, read-only research tools, persistent task
+checkpoints, evidence-bound reports, a task-first UI and explicit import approval.
+The original library and data remain available; they are not a substitute for AI.
 
-已实现：文献 CRUD、研究方向、阅读状态、笔记、资源归属/声明依据、GitHub/HF 静态观测、版本/范围/限制、历史、候选外链、条件对比、分类关系图、CSL JSON 预览导入、JSON/BibTeX 导出、本地备份、离线测试。
+## Next acceptance milestone: one real research loop
 
-## P0 — 首轮体验反馈
+Run user-selected tool-capable models against a small, manually checked paper set
+before expanding infrastructure. Track official-resource precision, unsupported
+claims, source match, incomplete searches, provider failures, human correction,
+request/token usage and time. Record model, endpoint protocol, prompt version,
+search date and exact dataset. Do not turn protocol-fixture pass rates into
+research-quality claims.
 
-| 问题 | 验收方向 |
-|---|---|
-| 是否顺手 | 用自己的 10–20 篇论文完成导入、分类、筛选、加资源、查看证据 |
-| 真实接口可靠性 | 验证限流、国内/代理网络、arXiv 大响应、GitHub 空仓库和更名、HF gate；记录真值与检查时间 |
-| 是否减少核对工作 | 和人工检查同一批论文比较，分别看误报可用、漏检、unknown、时间与成本 |
-| 如何纠错 | 资源记录编辑/修订历史、人工复核附注、导入冲突管理，避免删后重建 |
-| 数据是否可带走 | 可恢复的 JSON 导入、往返测试、版本迁移及恢复演练 |
+The target task is: given a narrow topic and experimental requirements, find
+candidate papers, follow likely official repository/model links, compare code,
+weights/data/evaluation coverage, explain missing evidence, and let the user save
+the chosen papers with their provenance.
 
-## P1 — 经评测的资源发现与连接
+## Subsequent stages (not implemented)
 
-- 构建 50–100 篇带时间戳的人工资源真值集，按论文拆分评测；同时报告准确率、覆盖率、人工成本。
-- 资源更多托管适配器与代理设置；明确安全边界，不建立无约束 URL 代理。
-- 受预算约束的资源发现 agent：从论文作者声明与项目链接出发；验证归属，外链先作为候选。
-- Zotero Web API 只读增量同步与身份映射；再设计受控写回、预览、冲突处理。
-- 独立 PaperVersion / ResourceVersion 模型与迁移。
-- 可选、用户明确开启的定期复查；必须有取消、审计、成本和变化通知。
+| Stage | Work | Acceptance condition |
+|---|---|---|
+| Conversation and steering | Follow-up messages, editable plan/constraints, resume with explicit changed goals | Preserve prior sources, show changes, reauthorize added material/cost |
+| Fulltext reading | DOI/arXiv to licensed/OA fulltext, parsing, section/page evidence, supplementary material | No false claim of reading the full paper; locator-level evaluation |
+| Broader resource discovery | Safe webpage retrieval, more release/discussion adapters, author/resource identity verification | Measure incorrect official attribution and inaccessible/gated cases |
+| Structured resource verdicts | Separate declaration, accessibility, version match, coverage and execution depth | Every field cites evidence; uncertainty and human overrides persist |
+| Durable knowledge | Topic schemas, paper versions, claims/assumptions/method relations, retrieval memory | Trace each edge to a source and distinguish inference from author claims |
+| Zotero connection | Read-only incremental sync first, then previewed write-back | Identity/version conflict handling; never overwrite annotations silently |
+| Monitoring | Scheduled resource rechecks and user notifications | Explicit opt-in, cadence/budget, change evidence and unsubscribe |
+| Product scale | Authentication, encrypted secret store, separate worker/queue, database migrations, SSE | Multi-user access controls and durable worker ownership tested first |
 
-## P2 — 知识与理论结构
+## Architectural decisions
 
-- 领域模板：任务、输入输出、方法模块、约束、数据划分、实验协议。
-- 原文片段支撑的假设、主张、方法、证据结构；区分作者陈述、系统推断、人工确认。
-- 比较条件不一致时明确标注不可比，不拼接伪排行榜。
-- 只有经确认的关系进入知识图；分类图不能冒充理论图。
-- 可选受控运行验证，与静态核验分离，按用户目标报告验证深度。
+FastAPI and SQLite are retained because the product change is in orchestration,
+state, tool permissions, evidence and human approval, not a frontend framework
+name. The runtime is intentionally modular: a future LangGraph/other engine may
+replace orchestration without replacing library/provenance APIs. No dependency
+has been added merely to make the project appear agentic.
 
-## 明确非当前目标
-
-重做 Zotero/Word 引用插件、跨学科全量索引、自动验证所有证明、任意仓库自动执行、无认证的公网托管、多租户或直接给作者“开源信誉”评分。
-
-## 体验反馈模板
-
-记录：页面/操作、预期结果、实际结果、是否使用演示数据、应用版本。
-资源核验问题再记录：公开论文与资源链接、检查时间、你认为正确的状态和证据。
-不提交 token、数据库或私人笔记；截图先脱敏。
+Start with one good model configuration. Specialist agents, separate embedding
+models or a vector index need demonstrated quality/cost benefits before adoption.
+Do not start model training before evaluation identifies a need.

@@ -1,12 +1,14 @@
 {
   "name": "re0-web",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Dependency-free browser UI and native Node tests",
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "check": "node --check web/app.js && node --check web/core.js && node --check web/api.js"
+    "check": "node --check web/app.js && node --check web/core.js && node --check web/api.js && node --check web/agent.js && node --check web/agent-core.js"
   },
-  "engines": {"node": ">=20"}
+  "engines": {
+    "node": ">=20"
+  }
 }

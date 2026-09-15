@@ -1,0 +1,12 @@
+{
+  "mode": "offline Chromium + real TestClient + fixture HTTP; no live model",
+  "passed": [
+    "agent_home_no_mock_statistics_and_model_required",
+    "model_configuration_secret_not_returned_and_tool_protocol_test",
+    "real_runtime_model_tool_observation_loop_fixture_network",
+    "report_citations_open_real_task_evidence",
+    "human_approval_idempotent_import",
+    "mobile_layout_no_horizontal_overflow_and_history_access"
+  ],
+  "browser_errors": []
+}

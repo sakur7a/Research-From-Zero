@@ -1,146 +1,130 @@
 # Re0: Research From Zero
 
-从论文到实验：按方向组织文献，检查资源线索，为每次判断保留证据。
+**v0.2.0 · Agent-first · 本地单用户 Alpha。**
 
-**v0.1.0 · 本地单用户 Alpha。** 无需 LLM 密钥，不上传私人笔记，不执行论文仓库代码。自动检查目前是受限的静态检查，不是全网搜索 agent，也不代表成功复现。
+输入研究目标，由模型自主选择检索工具、阅读返回材料、补查资源并输出有来源的研究报告。文献库不再是主入口，而是研究结果的保存位置。**这不是把固定脚本包装成 agent，也没有在未配置模型时用演示结果冒充分析。**
 
-## 运行
+## 从一个问题开始
 
-需要 Python 3.11 或以上；本次在 Python 3.13 验证。运行前端不需要 Node.js、npm 安装或构建。
+例如：
+
+> 检索 Layout 生成相关论文，追查训练代码、checkpoint 和评测配置。区分作者声明与实际文件线索，列出证据不足的部分。
+
+运行中的任务会展示公开行动计划、真实工具事件、已获取证据、累计调用量。模型可以根据搜索结果改变后续行动，而不是只能按固定顺序调用一遍工具。最终每条发现必须引用本任务实际生成的证据 ID；**ID 有效不代表语义正确，结论仍需人工复核**。
+
+## 启动
+
+Python 3.11+。前端无需 Node.js、npm 安装或构建；基本依赖与 v0.1 相同。
 
 ```bash
 python -m venv .venv
 # macOS / Linux
 source .venv/bin/activate
-# Windows PowerShell 改用：.venv\Scripts\Activate.ps1
+# Windows PowerShell: .venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 python run.py
 ```
 
-浏览器打开 **http://127.0.0.1:8000**。服务启动后一直保留这个终端，按 Ctrl+C 停止。
+打开 `http://127.0.0.1:8000`，然后：
 
-首次启动为空库。点击「体验演示数据」可加入 6 条**虚构且有标记**的论文及资源状态，用来体验界面；它们不是对真实研究的判断，不执行真实网络核验。「数据与设置」可以只清除演示记录，不影响自行添加的论文。
+1. 点击「模型设置」，填写支持 **Chat Completions tool_calls** 的 Base URL、Model ID 和 API Key，确认接收端与材料发送范围。
+2. 保存并执行「测试工具调用」。这会发出一次真实模型请求，可能计费；不测试科研能力。
+3. 输入目标、确认发送材料后启动任务。没有模型配置时不能启动 AI 任务，但 `/library` 的旧文献库仍可单独使用。
+4. 查看报告与来源；候选论文仅在点击批准后写入文献库。可取消任务、导出结果，对失败／中断任务进行有限次数的手动恢复。
 
-## 现在可以做什么
+Base URL 通常包含 `/v1`，不要填写 `/chat/completions`；本地服务示例为 `http://127.0.0.1:11434/v1`。**具体模型必须支持工具调用**；不是任何聊天模型、厂商专有推理模式、原生 Messages/Responses API 都已适配。若供应商要求 `max_completion_tokens`，可在界面切换输出参数。此版不会自动切换到另一模型服务。
 
-| 功能 | 当前实现 |
-|---|---|
-| 文献库 | 新建、编辑、删除、关键词搜索、卡片/表格、多方向标签、阅读状态、笔记 |
-| 元数据导入 | 单条 DOI / arXiv ID 查询；导入前可修改。依赖 Crossref / arXiv 网络可用性 |
-| 资源管理 | 代码、权重、数据、评测、环境、演示链接；人工记录归属、发布声明及依据 |
-| GitHub 静态检查 | 默认分支提交、文件名线索、前 10 个 Release、README 内的候选资源链接 |
-| Hugging Face 检查 | 模型/数据集元数据、文件名、访问门槛、卡片许可证声明 |
-| 证据历史 | 保存检查时间、版本、检查范围、证据摘录、限制；重复检查追加历史 |
-| 对比与关系 | 选择 2–6 篇比较资源条件；方向—论文—资源的分类关系视图 |
-| Zotero 过渡导入 | 从 Zotero 导出的 CSL JSON 预览、逐条校验、保守去重后导入 |
-| 导出/备份 | JSON（包含笔记和历史）、BibTeX、SQLite 安全备份脚本 |
-
-关系视图**不包含自动提取的理论、引用或证明关系**。资源统计是记录统计，不是“复现率”或论文评分。
-
-### 建议先体验这条路径
-
-1. 加载演示，按「Layout 生成」筛选，选择两篇论文对比，打开某项资源的证据历史。
-2. 新建自己的论文，可手填或通过 DOI / arXiv 获取元数据，添加研究方向和笔记。
-3. 添加一个 GitHub **仓库首页**或 Hugging Face **模型/数据集首页**，点击静态检查，查看范围和限制。
-4. 从 Zotero 导出「CSL JSON」，在「数据与设置」预览后导入。初版最多 500 条、文件不超过 3 MiB。
-
-## 核验结果的语义
-
-- **元数据可读**：接口返回了元数据或文件清单；不代表文件已下载、脚本可运行或资源对应论文。
-- **需申请访问**：接口明确声明访问门槛；不等于链接失效或未发布。
-- **暂无法判断 / 访问失败**：可能是限流、权限、网络、404 或解析问题；不推断作者未开放。
-- **仅保存链接**：当前没有适配器，链接仍可保存，但不会由服务端访问。
-
-“用户标记官方”“声明已发布”均为用户输入，要求填写依据；自动检查不会把这些人工记录覆盖成机器结论。README 外链可能属于基线、依赖或相关工作，需要用户确认后添加，系统不会自动跟随。
-
-支持的自动检查链接示例：
+## v0.2 已实现的架构
 
 ```text
-https://github.com/<owner>/<repo>
-https://huggingface.co/<owner>/<model>
-https://huggingface.co/datasets/<owner>/<dataset>
+研究目标 / 显式授权 / 调用预算
+                │
+        Agent Runtime（可保存状态的执行循环）
+          ↕ 模型自主选择下一步
+        Model Gateway（用户自带模型配置）
+                │ tool_calls
+        Tool Registry（只读、受限网络工具）
+                │
+        Evidence Store + Task Checkpoints
+                │
+        结构化报告 → 用户批准 → 文献库
 ```
 
-不支持自动检查任意网页、GitHub 文件页、Hugging Face Spaces、网盘或自定义端口。只需保存它们时仍可作为资源记录使用。
+核心是自研的轻量 Python 执行循环，**没有使用 LangGraph、LangChain 或多模型编队**。FastAPI 负责 API，单个后台线程执行任务，SQLite 保存检查点／证据／历史，原生 ES modules 提供界面。一次仅执行一个研究任务，不支持多 worker 部署。模块和取舍见 [架构说明](docs/ARCHITECTURE.md)。
 
-## 数据与安全
+### 当前可调用的工具
 
-默认 SQLite 文件位于 `.data/re0.sqlite3`，重启不会丢失。**没有账号、认证、多用户隔离或加密存储；不要暴露到公网或不可信局域网。** 默认只监听 `127.0.0.1`。
+| 工具 | 实际范围 |
+|---|---|
+| `search_papers` / `resolve_paper` | arXiv、Crossref 的论文元数据与可用摘要；**不是全文阅读** |
+| `search_repositories` | GitHub 仓库搜索，名称匹配不代表官方实现 |
+| `search_hub` | Hugging Face 模型／数据集候选搜索 |
+| `inspect_resource` | 复用静态核验：版本、文件清单、README、有限 Release、候选外链 |
+| `read_repository_file` | 按解析到的 commit 读取有大小与行数上限的仓库文本；**不执行代码** |
+| `search_release_discussions` | 指定仓库的 GitHub Issue／PR 标题与正文搜索；不包含完整评论串 |
+| `search_library` | 仅在本任务授权后开放，排除笔记、附件和虚构演示数据 |
+| `search_web` | 可选 Tavily 搜索摘要；需要部署者配置 `TAVILY_API_KEY`，**不是任意网页抓取器** |
+| `update_plan` / `finish_report` | 更新公开行动计划、提交并校验结构化结果 |
 
-外部接口仅在明确查询元数据或点击检查时访问；元数据查询发送标识符，资源检查发送仓库标识符，不发送论文笔记或 PDF。本版不包含 PDF 上传。可选 GitHub token 只发送给 `api.github.com`，不进入数据库或浏览器。导出的 JSON 含笔记，请谨慎分享。
+未配置 Tavily 时，模型仍可搜索论文、GitHub 和 Hub，但不会得到一个假装能全网搜索的工具。模型可以继续检查支持的候选资源，网盘、任意项目主页、PDF 全文等尚未接入。
 
-请求使用固定提供商白名单、不跟随重定向、限制请求次数/时长/响应大小；只读取元数据、README 和文件清单，不下载大型权重、不安装远端依赖、不执行远端代码。完整边界见 [SECURITY.md](SECURITY.md)。
+### 状态与约束
 
-### 配置
+- 保留模型对话协议、待执行工具、已完成工具结果和证据。恢复时重用已提交结果；进程重启不会自动重发付费请求。
+- 默认每任务 12 次模型调用、20 次工具调用、每次运行 360 秒。恢复不重置累计调用数；最多手动恢复 3 次。
+- 超时／取消在工具边界生效，进行中的请求可能完成或计费。时间上限不是强制终止正在运行的网络请求；没有精确货币预算。
+- 输出记录服务端报告的 token 使用量；未返回 usage 或失败请求的实际费用不能据此推算。
+- 每条报告发现引用本任务证据，禁止跨任务或虚构 ID；不自动证明证据蕴含结论，也不验证模型的科研推理正确性。
+- agent 没有 shell、删除文献、修改配置、任意文件写入权限；论文入库是独立的显式批准接口。
 
-环境变量需要在启动前设置；`.env.example` **仅为示例，不会自动加载**。
+## 模型、密钥和数据
 
-| 变量 | 默认值 | 用途 |
-|---|---|---|
-| `RE0_DB` | 仓库下 `.data/re0.sqlite3` | 数据库路径 |
-| `RE0_HOST` | `127.0.0.1` | 监听地址；不要直接改成公网地址 |
-| `RE0_PORT` | `8000` | 本地端口 |
-| `GITHUB_TOKEN` | 空 | 可选，只用于 GitHub API；无 token 也可检查公开仓库，但更易限流 |
-| `RE0_ALLOWED_HOSTS` | 本地主机集合 | Host 校验；不是身份认证，不建议扩大 |
+网页填写的模型配置仅保留在**本地服务内存**；不会返回 API Key 到界面，不进入任务数据库、JSON 导出或 git。重启后需要重新设置，或通过启动前的环境变量配置。浏览器向本地后端提交 Key，后端再向选定的模型服务发送请求。
 
-当前网络客户端设置 `trust_env=False`，不读取环境中的代理配置。受限网络需要后续配置代理适配；连接失败只会保留失败证据，不会改判“未开源”。
+默认允许的远程模型主机：`api.openai.com`、`api.deepseek.com`、`dashscope.aliyuncs.com`、`dashscope-intl.aliyuncs.com`、`openrouter.ai`。远程必须 HTTPS；自定义域名需由部署者通过 `RE0_LLM_ALLOWED_HOSTS` 明确加入。这个列表是**网络目的地许可，不是已通过实测的模型兼容性清单**。本地服务允许 `127.0.0.1` / `[::1]` 加显式端口，Key 可以留空。
 
-### 安全备份
+| 环境变量 | 用途 |
+|---|---|
+| `RE0_LLM_BASE_URL` / `RE0_LLM_MODEL` / `RE0_LLM_API_KEY` | 启动时加载模型配置 |
+| `RE0_LLM_TOKEN_PARAMETER` | `max_tokens` 或 `max_completion_tokens`，默认前者 |
+| `RE0_LLM_ALLOWED_HOSTS` | 额外允许的远程模型域名，逗号分隔；不得交由模型修改 |
+| `TAVILY_API_KEY` | 可选全网搜索摘要服务，与模型 Key 不同 |
+| `GITHUB_TOKEN` | 可选 GitHub API 凭证，仅发往 GitHub API |
+| `RE0_DB` | SQLite 路径，默认仓库下 `.data/re0.sqlite3` |
+| `RE0_HOST` / `RE0_PORT` | 默认 `127.0.0.1:8000` |
 
-不要在应用运行时只复制 SQLite 主文件而忽略 WAL。使用标准库备份 API：
+`.env.example` 只是说明文件，**不自动加载**。环境配置启动后仍只保存在进程内存；从界面清除并不会删除 shell 环境变量，下一次启动可能重新加载。HTTP 客户端当前不读取系统代理变量。
+
+**本地部署不等于材料不出本机。** 执行任务会把目标、工具返回的公开材料、以及经授权的文献库元数据发送到你选择的模型服务。任务和证据在本地明文存储，导出也可能包含敏感研究主题。无登录、认证、多用户隔离或加密数据库，**不要直接暴露到公网或不可信局域网**。安全限制见 [SECURITY.md](SECURITY.md)。
+
+## 从 v0.1 升级
+
+没有删除或重建原论文表；新增独立版本的 agent 表。原文献、笔记、分类、静态检查记录均保留，旧界面移到 `/library`。
+
+先用旧版自带备份工具建立完整备份，再停止旧服务、替换代码、启动新版：
 
 ```bash
-python scripts/backup.py --output backups/re0-before-upgrade.sqlite3
+python scripts/backup.py --output backups/re0-before-agent.sqlite3
 ```
 
-输出文件存在时拒绝覆盖。恢复时先停止应用，然后用新的路径启动，避免覆盖已有库：
+不要覆盖 `.data` 或 `.env`。在另一个目录试用新版时，默认会创建另一个空库；要使用原库，设置 `RE0_DB` 为原 SQLite 文件的**绝对路径**，且不能让两个版本同时写同一文件。恢复时先停止服务，再指向备份路径；不需要破坏原文件。
 
-```bash
-# macOS / Linux；Windows 可先设置 $env:RE0_DB
-RE0_DB=backups/re0-before-upgrade.sqlite3 python run.py
-```
+SQLite 备份覆盖论文与 agent 所有表。文献库 JSON 导出不含 agent 任务；任务有独立导出，目前两者均不是一键还原格式。
 
-JSON 用于查看与转移数据结构，目前**没有 JSON 一键恢复入口**；完整恢复请使用 SQLite 备份。论文删除会级联删除其资源与历史，界面有确认，请先备份。
+v0.2 的基准是上游 `7ab5cedc67eb86f1aa3a3b900e67634abb52a881`。本提交发布先前交付的 agent 重构；已有仓库请先备份、停止服务，再执行 `git pull --ff-only origin main`。升级与原始补丁说明见 [交付说明](docs/DELIVERY.md)。
 
-## 测试与开发
+## 验证与边界
 
 ```bash
 python -m pip install -e '.[test]'
 python -m pytest
-# 可选，Node.js 20+；不需要 npm install
+# 开发测试需要 Node.js 20+，无需 npm install
 npm test
 npm run check
 ```
 
-可选浏览器测试：
+浏览器测试需另装 Playwright 和 Chromium，详见 [测试记录](docs/TESTING.md)。已用模拟模型／提供商响应测试真实执行循环和页面，不把 fixture 当成真实科研检索。**本次没有真实模型 Key，云端／本地模型成功调用、线上检索质量、Docker 构建均未实测。**
 
-```bash
-python -m pip install playwright
-python -m playwright install chromium
-python scripts/browser_smoke.py
-```
+下一步是用真实模型与真实论文评测这条闭环，再接入全文阅读、可补充目标的持续会话、Zotero 同步和更深层的理论结构。不要把本版称为已完成全学科 Deep Research 或自动理论验证。见 [开发路线](docs/ROADMAP.md)。
 
-已有 Chromium 时可用 `CHROMIUM_PATH` 指定。浏览器测试采用 **Chromium DOM + 真实 FastAPI TestClient 桥接**，不绕过运行环境的浏览器网络政策，也不冒充真实 TCP / 外网 / 部署端到端测试。详见 [测试记录](docs/TESTING.md)。
-
-## Docker（可选配置）
-
-```bash
-docker compose up --build
-```
-
-仅映射宿主机 `127.0.0.1:8000`，容器以非 root 身份运行，数据放入命名卷。**本次环境没有 Docker，配置未进行镜像构建验证。** 最先体验请使用上述 Python 启动方式。不要使用 `docker compose down -v`，除非明确要删除数据卷。
-
-## 仓库与后续开发
-
-远端仓库：`sakur7a/Research-From-Zero`。克隆后按上方 Python 步骤启动：
-
-```bash
-git clone https://github.com/sakur7a/Research-From-Zero.git re0
-cd re0
-```
-
-本地 ZIP 也包含相同应用源码。不要把 `.data`、笔记导出或密钥提交到仓库。
-
-下一阶段优先根据实际使用反馈改进：真实论文的资源审计评测、更多资源适配器、可恢复导入、Zotero 只读同步；再考虑受证据约束的 agent 和理论结构。见 [ROADMAP.md](docs/ROADMAP.md) 与 [架构说明](docs/ARCHITECTURE.md)。
-
-许可证尚未由项目所有者选择；不要仅因能看到源码就认为获得了开源授权。第三方依赖保持各自许可证。详见 [LICENSE-NOTICE.md](LICENSE-NOTICE.md)。
+许可证仍待项目所有者选择；公开可见的源码不自动授予开源使用许可。见 [LICENSE-NOTICE.md](LICENSE-NOTICE.md)。

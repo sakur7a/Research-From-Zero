@@ -1,0 +1,30 @@
+{
+  "version": "0.2.0",
+  "date": "2026-09-15",
+  "python": {
+    "tests": "92",
+    "failures": "0",
+    "errors": "0",
+    "skipped": "0"
+  },
+  "javascript": {
+    "tests": 20,
+    "failures": 0
+  },
+  "browser": {
+    "agent_workflow_groups": 6,
+    "library_regression_groups": 10,
+    "page_errors": 0,
+    "mode": "offline DOM + real TestClient; agent uses mocked model/provider HTTP"
+  },
+  "local_http": {
+    "paths": 7,
+    "expected_refusals": 3,
+    "mode": "actual loopback HTTP server"
+  },
+  "live_model_evaluated": false,
+  "live_external_search_evaluated": false,
+  "docker_built": false,
+  "remote_pushed": false,
+  "record_scope": "initial_local_delivery"
+}

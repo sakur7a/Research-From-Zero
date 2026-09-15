@@ -1,25 +1,80 @@
-# 安全边界
+# Security and privacy · v0.2
 
-re0 v0.1.0 是本地单用户原型，不是可直接上线的托管服务。
+## Deployment boundary
 
-## 不应做的事
+Re0 is an **unauthenticated, local, single-user Alpha**. Bind only to loopback.
+Do not expose it to the internet or untrusted LAN, even behind a bare reverse
+proxy. Host checks, JSON content type, same-origin checks and `X-Re0-Client` are
+CSRF/origin defenses, **not authorization**. Local software can still call the
+API. Run one process/worker per SQLite file.
 
-不要将服务暴露给公网或不可信局域网；不要在仓库提交 token、数据库、私人笔记、未发表论文或导出文件。本版没有身份认证、用户隔离、数据库加密或经过审计的生产安全保障。Host 检查和写入请求头不是登录机制。
+## Secrets and material flow
 
-不要把“元数据可读”理解为可复现，不要通过本应用执行陌生仓库的脚本。自动核验不会下载权重、加载模型、运行代码或跟随任意外链。
+Model settings entered in the browser are posted to the local backend and held
+in process memory. The API never returns the configured key; validation errors
+omit supplied values, and provider error bodies are suppressed. Keys are not
+stored in task tables, normal exports, frontend storage or repository files.
+Startup environment variables are supported but are not deleted by UI clear.
+Memory storage is not a defense against a compromised local OS or process dump.
 
-## 已实现的防护
+The selected LLM receives the user goal and tool-returned research material.
+Library metadata is sent only when explicitly authorized for that task; notes,
+attachments and fictional demo entries are excluded. Do not paste credentials,
+confidential unpublished work or sensitive personal data into goals without
+considering the selected provider's policies. Task text and evidence are stored
+locally in plaintext, and exports may be sensitive. No at-rest encryption or
+fine-grained retention controls are provided.
 
-自动请求只使用固定 HTTPS 提供商 API，URL 从受校验的标识符构建。拒绝任意主机、自定义端口、用户信息、非首页资源路径和重定向；不读取环境代理。每次资源检查最多 8 次请求、35 秒预算、单响应 2 MiB；最多同时检查两个资源。
+The model API credential is sent only to the user-selected allowed model
+endpoint. GitHub credentials go only to `api.github.com`; Tavily credentials go
+only to `api.tavily.com`. They are not available as model tools or tool arguments.
+No telemetry or automatic fallback sends material to another model provider.
+This is not a guarantee about the provider itself.
 
-写入要求 JSON 与自定义请求头，同源 Origin 校验、默认本地 Host 白名单、无 CORS 许可。所有用户字符串在渲染时转义，外链仅允许 HTTP(S)，设置 CSP、禁止嵌入、noreferrer 等头部。API 请求体限制 4 MiB。
+## Network and agent permissions
 
-GitHub token 只在服务端发往 `api.github.com`，不保存在数据库或返回浏览器。错误文案不回显底层异常里的潜在凭据。上游数据仍视为不可信；本版没有 LLM 提示词或工具执行链路。
+- Model endpoints require explicit trust. Remote destinations must be approved
+  HTTPS hostnames; defaults and deployment extension are listed in README.
+  Literal loopback endpoints need an explicit port. No URL credentials, fragments,
+  query parameters, encoded paths or automatic redirects are allowed.
+- HTTP clients ignore environment proxies and bound response sizes and durations.
+  Allowlisting is not TLS certificate pinning or full protection against a
+  compromised DNS/approved endpoint. Deployers must trust any host they add.
+- Research tools use fixed provider APIs. Arbitrary URL fetching, downloading
+  weights, PDF uploads, package installation, shells and source-code execution
+  are not available. Repository paths are validated; file reads are pinned to a
+  resolved commit and limited in size and line count.
+- Searches, excerpts and README content are untrusted **data**. The system prompt
+  tells the model not to follow instructions found there. More importantly, tool
+  schemas and runtime allowlists prevent it from acquiring write/shell/config
+  capabilities even when its judgment is influenced by prompt injection.
+- The agent cannot approve its own results. Import is a separate user action and
+  operates only on validated, tool-derived paper metadata. Existing DOI/arXiv
+  matches and notes are not overwritten. Deleting library data remains a separate
+  user-triggered operation in the retained library UI.
+- Safe text rendering and link scheme validation protect the UI. Model output is
+  not executed as HTML, JavaScript, Python or Markdown with embedded HTML.
 
-## 剩余风险
+These protections reduce privileges; they do **not** solve all prompt-injection
+or model-misinterpretation risks. A model can still be misled into poor searches
+or unsupported conclusions. Evidence-ID validation checks existence, not
+semantic entailment. Human verification is mandatory for scientific claims.
 
-本机同权限进程可访问数据库；本地 API 无身份认证。DNS、系统信任根、提供商及依赖的安全性仍依赖运行环境。仓库大文件树可能超过预算，超时/截断并非资源不存在。证据是摘录及响应指纹，不是具有法律效力的完整取证档案。
+## Cost, stop and persistence
 
-删除论文/资源会删除对应历史；数据可通过 SQLite 备份保留。JSON 导出包括私人笔记；公开分享前需要自行检查。正式部署前应补充认证、权限、隔离、迁移、审计、备份恢复演练及依赖扫描。
+Model/tool counts are reserved before requests and persist across manual resume.
+Stopping is cooperative: an ongoing API request may complete and incur cost.
+Timeouts apply at request/action boundaries; the task timer is not a hard global
+kill switch. Provider-reported usage is informational, not a guaranteed invoice.
+No automatic repeated paid retries, restart-resume or cross-provider failover.
 
-发现问题时，在项目所有者配置私密漏洞报告渠道之前，不要公开包含 token 或私人数据的复现材料。
+Task records and approved papers share the original SQLite file. Use
+`scripts/backup.py` rather than copying an active WAL database's main file alone.
+Back up before upgrading. Never commit `.data`, `.env`, credentials, exported
+private notes, live model responses or database files to GitHub.
+
+## Reporting
+
+Issue reports should include version, action, sanitized event/error text and
+reproduction steps. Remove keys, request headers, private goals and documents.
+Do not post a full database, environment file or unchecked task export publicly.
