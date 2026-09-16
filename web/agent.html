@@ -2,8 +2,10 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#19382e"><meta name="description" content="Re0 — 从研究问题到可追溯证据的科研 agent。">
+  <meta name="theme-color" content="#f7f5fa"><meta name="description" content="Re0 — 从研究问题到可追溯证据的科研 agent。">
+  <script>(function(){var t=null;try{t=localStorage.getItem('re0-theme');}catch(e){}if(t!=='light'&&t!=='dark')t='light';document.documentElement.dataset.theme=t;})();</script>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/theme.css">
   <link rel="stylesheet" href="/static/agent.css"><title>Re0 · 科研 Agent</title>
 </head>
 <body>
@@ -12,7 +14,7 @@
     <button class="mobile-history" data-action="history">历史</button><button class="new-task" data-action="new">＋ 新建研究任务</button>
     <nav aria-label="主要导航"><a class="selected" href="/">研究工作台 <span>Agent</span></a><a href="/library">文献与证据库 <span>↗</span></a></nav>
     <div class="section-label">最近的研究</div><div id="history"><p class="subtle">正在读取…</p></div>
-    <div class="side-bottom"><button data-action="settings" id="model-status">配置模型</button><div class="local-label">LOCAL WORKSPACE <span>v0.2</span></div></div>
+    <div class="side-bottom"><button class="theme-toggle" data-theme-toggle aria-label="切换主题"></button><button data-action="settings" id="model-status">配置模型</button><div class="local-label">LOCAL WORKSPACE <span>v0.2</span></div></div>
   </aside>
   <div class="shell"><header class="topbar"><span>科研 Agent <b>/</b> <span id="breadcrumb">新研究</span></span><button class="quiet" data-action="settings">模型与工具设置</button></header>
     <main id="workspace" tabindex="-1"><div class="loading">正在打开研究工作台…</div></main>

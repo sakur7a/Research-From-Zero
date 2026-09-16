@@ -1,6 +1,8 @@
 import {e, link, timeLabel} from './core.js';
+import {initTheme} from './theme.js';
 import {RUN_LABELS, TOOL_LABELS, SHIPPED_DEFAULTS, activeRun, budgetSummary, canResume, consentText, eventText, normalizeDefaults} from './agent-core.js';
 
+initTheme();
 const workspace = document.querySelector('#workspace');
 const settings = document.querySelector('#settings');
 let config = {}, runs = [], current = null, events = [], tab = 'trace', epoch = 0, timer, toastTimer;

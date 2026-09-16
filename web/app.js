@@ -1,5 +1,6 @@
 import {icon} from './icons.js';
 import {api} from './api.js';
+import {initTheme} from './theme.js';
 import {READING,KINDS,ACCESS,OWNERSHIP,CLAIMS,INDICATORS,e,link,paperInput,needsAttention,filteredPapers,counts,resourceStatus,timeLabel} from './core.js';
 
 const app = document.querySelector('#app');
@@ -72,7 +73,7 @@ function render() {
     <nav aria-label="研究方向">${state.topics.map((topic,i)=>`<button class="nav-item topic-nav ${state.topic===topic?'active':''}" data-topic="${e(topic)}"><span class="topic-dot color-${i%4}"></span><span>${e(topic)}</span><small>${state.papers.filter(p=>p.topics.includes(topic)).length}</small></button>`).join('')}</nav>
     <a href="/" class="nav-item">← 科研 Agent 工作台</a><div class="sidebar-bottom"><div class="local-note">${icon('leaf',20)}<strong>证据先于结论</strong><p>找到资源不等于可以复现。<br>每次判断，都留下依据。</p></div>
     <button class="nav-item" data-action="settings">${icon('settings')}<span>数据与设置</span></button><div class="sidebar-footer"><span class="online-dot"></span> 本地存储 <span>v0.2.0</span></div></div>
-  </aside><div class="workspace-main"><header class="topbar"><div class="breadcrumb">个人研究空间 <span>/</span> ${e(state.topic || {library:'文献库',audit:'待核验',compare:'论文对比',graph:'关系视图'}[state.view])}</div><div class="top-actions"><span class="local-badge">${icon('database',13)} LOCAL FIRST</span><button class="avatar" data-action="settings" aria-label="数据与设置">R</button></div></header>
+  </aside><div class="workspace-main"><header class="topbar"><div class="breadcrumb">个人研究空间 <span>/</span> ${e(state.topic || {library:'文献库',audit:'待核验',compare:'论文对比',graph:'关系视图'}[state.view])}</div><div class="top-actions"><span class="local-badge">${icon('database',13)} LOCAL FIRST</span><button class="theme-toggle" data-theme-toggle aria-label="切换主题"></button><button class="avatar" data-action="settings" aria-label="数据与设置">R</button></div></header>
   <main id="main"><div class="page-head"><div><div class="eyebrow">${state.view==='audit'?'RESOURCE VERIFICATION':state.view==='compare'?'SIDE BY SIDE':state.view==='graph'?'RESEARCH CONNECTIONS':'YOUR RESEARCH, CONNECTED'}</div><h1>${e(state.topic || {library:'每一篇论文，都有迹可循。',audit:'从资源线索，到检查证据。',compare:'把差异，放在同一张桌面上。',graph:'看见你的研究脉络。'}[state.view])}</h1><p>${e({library:'整理研究方向，核验代码与数据，让阅读真正走向实验。',audit:'保留未知，记录范围。这里没有未经验证的“已复现”。',compare:'对照研究版本与资源条件；不将不同实验协议的结果直接排名。',graph:'由已保存的方向、论文和资源生成；不是自动推断的理论关系图。'}[state.view])}</p></div><div class="page-actions">${button(icon('upload')+' 导入','import')}${button(icon('plus')+' 添加论文','add-paper',{primary:true})}</div></div>
   ${state.papers.some(p=>p.is_demo)?`<div class="demo-banner">${icon('info',16)}<span><strong>演示数据</strong> · 包含虚构论文和模拟核验记录，不可用于学术引用。</span><button data-action="clear-demo">清除演示</button></div>`:''}
   <div class="stats">${stat('文献总数',total.papers,'构建你的研究上下文','book')}${stat('研究方向',total.topics,'一篇论文，多个研究视角','layers')}${stat('待核验资源',total.pending,'未核验、访问失败或无法判断','shield')}${stat('Baseline 候选',total.baseline,'由你标记，不等于已复现','compare')}</div>
@@ -81,6 +82,7 @@ function render() {
   <div id="results"></div></section><footer class="page-footer"><span>re0 · 从零开始，积累可追溯的研究。</span><span>本地单用户预览版 · 无自动代码执行</span></footer></main></div>`;
   renderResults();
   bindShell();
+  initTheme();
 }
 function bindShell() {
   app.querySelectorAll('[data-nav]').forEach(node=>node.addEventListener('click',event=>{event.preventDefault();state.view=node.dataset.nav;state.topic='';state.query='';state.status='';render();}));

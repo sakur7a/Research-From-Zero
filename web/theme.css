@@ -1,0 +1,143 @@
+/* ==========================================================================
+   re0 · shared theme — Emilia palette (Re:0)
+   浅色 · 方案 A: bg #F7F5FA / primary #995FB4 / accent #28A878 / ink #332448
+   深色 · 方案 B: bg #1A1628 / primary #A274C2 / accent #32B886 / ink #E6E8F2
+   本文件由两个页面 (/ → agent.css, /library → styles.css) 共享，
+   页面 CSS 中不再出现硬编码色值，全部通过下列变量取值。
+   ========================================================================== */
+
+:root{
+  color-scheme: light;
+
+  /* surfaces · 中性面带一点薰衣草灰 */
+  --bg:#f7f5fa;
+  --paper:#ffffff;
+  --paper-2:#fbfafd;
+  --paper-3:#f2eef8;
+  --paper-4:#eae4f5;
+  --ink:#332448;
+  --ink-2:#6e6584;
+  --ink-3:#968fa9;
+  --ink-4:#b4afc4;
+  --line:#e5e0ef;
+  --line-2:#d4cce6;
+
+  /* brand · 艾米莉亚紫 */
+  --primary:#995fb4;
+  --primary-strong:#7d4a97;
+  --primary-soft:#f0e9f8;
+  --primary-line:#dcc9ec;
+  --on-primary:#ffffff;
+
+  /* accent · 宝石绿(银白发的陪衬) */
+  --accent:#28a878;
+  --accent-strong:#1d8561;
+  --accent-soft:#e3f4ec;
+  --accent-line:#bee4d2;
+
+  /* warning · 暖金 */
+  --warn-text:#8a7440;
+  --warn-soft:#f7f1e0;
+  --warn-line:#e9dcb8;
+
+  /* danger */
+  --danger:#a34438;
+  --danger-soft:#f8ece9;
+  --danger-line:#ebccc5;
+
+  /* sidebar · 深茄紫 */
+  --sidebar-bg:#251838;
+  --sidebar-text:#cfc9de;
+  --sidebar-muted:#8b83a3;
+  --sidebar-hover:#33254c;
+  --sidebar-line:#3f305a;
+  --sidebar-active-bg:#995fb4;
+  --sidebar-active-text:#ffffff;
+
+  /* topic dots */
+  --dot-1:#8fc7a8;
+  --dot-2:#c9a25e;
+  --dot-3:#8b9bd8;
+  --dot-4:#b48fce;
+
+  /* effects */
+  --shadow-color:rgba(37,24,56,.14);
+  --backdrop:rgba(26,16,40,.45);
+  --radius:12px;
+}
+
+[data-theme="dark"]{
+  color-scheme: dark;
+
+  --bg:#1a1628;
+  --paper:#241d33;
+  --paper-2:#2c2442;
+  --paper-3:#352c4d;
+  --paper-4:#403757;
+  --ink:#e6e8f2;
+  --ink-2:#b9b4d0;
+  --ink-3:#8f89ac;
+  --ink-4:#6c668c;
+  --line:#3b3354;
+  --line-2:#4e4469;
+
+  --primary:#a274c2;
+  --primary-strong:#b990d6;
+  --primary-soft:#37294f;
+  --primary-line:#584274;
+  --on-primary:#1a1628;
+
+  --accent:#32b886;
+  --accent-strong:#55d6a4;
+  --accent-soft:#1f3c31;
+  --accent-line:#2f5e49;
+
+  --warn-text:#d2b671;
+  --warn-soft:#39301c;
+  --warn-line:#5a4c2c;
+
+  --danger:#dc8779;
+  --danger-soft:#402723;
+  --danger-line:#603c34;
+
+  --sidebar-bg:#131022;
+  --sidebar-text:#c6c0da;
+  --sidebar-muted:#7e76a0;
+  --sidebar-hover:#241c3a;
+  --sidebar-line:#2e2648;
+  --sidebar-active-bg:#a274c2;
+  --sidebar-active-text:#ffffff;
+
+  --dot-1:#58a884;
+  --dot-2:#c9a25e;
+  --dot-3:#7c8cd4;
+  --dot-4:#a67cc4;
+
+  --shadow-color:rgba(0,0,0,.55);
+  --backdrop:rgba(6,3,14,.6);
+}
+
+/* ---------- shared polish ---------- */
+html{background:var(--bg)}
+body{background:var(--bg)}
+input,textarea,select{color:var(--ink);caret-color:var(--primary)}
+::placeholder{color:var(--ink-3);opacity:1}
+::selection{background:var(--primary-line);color:var(--ink)}
+*::-webkit-scrollbar{width:10px;height:10px}
+*::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:6px;border:2px solid transparent;background-clip:content-box}
+*::-webkit-scrollbar-thumb:hover{background:var(--ink-4);border:2px solid transparent;background-clip:content-box}
+*::-webkit-scrollbar-track{background:transparent}
+
+/* ---------- theme toggle button ---------- */
+.theme-toggle{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:30px;height:30px;border-radius:8px;flex-shrink:0;
+  color:var(--ink-3);transition:background .15s,color .15s;
+}
+.theme-toggle:hover{background:var(--paper-3);color:var(--primary)}
+.sidebar .theme-toggle,.side .theme-toggle{color:var(--sidebar-muted)}
+.sidebar .theme-toggle:hover,.side .theme-toggle:hover{background:var(--sidebar-hover);color:var(--sidebar-text)}
+.theme-toggle:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+.theme-toggle svg{transition:transform .25s}
+.theme-toggle:hover svg{transform:rotate(15deg)}
+@media(prefers-reduced-motion:reduce){.theme-toggle svg{transition:none}.theme-toggle:hover svg{transform:none}}
