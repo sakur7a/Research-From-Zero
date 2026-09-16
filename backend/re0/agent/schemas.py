@@ -31,12 +31,34 @@ class ModelConfig(StrictModel):
                 "storage": "server_memory", "protocol": "chat-completions-tools"}
 
 
-class TaskInput(StrictModel):
-    goal: str = Field(min_length=5, max_length=6000)
+BUDGET_FIELDS = ("max_model_calls", "max_tool_calls", "attempt_seconds", "use_library")
+
+
+class TaskDefaults(StrictModel):
+    """Workspace-wide defaults for new tasks. Never holds credentials."""
+
     max_model_calls: int = Field(default=12, ge=2, le=24)
     max_tool_calls: int = Field(default=20, ge=1, le=40)
     attempt_seconds: int = Field(default=360, ge=30, le=900)
     use_library: bool = False
+
+    def merged(self, task: "TaskInput") -> "TaskDefaults":
+        """A task may omit budgets; the stored workspace default then applies.
+
+        Explicit per-task values still win, so an existing client can keep
+        sending a narrower budget for one run.
+        """
+        supplied = {name: getattr(task, name) for name in BUDGET_FIELDS if getattr(task, name) is not None}
+        return self.model_copy(update=supplied)
+
+
+class TaskInput(StrictModel):
+    goal: str = Field(min_length=5, max_length=6000)
+    # None means "use the workspace default", not "unlimited".
+    max_model_calls: int | None = Field(default=None, ge=2, le=24)
+    max_tool_calls: int | None = Field(default=None, ge=1, le=40)
+    attempt_seconds: int | None = Field(default=None, ge=30, le=900)
+    use_library: bool | None = None
     consent_to_send: Literal[True]
 
 

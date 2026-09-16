@@ -69,12 +69,36 @@ def run(output):
         page.wait_for_function("document.querySelector('#notice').textContent.includes('测试通过')")
         page.locator('[data-action=close-settings]').click()
         checked.append('model_configuration_secret_not_returned_and_tool_protocol_test')
+        # Budgets and library permission live in settings, not in the task form.
+        assert page.locator('#task-form details.budget').count()==0
+        assert '文献库未授权' in page.locator('.budget-link').inner_text()
+        page.locator('.budget-link').click()
+        page.locator('#defaults-form').wait_for()
+        assert page.locator('#defaults-form [name=max_model_calls]').input_value()=='12'
+        page.locator('#defaults-form [name=max_tool_calls]').fill('14')
+        page.locator('#defaults-form [name=attempt_seconds]').fill('180')
+        page.locator('#defaults-form [name=use_library]').check()
+        page.screenshot(path=str(output/'agent-settings-panel.png'),full_page=True)
+        page.locator('#defaults-form [type=submit]').click()
+        page.wait_for_function("!document.querySelector('#settings').open")
+        saved=client.get('/api/agent/config').json()['task_defaults']
+        assert saved=={'max_model_calls':12,'max_tool_calls':14,'attempt_seconds':180,'use_library':True},saved
+        summary=page.locator('.budget-link').inner_text()
+        assert '工具 14 次' in summary and '单次 180 秒' in summary and '文献库已授权' in summary,summary
+        # Enabling the library must be stated in the per-task consent, not only in settings.
+        assert '本地文献库的书目与摘要' in page.locator('[name=consent_to_send]').locator('xpath=..').inner_text()
+        page.screenshot(path=str(output/'agent-settings-defaults.png'),full_page=True)
+        checked.append('task_budgets_and_library_permission_saved_from_settings')
         page.locator('[data-example="0"]').click()
         page.locator('[name=consent_to_send]').check()
         page.locator('#task-form [type=submit]').click()
         page.wait_for_function("document.querySelector('.status')?.textContent==='报告已生成'",timeout=15000)
         assert page.locator('.trace-row').count()>5
         checked.append('real_runtime_model_tool_observation_loop_fixture_network')
+        rid=client.get('/api/agent/runs').json()[0]['id']
+        inherited=client.get('/api/agent/runs/'+rid).json()['params']
+        assert (inherited['max_model_calls'],inherited['max_tool_calls'],inherited['attempt_seconds'],inherited['use_library'])==(12,14,180,True),inherited
+        checked.append('new_task_inherits_saved_workspace_defaults')
         page.get_by_role('tab',name='研究报告').click()
         page.get_by_role('heading',name='Fixture report').wait_for()
         assert page.locator('.citations button').count()==1

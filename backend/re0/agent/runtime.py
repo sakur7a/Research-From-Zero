@@ -18,11 +18,12 @@ from pydantic import ValidationError
 from ..models import now
 from ..providers import ProviderError
 from .model import ChatModel, ModelError, ModelVault
-from .schemas import ModelConfig, PlanArgs, Report, TaskInput
+from .schemas import ModelConfig, PlanArgs, Report, TaskDefaults, TaskInput
 from .storage import TaskStore
 from .tools import ResearchTools, specifications
 
 PROMPT_VERSION = "research-agent-v0.2-1"
+DEFAULTS_KEY = "task_defaults"
 SYSTEM = """你是 Re0 科研 agent。你要完成用户的科研任务，而不是只写行动建议。
 你可以自主、多轮使用工具检索、读仓库文本、追查资源、修订计划。先调用 update_plan 给出 2–6 步公开行动计划；随后根据真实工具结果决定下一步。
 不要输出私有思维过程，只在 update_plan 中写简短任务步骤。不要假装你已调用工具。
@@ -73,7 +74,22 @@ class AgentRuntime:
 
     def public(self):
         return {**self.vault.public(), "busy": self.busy(), "runtime": "native-durable-tool-loop",
-                "web_search_enabled": self.tools.web_enabled, "tool_names": [x["function"]["name"] for x in specifications(True, self.tools.web_enabled)]}
+                "web_search_enabled": self.tools.web_enabled, "task_defaults": self.task_defaults().model_dump(),
+                "tool_names": [x["function"]["name"] for x in specifications(True, self.tools.web_enabled)]}
+
+    def task_defaults(self) -> TaskDefaults:
+        """Stored workspace defaults for new tasks. Credentials are never stored here."""
+        stored = self.tasks.setting(DEFAULTS_KEY)
+        try:
+            return TaskDefaults(**stored)
+        except ValidationError:
+            # A hand-edited or legacy row must not stop the service or widen a budget.
+            return TaskDefaults()
+
+    def set_defaults(self, data: TaskDefaults):
+        """Applies to new tasks only. Already created tasks keep their saved budgets."""
+        self.tasks.save_setting(DEFAULTS_KEY, data.model_dump())
+        return self.public()
 
     def busy(self):
         with self._lock:
@@ -105,12 +121,15 @@ class AgentRuntime:
             if self._busy or self._stop.is_set():
                 raise HTTPException(409, "本地单用户版一次执行一个研究任务；请先停止当前任务")
             config = self.vault.snapshot()
-            state = {"messages": [{"role": "system", "content": SYSTEM + f"\n任务创建时间（UTC）：{now()}。文献库元数据授权：{params.use_library}。"},
+            budgets = self.task_defaults().merged(params)
+            # Persist resolved budgets: later default changes must not alter a saved task.
+            stored = {"goal": params.goal, "consent_to_send": True, **budgets.model_dump()}
+            state = {"messages": [{"role": "system", "content": SYSTEM + f"\n任务创建时间（UTC）：{now()}。文献库元数据授权：{budgets.use_library}。"},
                                   {"role": "user", "content": params.goal}],
                      "pending": [], "plan": [], "report": None, "model_calls": 0, "tool_calls": 0,
                      "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "unreported_calls": 0},
                      "resumes": 0, "prompt_version": PROMPT_VERSION, "reserved_tools": []}
-            rid = self.tasks.create(params.model_dump(), config.public(), state)
+            rid = self.tasks.create(stored, config.public(), state)
             self._launch(rid, config)
             return self.tasks.get(rid)
 

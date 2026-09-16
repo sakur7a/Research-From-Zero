@@ -3,7 +3,7 @@ from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
 from .model import ModelError
-from .schemas import Approval, ModelConfig, TaskInput
+from .schemas import Approval, ModelConfig, TaskDefaults, TaskInput
 
 
 def agent_router(runtime):
@@ -24,6 +24,11 @@ def agent_router(runtime):
     @router.post("/config/test")
     def test():
         return runtime.test_connection()
+
+    @router.put("/defaults")
+    def defaults(data: TaskDefaults):
+        # Workspace defaults for new tasks; not credentials, so they are readable again.
+        return runtime.set_defaults(data)
 
     @router.get("/runs")
     def tasks():

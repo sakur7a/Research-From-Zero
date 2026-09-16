@@ -4,3 +4,11 @@
 /* Hidden notifications must not extend the screenshot/page below the viewport. */
 #notice{visibility:hidden;pointer-events:none}
 #notice.show{visibility:visible;pointer-events:auto}
+/* Task budgets and library permission moved into settings; the composer keeps a one-line summary. */
+.composer-actions{display:flex;align-items:center;gap:16px}
+.budget-link{color:var(--muted);font-size:11px;text-align:right;text-decoration:underline;text-underline-offset:3px;text-decoration-color:var(--line)}
+.budget-link:hover{color:var(--green);text-decoration-color:currentColor}
+.defaults-block{margin-top:24px;padding-top:18px;border-top:1px solid var(--line)}
+.defaults-block h3{font-size:13px;font-weight:600;margin-bottom:6px}
+.defaults-block .budget-fields{margin:16px 0 4px}
+@media(max-width:800px){.composer-actions{gap:10px}.budget-link{text-align:left}}

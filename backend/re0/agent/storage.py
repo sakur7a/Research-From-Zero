@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS agent_imports (
  run_id TEXT NOT NULL REFERENCES agent_runs(id), evidence_id TEXT NOT NULL,
  paper_id TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(run_id, evidence_id)
 );
+CREATE TABLE IF NOT EXISTS agent_settings (
+ key TEXT PRIMARY KEY, value TEXT NOT NULL
+);
 """
 
 
@@ -73,6 +76,23 @@ class TaskStore:
     def list(self) -> list:
         with self.db.connect() as con:
             return [dict(row) for row in con.execute("SELECT id,created_at,updated_at,status,goal,error FROM agent_runs ORDER BY created_at DESC LIMIT 100")]
+
+    def setting(self, key: str) -> dict:
+        """Workspace-level setting row. Missing or unreadable values return {}."""
+        with self.db.connect() as con:
+            row = con.execute("SELECT value FROM agent_settings WHERE key=?", (key,)).fetchone()
+        if row is None:
+            return {}
+        try:
+            stored = json.loads(row[0])
+        except ValueError:
+            return {}
+        return stored if isinstance(stored, dict) else {}
+
+    def save_setting(self, key: str, value: dict) -> dict:
+        with self.db.connect() as con:
+            con.execute("INSERT OR REPLACE INTO agent_settings(key,value) VALUES(?,?)", (key, encode(value)))
+        return value
 
     def checkpoint(self, rid, state, status=None, error=""):
         with self.db.connect() as con:

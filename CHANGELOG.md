@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased — task budgets and permissions move into settings
+
+- Move the task budget limits and the library-metadata permission out of the
+  new-task form and into the settings dialog. The composer now shows a one-line
+  summary and a link back to settings, so the start of a task has one fewer
+  collapsed block to read.
+- Add workspace defaults for new tasks, stored in the same SQLite database
+  (`agent_settings`) so they survive a restart. New route: `PUT /api/agent/defaults`;
+  new keys in `GET /api/agent/config`.
+- An omitted budget field now resolves to the stored default instead of a
+  hardcoded constant. An explicit per-task value still wins, and a task keeps its
+  own saved limits when the workspace default changes later.
+- The per-task consent text names local-library bibliographic material whenever
+  that permission is enabled, so the scope of what leaves the machine stays
+  explicit at the moment of starting a task.
+- Clearing the in-memory model configuration no longer resets workspace defaults;
+  `DELETE /api/agent/config` remains scoped to the model credential.
+- Tests: 96 Python and 24 JavaScript tests plus JavaScript syntax checks.
+
 ## 0.2.0 — 2026-09-15 — Agent-first refactor
 
 - Make `/` a research task workbench; move the retained library to `/library`.

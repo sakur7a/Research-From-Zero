@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from re0.main import create_app
 from re0.models import PaperInput
 from re0.agent.model import ChatModel, ModelError, validate_endpoint
-from re0.agent.schemas import ModelConfig, TaskInput, PaperSearchArgs, FileArgs, SearchArgs, HubSearchArgs
+from re0.agent.schemas import ModelConfig, TaskDefaults, TaskInput, PaperSearchArgs, FileArgs, SearchArgs, HubSearchArgs
 from re0.agent.tools import ResearchTools, specifications
 
 CONFIG = {"base_url": "https://api.openai.com/v1", "model": "fixture-model", "api_key": "sk-test-do-not-persist", "trust_endpoint": True}
@@ -325,3 +325,47 @@ def test_import_existing_paper_never_overwrites_notes(tmp_path):
         assert response['paper_id']==old['id'] and not response['created']
         saved=c.get('/api/papers/'+old['id']).json()
         assert saved['title']=='My actual title' and saved['notes']=='Keep my notes'
+
+
+def test_omitted_task_budgets_fall_back_to_workspace_defaults():
+    defaults=TaskDefaults(max_model_calls=6,max_tool_calls=9,attempt_seconds=120,use_library=True)
+    inherited=defaults.merged(TaskInput(goal='检索 layout 论文与资源',consent_to_send=True))
+    assert inherited.model_dump()=={'max_model_calls':6,'max_tool_calls':9,'attempt_seconds':120,'use_library':True}
+    # An explicit per-task value still wins, including an explicit False.
+    narrowed=defaults.merged(TaskInput(goal='检索 layout 论文与资源',consent_to_send=True,max_tool_calls=3,use_library=False))
+    assert narrowed.max_tool_calls==3 and narrowed.use_library is False and narrowed.max_model_calls==6
+
+
+def test_saved_defaults_persist_and_are_applied_to_new_tasks(tmp_path):
+    network=FixtureNetwork();path=str(tmp_path/'defaults.sqlite3')
+    with TestClient(create_app(path,httpx.MockTransport(network)),headers=HEADERS) as c:
+        assert c.get('/api/agent/config').json()['task_defaults']=={'max_model_calls':12,'max_tool_calls':20,'attempt_seconds':360,'use_library':False}
+        saved=c.put('/api/agent/defaults',json={'max_model_calls':5,'max_tool_calls':4,'attempt_seconds':120,'use_library':True})
+        assert saved.status_code==200
+        assert saved.json()['task_defaults']['attempt_seconds']==120
+        c.put('/api/agent/config',json=CONFIG)
+        run=c.post('/api/agent/runs',json=GOAL).json()
+        assert (run['params']['max_model_calls'],run['params']['max_tool_calls'],run['params']['attempt_seconds'])==(5,4,120)
+        assert run['params']['use_library'] is True
+        assert wait_done(c,run['id'])['status']=='completed'
+    # A later process on the same database must keep the saved defaults.
+    with TestClient(create_app(path,httpx.MockTransport(network)),headers=HEADERS) as c:
+        assert c.get('/api/agent/config').json()['task_defaults']['max_tool_calls']==4
+
+
+def test_defaults_reject_invalid_values_without_changing_the_saved_row(client):
+    for payload in ({'max_model_calls':99},{'max_tool_calls':0},{'attempt_seconds':10},{'max_model_calls':6,'unknown':1}):
+        assert client.put('/api/agent/defaults',json=payload).status_code==422
+    assert client.get('/api/agent/config').json()['task_defaults']['max_model_calls']==12
+
+
+def test_clearing_model_memory_keeps_defaults_and_never_echoes_the_key(client):
+    client.put('/api/agent/config',json=CONFIG)
+    response=client.put('/api/agent/defaults',json={'max_model_calls':8,'use_library':True})
+    assert response.status_code==200 and CONFIG['api_key'] not in response.text
+    client.request('DELETE','/api/agent/config',json={})
+    remaining=client.get('/api/agent/config').json()
+    assert remaining['configured'] is False
+    # Clearing the in-memory model must not silently reset workspace policy.
+    assert remaining['task_defaults']=={'max_model_calls':8,'max_tool_calls':20,'attempt_seconds':360,'use_library':True}
+    assert CONFIG['api_key'] not in client.get('/api/agent/config').text

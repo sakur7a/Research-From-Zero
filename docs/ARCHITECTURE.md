@@ -45,7 +45,9 @@ web/agent.html + agent.js        web/index.html + app.js
 
 ## Loop, not a predetermined chain
 
-1. Save goal, permissions, limits, public model configuration and initial messages.
+1. Resolve any omitted budget field against the workspace defaults, then save the
+   goal, permissions, the **resolved** limits (so a later default change cannot
+   alter a saved task), public model configuration and initial messages.
 2. Reserve a model-call count **before** I/O and checkpoint it.
 3. Ask the model for normal assistant/tool-call output; do not request or persist
    provider-specific hidden reasoning fields. Ordinary assistant/tool messages
@@ -74,7 +76,10 @@ The original `schema_version=1` tables are unchanged. Independent
 - `agent_events`: append-only public operational event records, not private reasoning;
 - `agent_evidence`: provider-derived documents with source locator, time and tool;
 - `agent_tool_results`: idempotent replay by `(run_id, call_id)`;
-- `agent_imports`: idempotent mapping from approved evidence to a library item.
+- `agent_imports`: idempotent mapping from approved evidence to a library item;
+- `agent_settings`: workspace-level defaults (task budgets, library permission).
+  Contains no credentials and is deliberately independent of the in-memory model
+  config, so clearing the model does not reset workspace policy.
 
 An HTTP server process owns **one** worker. Do not run Uvicorn with multiple
 workers or two application processes against the same task database. There is no
@@ -116,8 +121,11 @@ Agent-generated URLs never become unrestricted HTTP destinations. Repository fil
 reads resolve the requested ref to a commit and return bounded text, not code
 execution. GitHub token, Tavily token and model token are separately scoped.
 
-Library metadata tools are absent unless consented for that task; notes and demo
-records are excluded even with consent. Tools never see the model config or key.
+Library metadata tools are absent unless the task carries the library permission.
+That flag now defaults from the workspace setting and the per-task consent text
+names local-library material whenever it is on, so the scope of what leaves the
+machine is stated at the moment the task starts. Notes and demo records are
+excluded even when consented. Tools never see the model config or key.
 The model has no approval, configuration-write, library-delete or shell tool.
 
 ## HTTP interface
@@ -127,10 +135,11 @@ All write endpoints preserve the original JSON, same-origin and
 
 | Route | Purpose |
 |---|---|
-| `GET /api/agent/config` | Redacted config, capabilities, busy status |
+| `GET /api/agent/config` | Redacted config, capabilities, task defaults, busy status |
 | `PUT /api/agent/config` | Explicitly trusted model settings, memory only |
 | `DELETE /api/agent/config` | Clear in-memory settings (not shell environment) |
 | `POST /api/agent/config/test` | One potentially billed tool-call capability test |
+| `PUT /api/agent/defaults` | Workspace budgets and library permission for **new** tasks |
 | `GET, POST /api/agent/runs` | Last 100 tasks / start a task |
 | `GET /api/agent/runs/{id}` | Status, plan, report, source evidence and usage |
 | `GET /api/agent/runs/{id}/events?after=...` | Incremental public event records |

@@ -1,5 +1,5 @@
 import {e, link, timeLabel} from './core.js';
-import {RUN_LABELS, TOOL_LABELS, activeRun, canResume, eventText} from './agent-core.js';
+import {RUN_LABELS, TOOL_LABELS, SHIPPED_DEFAULTS, activeRun, budgetSummary, canResume, consentText, eventText, normalizeDefaults} from './agent-core.js';
 
 const workspace = document.querySelector('#workspace');
 const settings = document.querySelector('#settings');
@@ -28,15 +28,15 @@ function sidebar() {
 }
 function home(goal = '') {
   epoch++; clearTimeout(timer); current = null; events = []; sidebar();
+  const defaults = normalizeDefaults(config.task_defaults);
   document.querySelector('#breadcrumb').textContent = '新研究';
   workspace.innerHTML = `<section class="home"><div class="eyebrow">AN AGENT FOR YOUR NEXT DISCOVERY</div>
     <h1>从一个问题，<br>开始研究<span>。</span></h1>
     <p class="lead">让 agent 检索文献、追查资源、整理证据。<br>你决定研究目标，也保留对结论的判断。</p>
     ${!config.configured ? '<div class="setup-note"><span>开始前，需要连接你自己的模型。</span><button class="text-button" data-action="settings">配置模型 →</button></div>' : ''}
     <form id="task-form" class="composer"><label class="sr-only" for="goal">研究目标</label><textarea id="goal" name="goal" minlength="5" maxlength="6000" rows="5" placeholder="描述你的研究问题、筛选条件，以及希望得到的结果…" required>${e(goal)}</textarea>
-      <div class="composer-footer"><span><i class="dot"></i> 自主检索 · 证据可追溯 · 入库需确认</span><button class="primary" type="submit" ${!config.configured || config.busy ? 'disabled' : ''}>开始研究 ↗</button></div>
-      <details class="budget"><summary>任务预算与数据权限</summary><div class="budget-fields"><label>模型调用上限<input type="number" name="max_model_calls" min="2" max="24" value="12" required></label><label>工具调用上限<input type="number" name="max_tool_calls" min="1" max="40" value="20" required></label><label>本次执行窗口（秒）<input type="number" name="attempt_seconds" min="30" max="900" value="360" required></label></div><label class="check"><input type="checkbox" name="use_library">允许检索并发送本地文献的书目、摘要与方向；不包括私人笔记和附件。</label></details>
-      <label class="check consent"><input type="checkbox" name="consent_to_send" required>我同意将任务及检索到的材料发送至所配置的模型服务，并承担相应调用费用。</label>
+      <div class="composer-footer"><span><i class="dot"></i> 自主检索 · 证据可追溯 · 入库需确认</span><div class="composer-actions"><button type="button" class="budget-link" data-action="settings">${e(budgetSummary(defaults))}</button><button class="primary" type="submit" ${!config.configured || config.busy ? 'disabled' : ''}>开始研究 ↗</button></div></div>
+      <label class="check consent"><input type="checkbox" name="consent_to_send" required>${e(consentText(defaults))}</label>
     </form>
     <div class="example-heading">从这些研究任务开始 <span>示例提示，不是预置研究结果</span></div><div class="examples">${examples.map(([title,text],i) => `<button data-example="${i}"><small>0${i+1} / ${e(title)}</small><p>${e(text)}</p><span>使用这个问题 ↗</span></button>`).join('')}</div>
     <div class="scope"><strong>当前能力边界</strong><p>检索论文元数据与摘要，阅读仓库文本，核查资源线索。不会自动读取 PDF 全文、执行陌生代码或认定论文已复现。${config.web_search_enabled ? '公开网页搜索已配置。' : '未配置 Tavily 时，只使用论文与资源平台搜索，不冒充全网检索。'}</p></div>
@@ -93,7 +93,8 @@ function poll(token) {
   },1400);
 }
 function openSettings() {
-  settings.innerHTML=`<div class="dialog-header"><div><div class="eyebrow">MODEL CONNECTION</div><h2 id="settings-title">你的模型，你的研究</h2></div><button class="close" data-action="close-settings" aria-label="关闭设置">×</button></div><p class="subtle">使用支持 Chat Completions 工具调用的服务。API Key 只放在本地服务进程内存；重启后重新输入，或用环境变量配置。</p>
+  const defaults = normalizeDefaults(config.task_defaults);
+  settings.innerHTML=`<div class="dialog-header"><div><div class="eyebrow">LOCAL WORKSPACE SETTINGS</div><h2 id="settings-title">模型与任务设置</h2></div><button class="close" data-action="close-settings" aria-label="关闭设置">×</button></div><p class="subtle">使用支持 Chat Completions 工具调用的服务。API Key 只放在本地服务进程内存；重启后重新输入，或用环境变量配置。</p>
     <form id="model-form" autocomplete="off"><label>接口地址预设<select id="preset"><option value="">选择接口形状（不代表已验证所有模型）</option><option value="https://api.openai.com/v1">OpenAI-compatible / OpenAI</option><option value="https://api.deepseek.com/v1">DeepSeek-compatible</option><option value="https://dashscope.aliyuncs.com/compatible-mode/v1">DashScope-compatible</option><option value="http://127.0.0.1:11434/v1">本地服务 / 127.0.0.1:11434</option></select></label>
     <label>API Base URL<input name="base_url" id="base-url" type="url" value="${e(config.base_url || '')}" placeholder="https://api.example.com/v1" required></label><p class="field-note">只接受预设可信域名和显式端口的回环地址。自定义域名需设置 RE0_LLM_ALLOWED_HOSTS。</p>
     <label>Model ID<input name="model" value="${e(config.model || '')}" placeholder="填写你实际可用且支持工具调用的模型 ID" required maxlength="150"></label>
@@ -101,6 +102,10 @@ function openSettings() {
     <div class="settings-grid"><label>输出预算参数<select name="token_parameter"><option value="max_tokens" ${config.token_parameter==='max_tokens'?'selected':''}>max_tokens</option><option value="max_completion_tokens" ${config.token_parameter==='max_completion_tokens'?'selected':''}>max_completion_tokens</option></select></label><label>单次输出 Token 上限<input name="max_output_tokens" type="number" value="${config.max_output_tokens || 3000}" min="256" max="8192" required></label></div>
     <label class="check"><input type="checkbox" name="trust_endpoint" required>我信任此模型服务，并同意将任务材料发送到这个地址。</label><div class="dialog-actions"><button type="button" class="quiet" data-action="clear-model">清除内存配置</button><button type="submit" class="primary">保存配置</button></div></form>
     <div class="connection-test"><button class="button" data-action="test-model" ${config.configured?'':'disabled'}>测试工具调用</button><span>会发起一次模型请求，可能计费；测试不包含文献数据。</span></div>
+    <div class="defaults-block"><h3>任务预算与数据权限</h3><p class="field-note">新建任务时自动应用。已创建的任务保留自己的预算，不受此处修改影响。</p>
+    <form id="defaults-form"><div class="budget-fields"><label>模型调用上限<input type="number" name="max_model_calls" min="2" max="24" value="${defaults.max_model_calls}" required></label><label>工具调用上限<input type="number" name="max_tool_calls" min="1" max="40" value="${defaults.max_tool_calls}" required></label><label>单次执行窗口（秒）<input type="number" name="attempt_seconds" min="30" max="900" value="${defaults.attempt_seconds}" required></label></div>
+    <label class="check"><input type="checkbox" name="use_library" ${defaults.use_library ? 'checked' : ''}>允许 agent 检索并发送本地文献库的书目、摘要与方向；不包括私人笔记和附件。启用后，新建任务的同意项会一并写明文献库材料将发送到模型服务。</label>
+    <div class="dialog-actions"><button type="button" class="quiet" data-action="reset-defaults">恢复初始默认</button><button type="submit" class="primary">保存默认值</button></div></form></div>
     <div class="scope"><strong>其他工具凭证</strong><p>GitHub token 和 Tavily 搜索 Key 通过服务器环境变量配置。网页搜索：${config.web_search_enabled?'已配置':'未配置（仍可搜索论文、GitHub、Hugging Face）'}。首版不支持任意网页全文抓取或 PDF 阅读。</p></div>`;
   settings.showModal();
 }
@@ -123,6 +128,11 @@ document.addEventListener('click', async event => {
       case 'new': await refreshHistory();home();break;
       case 'settings': config=await api('/config');openSettings();break;
       case 'close-settings':settings.close();break;
+      case 'reset-defaults':{
+        const form=document.querySelector('#defaults-form');
+        for(const [name,value] of Object.entries(SHIPPED_DEFAULTS)){const field=form.elements[name];if(!field)continue;if(field.type==='checkbox')field.checked=value;else field.value=value;}
+        notice('已填入初始默认值；点击「保存默认值」后生效。');break;
+      }
       case 'clear-model':config=await api('/config',{},'DELETE');settings.close();sidebar();if(!current)home();notice('内存中的模型配置已清除。');break;
       case 'test-model':button.disabled=true;await api('/config/test',{});notice('工具调用测试通过；不代表科研效果已评测。');button.disabled=false;break;
       case 'cancel':await api('/runs/'+current.id+'/cancel',{});notice('已请求停止，将在当前调用结束或超时后生效。');break;
@@ -132,14 +142,18 @@ document.addEventListener('click', async event => {
 });
 document.addEventListener('change', event=>{if(event.target.id==='preset'&&event.target.value)document.querySelector('#base-url').value=event.target.value;});
 document.addEventListener('submit', async event=>{
-  if(!['task-form','model-form'].includes(event.target.id))return;
+  if(!['task-form','model-form','defaults-form'].includes(event.target.id))return;
   event.preventDefault();const form=event.target, data=new FormData(form), button=form.querySelector('[type=submit]');button.disabled=true;
   try {
     if(form.id==='model-form') {
       config=await api('/config',{base_url:data.get('base_url'),model:data.get('model'),api_key:data.get('api_key'),trust_endpoint:data.has('trust_endpoint'),token_parameter:data.get('token_parameter'),max_output_tokens:Number(data.get('max_output_tokens'))},'PUT');
       form.querySelector('[name=api_key]').value='';settings.close();sidebar();if(!current)home(document.querySelector('#goal')?.value || '');notice('配置已保存到进程内存。建议先测试工具调用。');
+    } else if(form.id==='defaults-form') {
+      config=await api('/defaults',{max_model_calls:Number(data.get('max_model_calls')),max_tool_calls:Number(data.get('max_tool_calls')),attempt_seconds:Number(data.get('attempt_seconds')),use_library:data.has('use_library')},'PUT');
+      settings.close();sidebar();if(!current)home(document.querySelector('#goal')?.value || '');notice('任务默认值已保存；只影响之后新建的任务。');
     } else {
-      const r=await api('/runs',{goal:data.get('goal'),max_model_calls:Number(data.get('max_model_calls')),max_tool_calls:Number(data.get('max_tool_calls')),attempt_seconds:Number(data.get('attempt_seconds')),use_library:data.has('use_library'),consent_to_send:data.has('consent_to_send')});
+      const defaults=normalizeDefaults(config.task_defaults);
+      const r=await api('/runs',{goal:data.get('goal'),max_model_calls:defaults.max_model_calls,max_tool_calls:defaults.max_tool_calls,attempt_seconds:defaults.attempt_seconds,use_library:defaults.use_library,consent_to_send:data.has('consent_to_send')});
       await refreshHistory();await selectRun(r.id);
     }
   }catch(err){notice(err.message);}finally{button.disabled=false;}
