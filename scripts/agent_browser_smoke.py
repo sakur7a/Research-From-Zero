@@ -25,7 +25,7 @@ def run(output):
     checked,errors=[],[]
     for key in ['RE0_LLM_MODEL','RE0_LLM_API_KEY','RE0_LLM_BASE_URL','TAVILY_API_KEY']:
         os.environ.pop(key,None)
-    with tempfile.TemporaryDirectory() as temp, TestClient(create_app(str(Path(temp)/'browser.sqlite3'),httpx.MockTransport(FixtureNetwork()))) as client, sync_playwright() as engine:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp, TestClient(create_app(str(Path(temp)/'browser.sqlite3'),httpx.MockTransport(FixtureNetwork()))) as client, sync_playwright() as engine:
         opts={'headless':True}
         if os.getenv('CHROMIUM_PATH'):opts['executable_path']=os.environ['CHROMIUM_PATH']
         browser=engine.chromium.launch(**opts)
@@ -41,11 +41,11 @@ def run(output):
         html=(ROOT/'web/agent.html').read_text()
         html=re.sub(r'<link[^>]+>','',html)
         html=re.sub(r'<script[^>]*>.*?</script>','',html,flags=re.S)
-        html=html.replace('</head>','<style>'+(ROOT/'web/agent.css').read_text()+'</style></head>')
+        html=html.replace('</head>','<style>'+(ROOT/'web/theme.css').read_text()+'\n'+(ROOT/'web/agent.css').read_text()+'</style></head>')
         page.set_content(html)
         page.evaluate('''()=>{window.fetch=async(path,options={})=>{const r=await window.re0TestRequest(path,{method:options.method||'GET',headers:options.headers||{},body:options.body});return new Response(r.body,{status:r.status,headers:{'Content-Type':'application/json'}});};}''')
         js=[]
-        for name in ['core.js','agent-core.js','agent.js']:
+        for name in ['core.js','agent-core.js','theme.js','agent.js']:
             text=(ROOT/'web'/name).read_text()
             text=re.sub(r'^import .*?;\n','',text,flags=re.M)
             text=re.sub(r'\bexport (?=(?:async )?(?:function|const|let|class))','',text)
@@ -127,10 +127,11 @@ def run(output):
         page.get_by_role('heading',name=re.compile('从一个问题')).wait_for()
         page.screenshot(path=str(output/'agent-home-mobile.png'),full_page=True)
         assert not errors,errors
+        # 先落盘/打印报告再关闭浏览器:个别环境在浏览器进程回收阶段会中断,结果不应丢失。
+        result={'mode':'offline Chromium + real TestClient + fixture HTTP; no live model','passed':checked,'browser_errors':errors}
+        (output/'agent-browser-report.json').write_text(json.dumps(result,indent=2,ensure_ascii=False))
+        print(json.dumps(result,ensure_ascii=False,indent=2))
         browser.close()
-    result={'mode':'offline Chromium + real TestClient + fixture HTTP; no live model','passed':checked,'browser_errors':errors}
-    (output/'agent-browser-report.json').write_text(json.dumps(result,indent=2,ensure_ascii=False))
-    print(json.dumps(result,ensure_ascii=False,indent=2))
 
 
 if __name__=='__main__':

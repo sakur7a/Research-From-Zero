@@ -29,7 +29,7 @@ def run(output_dir: Path):
     requests = []
     def no_network(request):
         raise AssertionError("Offline browser test must not contact external providers")
-    with tempfile.TemporaryDirectory() as temp, TestClient(create_app(str(Path(temp)/"browser.sqlite3"), httpx.MockTransport(no_network))) as client, sync_playwright() as engine:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp, TestClient(create_app(str(Path(temp)/"browser.sqlite3"), httpx.MockTransport(no_network))) as client, sync_playwright() as engine:
         launch = {"headless": True}
         executable = os.getenv("CHROMIUM_PATH")
         if executable:
@@ -43,14 +43,14 @@ def run(output_dir: Path):
             response = client.request(options.get("method", "GET"), path, headers=options.get("headers"), content=options.get("body"))
             return {"status": response.status_code, "body": response.text}
         page.expose_function("re0TestRequest", request_bridge)
-        css = (ROOT/"web/styles.css").read_text()
+        css = (ROOT/"web/theme.css").read_text()+"\n"+(ROOT/"web/styles.css").read_text()
         page.set_content('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>'+css+'</style></head><body><div id="app"></div><div id="overlays"></div><div id="toasts" role="status" aria-live="polite"></div></body></html>')
         page.evaluate('''() => { window.fetch = async (path, options = {}) => {
           const result = await window.re0TestRequest(path, {method:options.method||'GET',headers:options.headers||{},body:options.body});
           return new Response(result.status===204?null:result.body, {status:result.status,headers:{'Content-Type':'application/json'}});
         }; }''')
         js = []
-        for name in ["icons.js", "core.js", "api.js", "app.js"]:
+        for name in ["icons.js", "core.js", "api.js", "theme.js", "app.js"]:
             text = (ROOT/"web"/name).read_text()
             text = re.sub(r"^import .*?;\n", "", text, flags=re.M)
             text = re.sub(r"\bexport (?=(?:async )?(?:function|const|let|class))", "", text)
@@ -152,10 +152,11 @@ def run(output_dir: Path):
         assert page.locator('.drawer').bounding_box()['width'] <= 390
         completed.append("mobile_layout_and_detail")
         assert not errors, errors
+        # 先落盘/打印报告再关闭浏览器:个别环境在浏览器进程回收阶段会中断,结果不应丢失。
+        report={'mode':'offline Chromium DOM + real FastAPI TestClient bridge','browser_network_tested':False,'external_network_tested':False,'completed':completed,'page_errors':errors}
+        (output_dir/'browser-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
+        print(json.dumps(report,ensure_ascii=False,indent=2))
         browser.close()
-    report={'mode':'offline Chromium DOM + real FastAPI TestClient bridge','browser_network_tested':False,'external_network_tested':False,'completed':completed,'page_errors':errors}
-    (output_dir/'browser-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
-    print(json.dumps(report,ensure_ascii=False,indent=2))
 
 
 if __name__=='__main__':
