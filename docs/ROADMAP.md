@@ -1,5 +1,24 @@
 # Roadmap · Agent-first
 
+## Competition delivery priority (2026-09-16)
+
+The next deliverable is an online, runnable research-agent Web Demo with a
+retained local/self-hosted mode. A skill/CLI/MCP entry point remains optional and
+is not the sole competition deliverable. This is a planning update, not a claim
+that the current unauthenticated local Alpha is safe to deploy publicly.
+
+Prioritize a real-model resource-audit workflow, evidence-linked comparisons,
+controlled online access, visitor/session isolation, server-side credentials,
+quotas and independent-device testing before expanding graph/agent features.
+Preserve actual LearnBuddy development records in parallel; do not relabel other
+assistants' conversations or fabricate historical use.
+
+See [submission TODO and scoring map](SUBMISSION_TODO.md) and the
+[LearnBuddy log template](LEARNBUDDY_LOG_TEMPLATE.md). Requirements are transcribed
+from the project owner's supplied excerpt; the full official rules, deadline,
+submission access and LearnBuddy record format still need confirmation. No
+application code, paid deployment or public access setting is changed here.
+
 ## Implemented in v0.2
 
 The unit of work is now a research task. The application includes a BYOK model
