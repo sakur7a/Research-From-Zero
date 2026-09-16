@@ -19,6 +19,22 @@
   `DELETE /api/agent/config` remains scoped to the model credential.
 - Tests: 96 Python and 24 JavaScript tests plus JavaScript syntax checks.
 
+- Rework the frontend UI into an Emilia (Re:Zero) dual-theme palette with a
+  light mode (bg `#F7F5FA`, primary `#995FB4`, accent `#28A878`, ink `#332448`)
+  and a dark mode (bg `#1A1628`, primary `#A274C2`, accent `#32B886`,
+  ink `#E6E8F2`). A toggle in the top bar / sidebar switches themes, the choice
+  persists in `localStorage`, and light is the default. New `web/theme.css`
+  holds every colour as a variable and `web/theme.js` wires the toggle;
+  `styles.css` and `agent.css` no longer contain hardcoded colour values.
+  Favicon and `meta theme-color` follow the theme.
+- The two browser smoke scripts now inline `theme.css` and load `theme.js`
+  (previously they only inlined the page CSS), write their JSON report before
+  closing the browser, and use `ignore_cleanup_errors` temp dirs so a slow
+  child-process handle release on Windows cannot turn a passing run into a
+  cleanup error.
+- Tests: 96 Python and 24 JavaScript tests, JS syntax checks, both browser
+  smokes (8 and 10 groups) and the HTTP smoke all pass after the change.
+
 ## 0.2.0 — 2026-09-15 — Agent-first refactor
 
 - Make `/` a research task workbench; move the retained library to `/library`.

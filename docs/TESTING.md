@@ -100,3 +100,30 @@ Docker 构建、多用户隔离、PDF 全文读取或任意代码执行验证。
 本轮仍未配置真实模型 Key：96／24 只覆盖协议、存储与权限分支，不是真实模型
 科研效果评测。浏览器 smoke 与真实 HTTP smoke 未在本次变更后重跑。
 
+
+## 2026-09-16 变更后复跑（艾米莉亚双主题 UI）
+
+前端改为浅色／深色双主题（`web/theme.css` 变量 + `web/theme.js` 切换，两个页面
+CSS 的全部硬编码色值已消除）后，在隔离环境（Python 3.13.12、Node.js 22.22.2）
+重新执行：
+
+| 层次 | 命令 | 结果 |
+|---|---|---|
+| Python | `python -m pytest` | **96 passed** |
+| JavaScript | `node --test tests/*.test.js` | **24 passed** |
+| JS 语法 | `node --check web/{app,core,api,agent,agent-core,theme}.js` | 6 个模块通过 |
+| Agent 浏览器 smoke | `python scripts/agent_browser_smoke.py .data/agent-browser` | **8 组全过**，`page_errors` 为空 |
+| 文献库浏览器 smoke | `python scripts/browser_smoke.py .data/browser` | **10 组全过**，`page_errors` 为空 |
+| HTTP smoke | `python scripts/http_smoke.py .data/http-smoke` | 7 个路径全部 200；3 个守卫（缺客户端头 403／未配置模型 422／跨源 403）通过 |
+
+说明：两个浏览器 smoke 脚本现在内联 `theme.css` 并加载 `theme.js`，与本文件
+上一节“浏览器 smoke 未重跑”的记录相比已补齐。三个 smoke 脚本改为先写报告再
+关闭浏览器、临时目录使用 `ignore_cleanup_errors=True`，规避 Windows 下子进程
+句柄延迟释放在清理阶段抛 `PermissionError` 的问题（检查结果不受影响）。
+
+视觉核对：用 Playwright 对两个页面 × 两主题截图人工检查（含文献抽屉、证据
+弹窗、设置面板、关系图），对比度与配色正常；`#goal` 输入框等透明背景组件在
+深色主题下已修正。
+
+本轮仍未配置真实模型 Key：96／24 只覆盖协议、存储与权限分支，不是真实模型
+科研效果评测；真实模型质量与在线部署仍未验证。

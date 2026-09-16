@@ -42,6 +42,7 @@ web/agent.html + agent.js        web/index.html + app.js
 | `agent/api.py` | UI-facing task/config endpoints, no credentials or internal messages in reads/exports |
 | `web/agent-core.js` | Pure status/tool presentation logic, independently tested |
 | `web/agent.js` | Task composer, model settings, polling trace, report and evidence views |
+| `web/theme.css` + `web/theme.js` | Shared Emilia light/dark palette (every colour a variable) and the persisted theme toggle used by both pages; no hardcoded colours remain in page CSS |
 
 ## Loop, not a predetermined chain
 
