@@ -46,6 +46,25 @@ python scripts/paper_search.py --query "KV cache compression for long-context LL
 4. Sinks survey/review papers to the bottom of the list, tagged `[survey]`, without
    removing them.
 
+## Surveying a topic
+
+Recall is bounded by the **page**, not by how many queries you run, and nothing here re-ranks. So:
+
+1. **Write three to five short queries using the words the target literature uses.**
+   `image layer decomposition RGBA` beats `layered representation decomposition single image into
+   layers`, because arXiv and Semantic Scholar match space-separated terms restrictively and a long
+   phrase can return *less* than two words. Keep a domain qualifier in: a bare `layer decomposition`
+   puts mathematics and finance papers first, because each service ranks by its own relevance.
+2. **Raise `--max-papers` (default 20, tool maximum 25) before adding queries.** A work no source
+   returned cannot be merged, corrected, or counted, so the page is the first lever.
+3. **Pass `--venue NAME`** when the target is conference work, so the venue name takes part in the
+   query.
+4. **Read the `per-source hits:` line before reading the papers.** A source sitting at `=0` is a hole
+   in the survey, not a gap in the literature.
+5. **Cross-run duplicates are not folded.** One invocation is one query, so five runs can list the
+   same paper several times. Write each run with `--json` and merge on DOI or arXiv ID, or keep the
+   queries distinct enough that the overlap is small.
+
 ## Conference papers
 
 Papers published only at a conference (CVPR, NeurIPS, ACL…) are **already covered**: Crossref,
@@ -136,15 +155,8 @@ wider read scope.
   such. Never write "no such work exists" because a source was unreachable.
 - **An empty list is not evidence of absence.** Widen the query, change the year window,
   or recheck one source alone before concluding anything.
-- `--max-papers` defaults to 20; the tool caps it at 25. **This is the recall ceiling** — a paper
-  no source returned cannot be merged, corrected or counted, so raise it first when a survey feels
-  thin.
-- **A bigger page means a noisier head, not a better one.** These sources rank by their own
-  relevance and nothing here re-ranks, so a two-word query like `layer decomposition` puts
-  mathematics and finance papers first. Recall comes from the page size; **precision comes from the
-  query** — use the words the target literature uses (`image layer decomposition RGBA`) and run
-  several short queries rather than one long phrase. arXiv and Semantic Scholar treat
-  space-separated terms restrictively, so a long phrase can return *less* than two words do.
+- **The page size is the recall ceiling** (`--max-papers` defaults to 20, tool maximum 25). How to
+  use it for a survey, and why a bigger page is also a noisier one, is in *Surveying a topic* above.
 
 ## Accepted, submitted, or preprint
 

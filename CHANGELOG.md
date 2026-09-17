@@ -46,7 +46,15 @@
   (read off the response header) while 60/hour is the **core** endpoint; `GITHUB_TOKEN` raises both,
   and the skill now says where that variable goes for one shell session, for `RE0_ENV_FILE`, and for
   an online deployment, and that it must never be committed.
-- Tests: 45 Python cases added.
+- Make the retrieval rules reach every consumer that reads them. They were only in the CLI help,
+  so the in-task model and MCP clients — which read the tool description and nothing else — never
+  saw them, and that description had quietly gone stale on the merge rule, still advertising the
+  single-key `DOI > arXiv ID > title` precedence that the code no longer uses. The description now
+  carries the recall ceiling, the query-formulation rule, the all-identifier merge, and where to look
+  for released code; `SKILL.md` gains an actionable *Surveying a topic* procedure instead of rules
+  buried under output-reading bullets, and a test pins all three surfaces together so they cannot
+  drift apart again.
+- Tests: 46 Python cases added.
 
 ### Multi-source literature search, and a skill for it
 

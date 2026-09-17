@@ -329,6 +329,38 @@ def skill_document(title, abstract):
             "locator": "fixture", "content": ""}
 
 
+def test_the_retrieval_rules_reach_every_consumer_that_reads_them():
+    """A rule only lands where its reader actually looks.
+
+    The operative rules were once only in the CLI help, so the in-task model and MCP clients —
+    which read the tool description and nothing else — never saw them, and the description had
+    quietly gone stale on the merge rule. This pins all three surfaces together.
+    """
+    from re0.agent.tools import TOOL_TYPES
+
+    description = TOOL_TYPES["search_papers"][1]
+    assert "recall ceiling" in description, "the model cannot know limit bounds recall"
+    assert "short queries" in description, "the model cannot know how to phrase a query"
+    assert "every identifier" in description
+    assert "DOI > arXiv ID > normalised title" not in description, "stale pre-fix merge rule"
+
+    # MCP serves the same description, so a divergence here would split the two consumers.
+    import re0.mcp_server as mcp_server
+    catalog = {entry["name"]: entry["description"] for entry in mcp_server.catalog(web_enabled=False)}
+    assert catalog["search_papers"] == description
+
+    script = (Path(__file__).resolve().parents[2] / "skills" / "re0-paper-search"
+              / "scripts" / "paper_search.py").read_text(encoding="utf-8")
+    assert "recall ceiling" in script and "Several short queries" in script
+
+    skill = (Path(__file__).resolve().parents[2] / "skills" / "re0-paper-search"
+             / "SKILL.md").read_text(encoding="utf-8")
+    assert "## Surveying a topic" in skill
+    for phrase in ("three to five short queries", "--max-papers", "per-source hits",
+                   "Cross-run duplicates are not folded"):
+        assert phrase in skill, f"the survey procedure lost: {phrase}"
+
+
 def test_the_skill_locates_re0_whether_it_lives_in_the_repository_or_not(tmp_path, monkeypatch):
     module = load_skill_module()
     repo = Path(__file__).resolve().parents[2]
