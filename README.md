@@ -101,6 +101,34 @@ Base URL 通常包含 `/v1`，不要填写 `/chat/completions`；本地服务示
 
 **本地部署不等于材料不出本机。** 执行任务会把目标、工具返回的公开材料、以及经授权的文献库元数据发送到你选择的模型服务。任务和证据在本地明文存储，导出也可能包含敏感研究主题。无登录、认证、多用户隔离或加密数据库，**不要直接暴露到公网或不可信局域网**。安全限制见 [SECURITY.md](SECURITY.md)。
 
+## 作为 MCP 服务器接入其他 agent
+
+Re0 的只读检索工具可以脱离本仓库的 UI，作为一个 **MCP over stdio** 服务器给别的 agent 调用（Claude Code、Codex、dsh 等任何支持 MCP 的客户端）：
+
+```bash
+python -m re0.mcp_server
+```
+
+客户端配置示例：
+
+```json
+{"mcpServers": {"re0": {"command": "python", "args": ["-m", "re0.mcp_server"]}}}
+```
+
+**暴露的工具**：`search_papers`、`resolve_paper`、`search_repositories`、`search_hub`、`inspect_resource`、`read_repository_file`、`search_release_discussions`（配置 `TAVILY_API_KEY` 后还会多出 `search_web`）。工具描述与入参 schema 直接取自任务内模型看到的那同一份 Pydantic 契约，所以两个入口不会漂移。
+
+**不暴露的工具**，以及为什么：
+
+- `update_plan` / `finish_report` 是 Re0 任务内部的协议步骤，脱离任务没有意义；
+- `read_evidence` 是任务作用域的（按本任务证据 ID 取回），MCP 调用没有对应的任务；
+- `search_library` 需要**每次任务的显式同意**，MCP 调用不是那个上下文。
+
+**这个入口的边界，请勿误读**：MCP 调用**不创建任务、不写检查点、不产生证据 ID**。返回的是带 locator 和来源 URL 的来源材料，**Re0「每条结论引用本任务证据 ID」的约束适用于它自己的任务运行，不由这个接口继承**。返回正文按 1500 字符摘录截断，并在结果里写明字符总数。
+
+**零额外运行时依赖**：MCP 的 stdio 传输就是换行分隔的 JSON-RPC 2.0，所以这个服务器不需要官方 SDK，Re0 的依赖仍然只有 4 个包。协议兼容性已用官方 `mcp` 客户端验证过（见 [docs/TESTING.md](docs/TESTING.md)）。
+
+这个接口是**只读检索**，不改文献库、不写文件、不读本地文献库。它仍然是无认证的本地进程 —— 只让可信的本机 agent 调用。
+
 ## 从 v0.1 升级
 
 没有删除或重建原论文表；新增独立版本的 agent 表。原文献、笔记、分类、静态检查记录均保留，旧界面移到 `/library`。

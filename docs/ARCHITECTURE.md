@@ -38,8 +38,9 @@ web/agent.html + agent.js        web/index.html + app.js
 | `agent/model.py` | In-memory BYOK config, destination validation, bounded HTTP, common tool-call protocol |
 | `agent/tools.py` | Tool registry, argument validation, consent-scoped adapters, source documents |
 | `agent/storage.py` | Additive schema, append-only evidence/events, replayable results, atomic approved import |
-| `agent/runtime.py` | Model/tool iteration, budget reservation, cancellation, checkpoint/recovery, report validation |
+| `agent/runtime.py` | Model/tool iteration, budget reservation, cancellation, checkpoint/recovery, context bounds, report validation |
 | `agent/api.py` | UI-facing task/config endpoints, no credentials or internal messages in reads/exports |
+| `mcp_server.py` | MCP-over-stdio retrieval surface; reuses the same tool contracts and opens no database |
 | `web/agent-core.js` | Pure status/tool presentation logic, independently tested |
 | `web/agent.js` | Task composer, model settings, polling trace, report and evidence views |
 | `web/theme.css` + `web/theme.js` | Shared Emilia light/dark palette (every colour a variable) and the persisted theme toggle used by both pages; no hardcoded colours remain in page CSS |
@@ -181,6 +182,29 @@ All write endpoints preserve the original JSON, same-origin and
 | `POST /api/agent/runs/{id}/resume` | Explicit recovery of interrupted/failed work |
 | `POST /api/agent/runs/{id}/evidence/{eid}/import` | User-approved metadata import |
 | `GET /api/agent/runs/{id}/export` | Public task report/evidence JSON, no key or checkpoint |
+
+### Second surface: MCP over stdio
+
+`re0/mcp_server.py` exposes the same read-only retrieval tools to a foreign agent
+without going through HTTP. It is deliberately narrow:
+
+- Tool descriptors are generated from the same `TOOL_TYPES` contracts used inside a
+  task, so the two surfaces cannot drift apart.
+- Excluded: `update_plan`/`finish_report` (task-protocol steps), `read_evidence`
+  (task-scoped), `search_library` (gated on per-task user consent). `search_web`
+  appears only when `TAVILY_API_KEY` is set, matching task behaviour.
+- It constructs `ResearchTools` with no library, so the process opens **no database**
+  and is stateless: no run, no checkpoint, no evidence ID. A caller therefore gets a
+  locator and a source URL, and must not read Re0's citation guarantee into the
+  result — that guarantee is scoped to Re0's own runs.
+- Output is bounded (1500 characters per document) because the caller's context pays
+  for it, and provider failures and validation errors are reported as app-authored
+  text rather than relayed upstream bodies or tracebacks.
+- MCP over stdio is newline-delimited JSON-RPC 2.0, so this adds **no runtime
+  dependency**. It answers `initialize`, `ping`, `tools/list`, `tools/call`, returns
+  `-32601` for anything else, ignores notifications and malformed input, and echoes
+  the client's requested protocol version so a newer client still handshakes.
+- Nothing may be written to stdout except protocol messages.
 
 Original `/api/papers`, topics, resources, CSL imports, demo and export endpoints
 remain. The UI polls operational events; it does **not** stream token output or

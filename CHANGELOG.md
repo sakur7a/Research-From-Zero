@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### MCP retrieval surface
+
+- Add `re0/mcp_server.py`: an MCP-over-stdio server that exposes the read-only
+  retrieval tools, so another agent (Claude Code, Codex, dsh, …) can use them without
+  Re0's UI. Start it with `python -m re0.mcp_server`.
+- Tool descriptors come from the same `TOOL_TYPES` contracts the in-task model sees,
+  so the two surfaces cannot drift. `update_plan`, `finish_report` and the
+  task-scoped `read_evidence` are not exposed, nor is the consent-gated
+  `search_library`; `search_web` appears only when `TAVILY_API_KEY` is configured.
+- The surface is stateless and constructs no library, so the process opens **no
+  database**: it creates no run, no checkpoint and no evidence ID. A caller therefore
+  receives a locator and a source URL and does **not** inherit Re0's "every finding
+  cites this task's evidence" guarantee. Output is bounded per document (1500
+  characters) because the caller's context pays for it.
+- MCP over stdio is newline-delimited JSON-RPC 2.0, so this adds **no runtime
+  dependency**; Re0 still ships four packages. The server answers `initialize`,
+  `ping`, `tools/list` and `tools/call`, returns `-32601` otherwise, ignores
+  notifications and malformed lines, and echoes the client's protocol version so a
+  newer client still handshakes.
+- Tests: 7 Python cases added.
+
 ### Context cost of the agent loop
 
 - A tool result no longer pastes whole source bodies into the conversation. It

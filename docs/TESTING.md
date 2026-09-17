@@ -193,4 +193,37 @@ fixture 任务需要 10 秒以上墙钟时间，导致
 **未实测**：这些是 prompt 体积上限，不是计费优化。是否命中提供商的 KV cache、真实
 任务的 token 用量与实际费用均未测量，也没有做金额估算。
 
+## 2026-09-17 变更后复跑（MCP over stdio 检索入口）
+
+| 层次 | 命令 | 结果 |
+|---|---|---|
+| Python | `python -m pytest` | **112 passed**（105 项＋7 项 MCP 协议用例） |
+| JavaScript | `node --test tests/*.test.js` | **26 passed** |
+| JS 语法 | `node --check web/{app,core,api,agent,agent-core,theme}.js` | 6 个模块通过 |
+
+MCP 协议用例全部在进程内驱动 `serve()`，**不引入 MCP 依赖**：握手与工具清单（断言只暴露
+7 个只读检索工具；`update_plan`／`finish_report`／`read_evidence`／`search_library` 均不在内，
+未配置 `TAVILY_API_KEY` 时也没有 `search_web`）、通知与畸形输入不产生响应、未知方法返回
+`-32601`、未暴露工具与越界参数返回 `isError` 且文案不含 traceback、工具调用返回带 locator
+的有界文本、**用 monkeypatch 让 `Database.__init__` 直接抛错以证明该入口绝不打开文献库数据库**、
+上游 HTTP 500 的响应体不会被转发、空结果被表述为"空"而不是"不存在"。
+
+### 与官方 MCP 客户端的兼容性（手工验证，未纳入自动化）
+
+用官方 `mcp` 2.2.0 客户端以子进程方式连接 `python -m re0.mcp_server`：
+
+- 握手成功，服务端标识为 `re0-research 0.2.0`，`tools/list` 返回 7 个工具的合法 schema；
+- 客户端请求的协议版本是 **`2025-11-25`，比服务端默认值 `2025-06-18` 更新**；服务端回显
+  客户端版本后握手正常完成 —— 这条回显路径值得保留；
+- 越界参数返回 `isError`（文案只列出出错字段），`finish_report` 这类任务工具被拒绝；
+- 服务进程 stderr 为空，stdout 只有协议消息。
+
+这次验证**没有纳入自动化测试**，因为官方 SDK 会拉入 cryptography／pyjwt／jsonschema／
+opentelemetry 等一批依赖，而本仓库的运行时依赖刻意只有 4 个包。复现方式：安装 `mcp` 后按
+上述方式连接即可。
+
+**未实测**：没有从真实第三方 agent（Claude Code / Codex / dsh）内部跑过工具调用；MCP 入口
+下的真实检索质量与外网连通性同样未验证。
+
+
 
