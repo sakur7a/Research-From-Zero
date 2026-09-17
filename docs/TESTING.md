@@ -285,7 +285,33 @@ opentelemetry 等一批依赖，而本仓库的运行时依赖刻意只有 4 个
 未被核验的链接仍以候选形式打印，以及核验函数抛异常时输出 `unverified` 且**不泄露 traceback 与
 内部路径**。
 
-**未实测**：Semantic Scholar 的凭据在样本文件里是空的，因此其带 key 的调用路径未验证；真实
+新增的 4 项自动化用例守住：venue 分类的保守性（**空字符串与 `None` 必须是 `无可用信息`，不能
+变成 `仅预印本`**）、具名会议/期刊胜过预印本声明且**预印本版本仍被报出**、OpenReview 的
+"… Conference Submission" 被判为`投稿或评审中`而**不是已收录**、以及**缺少 publication 子结构的
+记录仍能合并**（默认为 `无可用信息`，不崩）。fixture 也已带真实字段（OpenAlex 的 `type=preprint`
++ `source.type=repository`、S2 的 `publicationVenue`/`affiliations`、Crossref 的 `type`/
+`container-title`/`affiliation`）。
+
+### 机构与接收状态（手工实测）
+
+真实运行输出：
+
+```
+  1. LoRA Fine-Tuning of a 3B Code LLM for Algorithmic Efficiency
+     2021 · 仅预印本 · arXiv (Cornell University)（据 openalex）
+     机构: 各来源均未提供
+```
+
+- **接收状态生效**：OpenAlex 的 `type=preprint` + `source.type=repository` 被判为`仅预印本`并
+  标注了来源；Research Square 这类预印本平台也被正确识别。
+- **机构为空是真实情况而非缺陷**：这轮 Semantic Scholar 被限流、OpenReview 无结果，而 OpenAlex
+  对预印本记录通常不带机构。用 `curl` 直接验证过：S2 对同一类 arXiv 论文能给出
+  `DeepSeek AI`、`Peking University`，OpenAlex 同一记录 `institutions` 为空。**所以机构覆盖率
+  主要取决于 S2 的 key**，这也是建议补 `SEMANTICSCHOLAR_API_KEY` 的具体理由。
+- **未实测**：`已收录于会议或期刊` 这一分支在真实网络下未命中（本轮 S2 限流），只在 fixture 与
+  单测里验证过；arXiv 的 `journal_ref` 分支同样未在真实数据上命中。
+
+**其余未实测**：Semantic Scholar 的凭据在样本文件里是空的，因此其带 key 的调用路径未验证；真实
 检索的召回率与结果质量没有评测；DBLP、Exa 等未接入；`--verify` 在大额度下对 GitHub 匿名限流的
 实际影响未测。
 

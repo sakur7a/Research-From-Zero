@@ -14,8 +14,8 @@ from pydantic import ValidationError
 
 from re0.agent.tools import ResearchTools
 from re0.env_file import load, parse
-from re0.literature import (arxiv_id_from_doi, artifact_urls, in_year_range,
-                            merge_records, paper_keys)
+from re0.literature import (arxiv_id_from_doi, artifact_urls, classify_venue, finalize_publication,
+                            in_year_range, merge_records, paper_keys, paper_record)
 from re0.models import Observation, PaperInput
 from re0.providers import ProviderError
 
@@ -23,8 +23,11 @@ OPENALEX = {
     "results": [
         {"id": "https://openalex.org/W1", "doi": "https://doi.org/10.1000/xyz",
          "title": "Fixture Layout Study", "publication_year": 2024, "cited_by_count": 12,
-         "authorships": [{"author": {"display_name": "Ada Lovelace"}}],
-         "primary_location": {"source": {"display_name": "FixtureConf"}},
+         "type": "preprint",
+         "authorships": [{"author": {"display_name": "Ada Lovelace"},
+                          "institutions": [{"display_name": "Microsoft Research"},
+                                           {"display_name": "Tsinghua University"}]}],
+         "primary_location": {"source": {"display_name": "arXiv (Cornell University)", "type": "repository"}},
          "abstract_inverted_index": {"Layout": [0], "matters": [1], "here": [2]}},
     ]
 }
@@ -32,8 +35,10 @@ SEMANTIC = {
     "data": [
         {"title": "Fixture Layout Study", "abstract": "Same work, second service.",
          "year": 2024, "citationCount": 30, "venue": "FixtureConf",
+         "publicationVenue": {"name": "Neural Information Processing Systems"},
          "externalIds": {"DOI": "10.1000/xyz", "ArXiv": "2401.00001"},
-         "authors": [{"name": "Ada Lovelace"}], "url": "https://www.semanticscholar.org/paper/x"},
+         "authors": [{"name": "Ada Lovelace", "affiliations": ["Microsoft Research"]}],
+         "url": "https://www.semanticscholar.org/paper/x"},
         {"title": "A Second Fixture Study Reported Twice", "abstract": "", "year": 2019, "citationCount": 1,
          "externalIds": {"DOI": "10.1000/only"}, "authors": [], "url": "https://example.invalid/s"},
     ]
@@ -43,11 +48,15 @@ OPENREVIEW = {
     "notes": [{"id": "abc", "forum": "abc", "cdate": 1700000000000,
                "content": {"title": {"value": "A Second Fixture Study Reported Twice"},
                            "abstract": {"value": "Third service."},
-                           "authors": {"value": ["Grace Hopper"]}, "venue": {"value": "ICLR 2024"}}}],
+                           "authors": {"value": ["Grace Hopper"]},
+                           "venue": {"value": "ICLR 2024 Conference Submission"}}}],
 }
 CROSSREF = {"message": {"items": [
-    {"DOI": "10.1000/xyz", "title": ["Fixture Layout Study"],
-     "issued": {"date-parts": [[2024]]}, "author": [{"given": "Ada", "family": "Lovelace"}]}]}}
+    {"DOI": "10.1000/xyz", "title": ["Fixture Layout Study"], "type": "proceedings-article",
+     "container-title": ["Neural Information Processing Systems"],
+     "issued": {"date-parts": [[2024]]},
+     "author": [{"given": "Ada", "family": "Lovelace",
+                 "affiliation": [{"name": "Microsoft Research"}]}]}]}}
 ARXIV = b'''<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>http://arxiv.org/abs/2401.00001v1</id><title>Fixture Layout Study</title><summary>Preprint of the same work.</summary><published>2024-01-01T00:00:00Z</published><author><name>Ada Lovelace</name></author></entry></feed>'''
 
 
@@ -92,6 +101,47 @@ def test_all_sources_are_queried_and_duplicates_merge_across_them():
     assert second["locator"] == "metadata from semanticscholar, openreview; not full text"
     assert second["paper"]["doi"] == "10.1000/only"
     assert result["duplicates_merged"] == 4
+
+
+def test_a_named_venue_outranks_a_preprint_claim_and_the_preprint_is_still_reported():
+    result = run(router)
+    published = next(document for document in result["documents"] if document["paper"]["title"] == "Fixture Layout Study")
+    # Semantic Scholar and Crossref name a conference; OpenAlex and arXiv call it a preprint.
+    assert "publication: 已收录于会议或期刊 — Neural Information Processing Systems" in published["content"]
+    assert "publication note: a preprint version is also indexed" in published["content"]
+    # The weaker claim is summarised, never dropped, and the raw string stays visible.
+    assert "arXiv (Cornell University)" not in published["content"].split("publication:")[1].split("\n")[0]
+    # Institutions arrive from two services, de-duplicated, in first-seen order.
+    assert "institutions: Microsoft Research, Tsinghua University" in published["content"]
+
+
+def test_a_submission_is_reported_as_under_review_not_as_published():
+    result = run(router)
+    pending = next(document for document in result["documents"] if document["paper"]["title"].startswith("A Second"))
+    # OpenReview says "ICLR 2024 Conference Submission"; calling that accepted would be a lie.
+    assert "publication: 投稿或评审中 — ICLR 2024 Conference Submission" in pending["content"]
+
+
+def test_venue_classification_is_conservative_about_absence():
+    assert classify_venue("Neural Information Processing Systems") == "venue"
+    assert classify_venue("arXiv (Cornell University)") == "preprint"
+    assert classify_venue("bioRxiv") == "preprint"
+    assert classify_venue("ICLR 2025 Conference Submission") == "under_review"
+    assert classify_venue("") == "unknown"
+    assert classify_venue(None) == "unknown"
+    # An unstated venue means "nobody said", never "just a preprint".
+    assert finalize_publication([]) == ({"state": "unknown", "venue": "", "source": "", "sources": []}, False)
+    assert finalize_publication([{"state": "preprint", "venue": "arXiv", "source": "arxiv"}])[1] is False
+
+
+def test_records_without_a_publication_claim_still_merge():
+    # merge_records must not require the sub-structure; an absent claim is `unknown`.
+    merged, duplicates = merge_records([
+        {"source": "a", "citations": 1, "venue": "", "paper": PaperInput(title="Same Long Enough Title")},
+        {"source": "b", "citations": 2, "venue": "", "paper": PaperInput(title="Same Long Enough Title")},
+    ])
+    assert duplicates == 1 and merged[0]["publication"]["state"] == "unknown"
+    assert merged[0]["preprint_also"] is False
 
 
 def test_the_paper_keys_prefer_doi_then_arxiv_then_a_normalised_title():

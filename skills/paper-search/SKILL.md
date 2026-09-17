@@ -65,6 +65,55 @@ wider read scope.
 - `--max-papers` is bounded at 8 per source by the tool, to keep each result small
   enough to stay citable. Raise recall with a better query, not a bigger page.
 
+## Accepted, submitted, or preprint
+
+Each result reports where it stands, and **which service said so**:
+
+```
+     2021 · 已收录于会议或期刊 · Neural Information Processing Systems（据 semanticscholar）
+     机构: Microsoft Research, Tsinghua University
+```
+
+Four states, and the raw venue string is always printed next to the classification, so a wrong
+call is checkable instead of hidden:
+
+| State | Meaning |
+|---|---|
+| `已收录于会议或期刊` | a journal or conference is named |
+| `投稿或评审中` | the record describes a submission (OpenReview's "… Conference Submission") |
+| `仅预印本` | only a preprint server is named (arXiv, bioRxiv, Research Square, …) |
+| `无可用信息` | no source carried a venue |
+
+**An unstated venue is `无可用信息`, never `仅预印本`.** A service with no venue has told us
+nothing, and calling that "just a preprint" would be an invented conclusion.
+
+A paper is often **both** — an arXiv version plus a published one — so when sources disagree the
+stronger claim wins and the weaker one is still reported (`注: 同一工作另有预印本版本被索引`).
+Showing only the winner would hide the preprint; showing only the preprint would hide the
+acceptance.
+
+Sources: OpenAlex `type` + `primary_location.source.type` (it states outright when a work is a
+preprint or sits in a repository), Semantic Scholar `publicationVenue`, Crossref `type` +
+`container-title`, OpenReview's venue string, and arXiv's structured `journal_ref`. arXiv
+free-text comments are **not** parsed, so an acceptance recorded only in a comment will not show
+until another service reports it.
+
+## Affiliations
+
+Up to three institutions, then a count:
+
+```
+     机构: Microsoft Research, Tsinghua University（另有 2 个）
+```
+
+They come from Semantic Scholar's `authors.affiliations` and OpenAlex's parsed ROR institutions,
+de-duplicated, in first-seen order so the lead authors' affiliations come first.
+
+**Coverage is uneven and empty is common.** Semantic Scholar is the main source for preprint
+affiliations where OpenAlex usually has none, so when Semantic Scholar rate-limits (no API key)
+most results will read `机构: 各来源均未提供`. That means the services did not say, **not** that
+the authors are unaffiliated — setting `SEMANTIC_SCHOLAR_API_KEY` improves this materially.
+
 ## Links
 
 Each result prints three tiers, best first:

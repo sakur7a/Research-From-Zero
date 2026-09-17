@@ -65,6 +65,17 @@ def render(payload: dict) -> str:
         if paper:
             small = {key: paper.get(key) for key in ("authors", "year", "doi", "arxiv_id") if paper.get(key)}
             lines.append("    paper:   " + json.dumps(small, ensure_ascii=False))
+        publication = item.get("publication") or {}
+        if publication.get("state") and publication["state"] != "unknown":
+            described = publication["state"] + (f" — {publication['venue']}" if publication.get("venue") else "")
+            lines.append(f"    publication: {described}")
+        if item.get("preprint_also"):
+            lines.append("    publication note: a preprint version is also indexed")
+        institutions = item.get("institutions") or []
+        if institutions:
+            shown = ", ".join(institutions[:3])
+            lines.append("    institutions: " + shown
+                         + (f" (+{len(institutions) - 3} more)" if len(institutions) > 3 else ""))
         body = item.get("content") or ""
         excerpt = body[:DOCUMENT_EXCERPT_CHARS]
         lines.append(f"    excerpt ({len(excerpt)}/{len(body)} chars): {excerpt}")

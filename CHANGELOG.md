@@ -43,7 +43,16 @@
   check costs about four GitHub requests against an anonymous limit of roughly 60/hour, and an
   unchecked link still prints as a candidate instead of appearing to have failed. A subagent was
   rejected here: it returns prose, while this returns a status comparable across papers.
-- Tests: 31 Python cases added.
+- Report where a paper stands — `已收录于会议或期刊` / `投稿或评审中` / `仅预印本` / `无可用信息` —
+  next to the raw venue string and the service that claimed it. An unstated venue is `无可用信息`,
+  never `仅预印本`: a service carrying no venue has said nothing, and "just a preprint" would be an
+  invented conclusion. A work that is both an arXiv preprint and published reports the stronger
+  claim **plus** a note that a preprint also exists, instead of one hiding the other.
+- Report up to three affiliations from Semantic Scholar `authors.affiliations` and OpenAlex's
+  parsed institutions, de-duplicated in first-seen order. `各来源均未提供` is common and means the
+  services did not say, **not** that the authors are unaffiliated — preprint coverage depends
+  mainly on Semantic Scholar, which rate-limits without a key.
+- Tests: 35 Python cases added.
 
 ### MCP retrieval surface
 

@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 from re0.agent.tools import ResearchTools          # noqa: E402
 from re0.env_file import load                      # noqa: E402
-from re0.literature import artifact_urls           # noqa: E402
+from re0.literature import PUBLICATION_LABELS, artifact_urls  # noqa: E402
 from re0.providers import ProviderError, check_resource  # noqa: E402
 
 ENV_FILES = (".env", "~/.codex/skills/.env", "~/.re0/.env")
@@ -102,14 +102,44 @@ def verify_candidate(url: str) -> None:
         print(f"       limit: {limitation}")
 
 
+SHOWN_INSTITUTIONS = 3
+
+
+def publication_line(document: dict) -> str:
+    """Accepted, submitted or preprint — and the raw venue string, so a wrong call is checkable."""
+    paper, publication = document["paper"], document.get("publication") or {}
+    status = PUBLICATION_LABELS.get(publication.get("state", "unknown"), "无可用信息")
+    if publication.get("venue"):
+        status += f" · {publication['venue']}"
+    if publication.get("source"):
+        status += f"（据 {publication['source']}）"
+    year = paper.get("year") or "年份未知"
+    return f"     {year} · {status}"
+
+
+def institutions_line(document: dict) -> str:
+    institutions = document.get("institutions") or []
+    if not institutions:
+        # Not "unaffiliated": the services simply did not state it, and coverage is uneven.
+        return "     机构: 各来源均未提供"
+    shown = ", ".join(institutions[:SHOWN_INSTITUTIONS])
+    if len(institutions) > SHOWN_INSTITUTIONS:
+        shown += f"（另有 {len(institutions) - SHOWN_INSTITUTIONS} 个）"
+    return "     机构: " + shown
+
+
 def print_document(index: int, document: dict, raw: bool, verify_budget: int) -> int:
     """Print one result. Returns how many artifact candidates were actually verified."""
     paper = document["paper"]
     tag = "[survey] " if is_survey(paper["title"]) else ""
     print(f"\n{index:>3}. {tag}{paper['title']}")
-    print(f"     {paper.get('year') or 'year unknown'} · {paper.get('venue') or 'no venue'} · {document['locator']}")
+    print(publication_line(document))
+    print(institutions_line(document))
+    if document.get("preprint_also"):
+        print("     注: 同一工作另有预印本版本被索引")
     for label, url in links_for(paper):
         print(f"     {label}: {url}")
+    print(f"     来源: {document['locator']}")
     used = 0
     for url in artifact_urls(paper.get("abstract", "")):
         if used >= verify_budget:

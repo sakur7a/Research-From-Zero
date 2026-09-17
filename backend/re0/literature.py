@@ -75,9 +75,88 @@ def _authors(names) -> list[str]:
     return cleaned[:MAX_AUTHORS]
 
 
-def _record(source: str, paper: PaperInput, *, citations=None, venue: str = "") -> dict:
+def _ordered_unique(values) -> list:
+    """Trim, drop empties and de-duplicate while keeping the order the source gave, so
+    the first entries stay the ones the lead authors are attached to."""
+    out: list[str] = []
+    for value in values:
+        text = _text(value, 200)
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
+def paper_record(source: str, paper: PaperInput, *, citations=None, venue: str = "",
+            publication_state: str = "unknown", publication_venue: str = "",
+            institutions=()) -> dict:
     return {"source": source, "paper": paper, "citations": _citations(citations),
-            "venue": _text(venue, 200) or paper.venue}
+            "venue": _text(venue, 200) or paper.venue,
+            "publication": {"state": publication_state, "venue": _text(publication_venue, 200),
+                            "source": source},
+            "institutions": _ordered_unique(institutions)}
+
+
+# A venue string can describe a preprint server, a review stage or a real venue. These
+# lists are deliberately short and visible: the raw string is always printed alongside
+# the classification, so a wrong guess is checkable rather than hidden.
+PREPRINT_HINTS = ("arxiv", "biorxiv", "medrxiv", "preprint", "ssrn", "research square", "techrxiv")
+REVIEW_HINTS = ("submission", "under review", "workshop proposal", "withdrawn", "rejected")
+
+PUBLICATION_RANK = {"venue": 3, "under_review": 2, "preprint": 1, "unknown": 0}
+PUBLICATION_LABELS = {"venue": "已收录于会议或期刊", "preprint": "仅预印本",
+                      "under_review": "投稿或评审中", "unknown": "无可用信息"}
+
+
+def classify_venue(name: str) -> str:
+    """`venue` when a journal or conference is named, `preprint` when only a preprint
+    server is, `under_review` when the record describes a submission, else `unknown`.
+
+    Absence is `unknown`, never `preprint`: a source that carries no venue has told us
+    nothing, and calling that "just a preprint" would be an invented conclusion.
+    """
+    lowered = (name or "").strip().lower()
+    if not lowered:
+        return "unknown"
+    if any(hint in lowered for hint in REVIEW_HINTS):
+        return "under_review"
+    if any(hint in lowered for hint in PREPRINT_HINTS):
+        return "preprint"
+    return "venue"
+
+
+def finalize_publication(claims: list) -> tuple[dict, bool]:
+    """Pick the strongest claim and report whether a preprint also exists.
+
+    A paper is often both: an arXiv version plus a published one. Reporting only the
+    winner would hide the preprint, and reporting only the preprint would hide the
+    acceptance, so the weaker claim is summarised rather than dropped.
+
+    Returns `(publication, preprint_also)`.
+    """
+    if not claims:
+        return {"state": "unknown", "venue": "", "source": "", "sources": []}, False
+    best = max(claims, key=lambda claim: PUBLICATION_RANK.get(claim.get("state"), 0))
+    sources = sorted({claim.get("source", "") for claim in claims} - {""})
+    preprint_also = best.get("state") != "preprint" and any(
+        claim.get("state") == "preprint" for claim in claims)
+    return ({"state": best.get("state", "unknown"), "venue": best.get("venue", ""),
+             "source": best.get("source", ""), "sources": sources}, preprint_also)
+
+
+def collect_institutions(records: list) -> list:
+    """Institution names in first-seen order across records.
+
+    Coverage is genuinely uneven — Semantic Scholar fills affiliations for preprints where
+    OpenAlex often has none, and neither fills them for everything — so an empty list means
+    "the services did not say", not "the authors are unaffiliated".
+    """
+    out: list[str] = []
+    for record in records:
+        for name in record.get("institutions") or []:
+            if name not in out:
+                out.append(name)
+    return out
+
 
 
 def _openalex_abstract(index) -> str:
@@ -116,23 +195,37 @@ def search_openalex(client: ProviderClient, query: str, limit: int, *, start_yea
         if not title:
             continue
         location = item.get("primary_location") or {}
+        source = location.get("source") or {}
+        source_name = _text(source.get("display_name"), 200)
+        source_type = _text(source.get("type"), 40).lower()
+        work_type = _text(item.get("type"), 40).lower()
+        state = classify_venue(source_name)
+        # OpenAlex says outright when a work is a preprint or sits in a repository, which
+        # is stronger evidence than the venue string alone.
+        if source_type == "repository" or work_type == "preprint":
+            state = "preprint"
         doi = _text(item.get("doi"), 300).removeprefix("https://doi.org/")
         paper = PaperInput(
             title=title,
             doi=doi,
             authors=_authors((entry.get("author") or {}).get("display_name") for entry in item.get("authorships") or []),
             year=_year(item.get("publication_year")),
-            venue=_text((location.get("source") or {}).get("display_name"), 200),
+            venue=source_name,
             abstract=_openalex_abstract(item.get("abstract_inverted_index")),
             arxiv_id=arxiv_id_from_doi(doi),
             paper_url=_text(item.get("doi") or item.get("id") or "https://openalex.org", 2000))
-        records.append(_record("openalex", paper, citations=item.get("cited_by_count"), venue=paper.venue))
+        records.append(paper_record("openalex", paper, citations=item.get("cited_by_count"),
+                               venue=source_name, publication_state=state, publication_venue=source_name,
+                               institutions=(institution.get("display_name")
+                                             for entry in item.get("authorships") or []
+                                             for institution in entry.get("institutions") or [])))
     return records
 
 
 def search_semanticscholar(client: ProviderClient, query: str, limit: int, *, start_year=None, end_year=None) -> list[dict]:
     params: dict = {"query": query, "limit": limit,
-                    "fields": "title,abstract,year,authors,externalIds,venue,citationCount,url"}
+                    "fields": "title,abstract,year,authors.name,authors.affiliations,externalIds,"
+                              "venue,publicationVenue,citationCount,url"}
     if start_year and end_year:
         params["year"] = f"{start_year}-{end_year}"
     elif start_year:
@@ -150,16 +243,22 @@ def search_semanticscholar(client: ProviderClient, query: str, limit: int, *, st
             continue
         external = item.get("externalIds") or {}
         doi = _text(external.get("DOI"), 300)
+        # `publicationVenue` is the structured venue; `venue` is the free-text one. A
+        # venue of "arXiv.org" means the record is a preprint, not a publication.
+        venue = _text((item.get("publicationVenue") or {}).get("name"), 200) or _text(item.get("venue"), 200)
         paper = PaperInput(
             title=title,
             authors=_authors((entry.get("name") for entry in item.get("authors") or [])),
             year=_year(item.get("year")),
-            venue=_text(item.get("venue"), 200),
+            venue=venue,
             abstract=_text(item.get("abstract"), MAX_ABSTRACT),
             doi=doi,
             arxiv_id=_text(external.get("ArXiv"), 100) or arxiv_id_from_doi(doi),
             paper_url=_text(item.get("url"), 2000))
-        records.append(_record("semanticscholar", paper, citations=item.get("citationCount"), venue=paper.venue))
+        records.append(paper_record("semanticscholar", paper, citations=item.get("citationCount"),
+                               venue=venue, publication_state=classify_venue(venue), publication_venue=venue,
+                               institutions=((entry.get("affiliations") or [None])[0]
+                                             for entry in item.get("authors") or [])))
     return records
 
 
@@ -186,14 +285,19 @@ def search_openreview(client: ProviderClient, query: str, limit: int, *, start_y
         if not title:
             continue
         note_id = _text(note.get("forum") or note.get("id"), 100)
+        # OpenReview is where submissions and their decisions live, so its venue string is
+        # the strongest acceptance signal available here: a decision reads "ICLR 2025 Oral",
+        # an undecided paper reads "ICLR 2025 Conference Submission".
+        venue = _text(value("venue"), 200)
         paper = PaperInput(
             title=title,
             authors=_authors(value("authors", [])),
             year=_year(_epoch_year(note.get("cdate"))) or _year(_epoch_year(note.get("tcdate"))),
-            venue=_text(value("venue"), 200),
+            venue=venue,
             abstract=_text(value("abstract"), MAX_ABSTRACT),
             paper_url=f"https://openreview.net/forum?id={note_id}" if note_id else "https://openreview.net")
-        records.append(_record("openreview", paper, venue=paper.venue))
+        records.append(paper_record("openreview", paper, venue=venue,
+                               publication_state=classify_venue(venue), publication_venue=venue))
     return records
 
 
@@ -227,17 +331,20 @@ def merge_records(records: list[dict]) -> tuple[list[dict], int]:
     """Collapse duplicates across sources. Returns the merged list and the fold count.
 
     Sources are visited in signal order, so the first service to report a work
-    supplies its fields and a later duplicate only adds provenance, a citation count
-    and identifiers the first source was missing.
+    supplies its fields and a later duplicate only adds provenance, a citation count,
+    identifiers the first source was missing, and its own publication claim.
     """
     index: dict[str, dict] = {}
     merged: list[dict] = []
     duplicates = 0
     for record in records:
         keys = paper_keys(record["paper"])
+        # A record may carry no publication claim at all; `unknown` is the honest default.
+        claim = record.get("publication") or {"state": "unknown", "venue": "",
+                                              "source": record.get("source", "")}
         current = next((index[key] for key in keys if key in index), None)
         if current is None:
-            current = {**record, "sources": [record["source"]]}
+            current = {**record, "sources": [record["source"]], "publication_claims": [claim]}
             merged.append(current)
             keys = keys or [f"unmatched:{len(merged)}"]
         else:
@@ -246,12 +353,19 @@ def merge_records(records: list[dict]) -> tuple[list[dict], int]:
                 current["sources"].append(record["source"])
             if current["citations"] is None or (record["citations"] or 0) > current["citations"]:
                 current["citations"] = record["citations"]
+            current["publication_claims"].append(claim)
+            for name in record.get("institutions") or []:
+                if name not in current["institutions"]:
+                    current["institutions"].append(name)
             for field in ("doi", "arxiv_id", "abstract", "venue", "year", "paper_url"):
                 if not getattr(current["paper"], field) and getattr(record["paper"], field):
                     setattr(current["paper"], field, getattr(record["paper"], field))
         for key in keys:
             index.setdefault(key, current)
+    for entry in merged:
+        entry["publication"], entry["preprint_also"] = finalize_publication(entry.pop("publication_claims"))
     return merged, duplicates
+
 
 
 def in_year_range(year: int | None, start_year=None, end_year=None) -> bool:

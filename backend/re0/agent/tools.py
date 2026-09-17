@@ -12,7 +12,8 @@ from urllib.parse import quote, urlsplit
 import httpx
 from pydantic import ValidationError
 
-from ..literature import CONNECTORS, arxiv_id_from_doi, in_year_range, merge_records
+from ..literature import (CONNECTORS, PUBLICATION_LABELS, arxiv_id_from_doi, classify_venue,
+                          in_year_range, merge_records, paper_record)
 from ..models import PaperInput, normalize_arxiv
 from ..providers import (ProviderClient, ProviderError, check_resource, resolve_metadata,
                          repository_identity, _arxiv_lock)
@@ -58,15 +59,34 @@ def paper_document(record: dict) -> dict:
     reader can tell a single-source hit from one several services agree on."""
     paper, sources = record["paper"], record["sources"]
     lines = [paper.title, "authors: " + (", ".join(paper.authors) or "unknown")]
-    for label, value in (("year", paper.year), ("venue", paper.venue), ("doi", paper.doi),
+    for label, value in (("year", paper.year), ("doi", paper.doi),
                          ("arxiv", paper.arxiv_id), ("citations", record.get("citations"))):
         if value not in (None, ""):
             lines.append(f"{label}: {value}")
+    # The raw venue string is kept inside this line so a wrong classification stays checkable.
+    publication = record.get("publication") or {}
+    described = PUBLICATION_LABELS.get(publication.get("state", "unknown"), publication.get("state", ""))
+    if publication.get("venue"):
+        described += f" — {publication['venue']}"
+    if publication.get("source"):
+        described += f" (via {publication['source']})"
+    lines.append("publication: " + described)
+    if record.get("preprint_also"):
+        lines.append("publication note: a preprint version is also indexed")
+    institutions = record.get("institutions") or []
+    shown = ", ".join(institutions[:3])
+    if len(institutions) > 3:
+        shown += f" (+{len(institutions) - 3} more)"
+    lines.append("institutions: " + (shown or "not stated by any source"))
     lines.append("sources: " + ", ".join(sources))
     if paper.abstract:
         lines.append("abstract: " + paper.abstract)
-    return doc(paper.paper_url, "\n".join(lines), kind="paper",
-               locator="metadata from " + ", ".join(sources) + "; not full text", paper=paper)
+    document = doc(paper.paper_url, "\n".join(lines), kind="paper",
+                   locator="metadata from " + ", ".join(sources) + "; not full text", paper=paper)
+    # Also exposed as fields, so a caller does not have to parse them back out of the text.
+    document.update({"publication": publication, "preprint_also": bool(record.get("preprint_also")),
+                     "institutions": institutions})
+    return document
 
 
 class ResearchTools:
@@ -177,11 +197,21 @@ class ResearchTools:
             if not doi or not title:
                 continue
             date = item.get("issued", {}).get("date-parts", [[]])[0]
+            # `posted-content` is Crossref's type for a preprint; a journal or conference
+            # name arrives separately in container-title.
+            work_type = str(item.get("type", "")).lower()
+            container = " ".join(item.get("container-title", []))[:200]
+            state = "preprint" if work_type == "posted-content" else classify_venue(container)
             paper = PaperInput(title=title, doi=doi, arxiv_id=arxiv_id_from_doi(doi),
                 authors=[((" ".join([a.get("given", ""), a.get("family", "")])).strip() or a.get("name", "Unknown"))[:160] for a in item.get("author", [])[:30]],
                 year=date[0] if date and isinstance(date[0], int) and 1900 <= date[0] <= 2100 else None,
+                venue=container,
                 paper_url="https://doi.org/" + doi)
-            records.append({"source": "crossref", "paper": paper, "citations": None, "venue": ""})
+            records.append(paper_record("crossref", paper, venue=container,
+                                        publication_state=state, publication_venue=container,
+                                        institutions=(affiliation.get("name")
+                                                      for author in item.get("author", [])
+                                                      for affiliation in author.get("affiliation") or [])))
         return records
 
     def _arxiv_records(self, client, args) -> list:
@@ -201,7 +231,7 @@ class ResearchTools:
         if b"<!DOCTYPE" in raw.upper() or b"<!ENTITY" in raw.upper():
             raise ProviderError("拒绝包含实体声明的 XML")
         root = ET.fromstring(raw)
-        ns = {"a": "http://www.w3.org/2005/Atom"}
+        ns = {"a": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
         records = []
         for entry in root.findall("a:entry", ns)[:args.limit]:
             identifier = normalize_arxiv(entry.findtext("a:id", "", ns))
@@ -210,11 +240,20 @@ class ResearchTools:
                 continue
             abstract = " ".join(entry.findtext("a:summary", "", ns).split())[:8000]
             published = entry.findtext("a:published", "", ns)
+            # The one structured publication field on arXiv. Its absence means only that
+            # the authors did not fill it in, so arXiv stands as a preprint claim which a
+            # stronger source can upgrade. Free-text arXiv comments are not parsed here.
+            journal_ref = " ".join(entry.findtext("arxiv:journal_ref", "", ns).split())
+            state = "preprint" if not journal_ref else (classify_venue(journal_ref) or "venue")
+            if state == "unknown":
+                state = "venue"  # a journal reference means it did appear somewhere
             paper = PaperInput(title=title, arxiv_id=identifier, abstract=abstract,
                 authors=[x.findtext("a:name", "", ns) for x in entry.findall("a:author", ns)][:30],
                 year=int(published[:4]) if published[:4].isdigit() else None,
+                venue=journal_ref,
                 paper_url="https://arxiv.org/abs/" + identifier)
-            records.append({"source": "arxiv", "paper": paper, "citations": None, "venue": ""})
+            records.append(paper_record("arxiv", paper, venue=journal_ref,
+                                        publication_state=state, publication_venue=journal_ref))
         return records
 
     def resolve_paper(self, args):

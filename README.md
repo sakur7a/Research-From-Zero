@@ -121,6 +121,17 @@ python skills/paper-search/scripts/paper_search.py \
 
 每条结果给三级链接，最优在前：**arXiv → DOI → 来源记录页**。很多服务只报 arXiv 的 DOI（`10.48550/arXiv.<id>`），所以没有直接给出 arXiv ID 时会从 DOI 还原 —— 那通常才是想点开的那个链接。
 
+每条结果还报告**接收状态**与**机构**：
+
+```
+     2021 · 已收录于会议或期刊 · Neural Information Processing Systems（据 semanticscholar）
+     机构: Microsoft Research, Tsinghua University
+```
+
+状态有四种：`已收录于会议或期刊`／`投稿或评审中`／`仅预印本`／`无可用信息`。**没有 venue 就是"无可用信息"，不会写成"仅预印本"** —— 服务没提供不等于它只是预印本，那是编出来的结论。原始 venue 字符串永远跟在状态后面，猜错可核对。同一篇论文**既可能是预印本也被收录**，这时强声明胜出、弱声明仍然报出（`注: 同一工作另有预印本版本被索引`）。
+
+机构取 Semantic Scholar 与 OpenAlex，去重后最多显示 3 个。**「各来源均未提供」很常见，含义是"服务没给"，不是"作者没有机构"** —— 预印本的机构信息主要靠 Semantic Scholar，而它匿名调用会被限流，所以配上 `SEMANTIC_SCHOLAR_API_KEY` 会明显改善覆盖率。
+
 **开源情况（code／weights／dataset）分两层，由你决定走多远。**
 
 第一层永远生效：给出上面的链接，并把**作者自己在摘要里写的** code／data 链接抽出来，标为 `artifact candidate (from the abstract, unverified)`。
