@@ -295,6 +295,10 @@ def print_document(index: int, document: dict, raw: bool, verify_budget: int,
         searched = 1
         candidates += [(c["url"], c["origin"])
                        for c in artifact_candidates(tools, name, paper["title"], 3, failures)]
+    # Carried into --json as well as printed: a report built from the JSON used to lose every
+    # candidate this skill had found, which made the feature look absent.
+    document["artifact_candidates"] = [{"url": url, "origin": origin} for url, origin in candidates]
+    document["artifact_search"] = "searched" if searched else ("skipped" if not name else "not-run")
     used = 0
     for url, origin in candidates:
         if used >= verify_budget:
@@ -347,9 +351,9 @@ def main(argv=None) -> int:
     parser.add_argument("--json", dest="json_path", default=None,
                         help="write the complete result set here; stdout stays readable")
     parser.add_argument("--raw", action="store_true", help="print every field instead of a table")
-    parser.add_argument("--find-artifacts", type=int, default=5, metavar="N",
+    parser.add_argument("--find-artifacts", type=int, default=10, metavar="N",
                         help="search GitHub and the Hugging Face Hub by each paper's project name for "
-                             "the first N papers (default 5, max 10, 0 disables). Most papers carry no "
+                             "the first N papers (default 10, max 10, 0 disables). Most papers carry no "
                              "link in any metadata field yet do have a released repository, so this is "
                              "the only way to surface those. Every hit is a NAME MATCH, not proof of "
                              "authorship, and is labelled as such.")
@@ -393,10 +397,6 @@ def main(argv=None) -> int:
         for failure in result["source_failures"]:
             print(f"  {failure['source']}: {failure['error']}" + failure_hint(failure["source"]),
                   file=sys.stderr)
-    if args.json_path:
-        Path(args.json_path).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"full results written to {args.json_path}")
-
     documents = ordered(result["documents"])
     if not documents:
         print("no results. An empty result is not evidence that the work does not exist: "
@@ -410,6 +410,15 @@ def main(argv=None) -> int:
         find_left -= searched
     if args.find_artifacts and len(documents) > args.find_artifacts:
         print(f"\n名称检索只覆盖了前 {args.find_artifacts} 篇（--find-artifacts 可调大，GitHub 搜索限 10 次/分钟）。")
+    searched_count = sum(1 for document in documents if document.get("artifact_search") == "searched")
+    found_count = sum(len(document.get("artifact_candidates") or []) for document in documents)
+    if args.find_artifacts:
+        print(f"\n开源检索：已按项目名检索 {searched_count} 篇，得到 {found_count} 个候选"
+              f"（共 {len(documents)} 篇；只有标题形如「Name: ...」的论文有项目名可检索）。"
+              "候选是名称匹配而非作者身份证明。")
+    if args.json_path:
+        Path(args.json_path).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"完整结果已写入 {args.json_path}（含每篇的 artifact_candidates 字段）")
     if any((document.get("publication") or {}).get("state") == "preprint" for document in documents):
         print("\n关于发表状态：" + PUBLICATION_CAVEAT)
     print("\nThese are bibliographic records, not full text. Confirm anything load-bearing "

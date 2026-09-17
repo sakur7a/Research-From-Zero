@@ -27,6 +27,23 @@
 - Preserve DOI/arXiv identity and notes. Approval imports source-derived metadata,
   not model-invented arbitrary records. Do not overwrite collisions silently.
 
+## Documentation and reporting discipline
+
+- Changing a tool's behaviour or contract means updating **every surface a caller reads**, and they
+  are not interchangeable: the tool description in `agent/tools.py` (`TOOL_TYPES`, which the in-task
+  model *and* the MCP catalog both serve from), the CLI help, `skills/*/SKILL.md`, README, CHANGELOG.
+  A rule that only reaches the CLI is invisible to the agent running inside the product, and a
+  description still stating superseded behaviour is worse than none. Pin the surfaces with a test.
+- A report built from retrieval results carries only what was judged relevant, and states how many
+  records were set aside. Do not paste the whole result set, and do not append a section of matches
+  the search returned but the author rejected ("for completeness") - that is noise with a heading
+  and it reads as thoroughness.
+- **Carry through what the tools reported.** When a record has an open-source candidate, a venue or
+  a publication status, that column belongs in the report. Dropping it makes a working feature look
+  absent, and it is indistinguishable from the tool never having had it.
+- Retrieval returns candidates and does not rank them; the judgement is the reader's. Keep the two
+  apart: the tool must not filter silently, and the report must not keep everything silently.
+
 ## Security and delivery
 - Model config entered in UI stays in server memory. Do not put secrets into
   checkpoint JSON, logs, prompts, frontend storage, error bodies or exports.

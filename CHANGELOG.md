@@ -54,7 +54,18 @@
   for released code; `SKILL.md` gains an actionable *Surveying a topic* procedure instead of rules
   buried under output-reading bullets, and a test pins all three surfaces together so they cannot
   drift apart again.
-- Tests: 46 Python cases added.
+- Carry open-source candidates into `--json` as `artifact_candidates` (with `artifact_search`
+  recording whether the name search ran), and write that file after the search instead of before it.
+  The candidates were printed for a human and never attached to the document, so a report built from
+  the JSON saw nothing at all — indistinguishable from a tool that never had the feature.
+- Raise `--find-artifacts` to cover 10 papers by default and print the coverage: how many papers were
+  searched and how many candidates came back, out of how many records. In a large survey most
+  records have no candidate *because nobody searched them*, and silence read as "no code released".
+- Add *Reporting from these results* to `SKILL.md` and a **Documentation and reporting discipline**
+  section to `AGENTS.md`: a report keeps only what was judged relevant and states how many records
+  were set aside, never appends a "for completeness" section of rejected matches, and carries
+  through what the tools reported. A dropped column makes a working feature look absent.
+- Tests: 50 Python cases added.
 
 ### Multi-source literature search, and a skill for it
 

@@ -65,6 +65,23 @@ Recall is bounded by the **page**, not by how many queries you run, and nothing 
    same paper several times. Write each run with `--json` and merge on DOI or arXiv ID, or keep the
    queries distinct enough that the overlap is small.
 
+## Reporting from these results
+
+This tool returns candidates and does not rank them. A report is where the judgement has to happen:
+
+- **Keep only what you judged relevant, and say how many you set aside.** A run that returns 530
+  records and 18 relevant ones should produce a report about the 18 plus a count, not 530 entries.
+  Never append a "for completeness" section of matches the search returned but you rejected — that
+  is noise with a heading, and it reads as thoroughness.
+- **Carry the open-source candidates through.** They are printed next to each paper and also written
+  to `--json` as `artifact_candidates`, so a report can be built without transcribing stdout. A
+  feature whose output is dropped looks like a feature that does not exist.
+- **Carry the publication status and affiliations too**, with their caveats: an absent venue record
+  is evidence about the services, not against the paper.
+- **State the open-source coverage.** The name search covers `--find-artifacts` papers per run, so in
+  a large survey most records have no candidate *because nobody searched them*. The run prints that
+  coverage; repeat it, rather than letting silence read as "no code was released".
+
 ## Conference papers
 
 Papers published only at a conference (CVPR, NeurIPS, ACL…) are **already covered**: Crossref,

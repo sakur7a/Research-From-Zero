@@ -329,6 +329,47 @@ def skill_document(title, abstract):
             "locator": "fixture", "content": ""}
 
 
+def test_open_source_candidates_reach_the_document_so_json_cannot_lose_them(capsys):
+    """A report built from --json must not lose a feature's output.
+
+    This was the gap that made the open-source search look absent: the candidates were printed for
+    a human and never attached to the document, so anything reading the JSON saw nothing at all —
+    indistinguishable from a tool that never had the feature.
+    """
+    module = load_skill_module()
+    tools = StubTools({("search_repositories", None): [
+        {"source_url": "https://github.com/360CVGroup/RevealLayer",
+         "content": '{"full_name": "360CVGroup/RevealLayer"}'}]})
+    document = skill_document(REVEAL_LAYER, "an abstract that carries no link at all")
+    module.print_document(1, document, False, 0, tools, 1)
+    capsys.readouterr()
+    assert document["artifact_search"] == "searched"
+    assert document["artifact_candidates"] == [
+        {"url": "https://github.com/360CVGroup/RevealLayer",
+         "origin": "GitHub 名称检索·标识名与项目名一致"}]
+    # And the paper's own declared link is carried too, marked by where it came from.
+    declared = skill_document("Other: A Paper", "Code at https://github.com/lab/other")
+    module.print_document(1, declared, False, 0, None, 0)
+    capsys.readouterr()
+    assert declared["artifact_candidates"] == [{"url": "https://github.com/lab/other", "origin": "摘要中自述"}]
+
+
+def test_the_standing_rules_are_written_into_the_project_guidance():
+    """These were asked for as standing rules, so they live in the repository rather than in a
+    conversation that the next session cannot read."""
+    root = Path(__file__).resolve().parents[2]
+    agents = (root / "AGENTS.md").read_text(encoding="utf-8")
+    assert "## Documentation and reporting discipline" in agents
+    for phrase in ("surface a caller reads", "for completeness",
+                   "Carry through what the tools reported"):
+        assert phrase in agents, f"AGENTS.md lost: {phrase}"
+
+    skill = (root / "skills" / "re0-paper-search" / "SKILL.md").read_text(encoding="utf-8")
+    assert "## Reporting from these results" in skill
+    for phrase in ("say how many you set aside", "artifact_candidates", "nobody searched them"):
+        assert phrase in skill, f"SKILL.md lost: {phrase}"
+
+
 def test_the_retrieval_rules_reach_every_consumer_that_reads_them():
     """A rule only lands where its reader actually looks.
 
