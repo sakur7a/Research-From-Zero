@@ -315,6 +315,34 @@ opentelemetry 等一批依赖，而本仓库的运行时依赖刻意只有 4 个
 检索的召回率与结果质量没有评测；DBLP、Exa 等未接入；`--verify` 在大额度下对 GitHub 匿名限流的
 实际影响未测。
 
+### 会议论文覆盖与三条过滤路径的实测结论
+
+用户问"只发在会议（如 CVPR）上的论文怎么办、要不要额外加顶会检索"。实测：
+
+- **CVPR 论文已经被覆盖**：`--query "CVPR diffusion model watermarking"` 命中
+  `ProMark: Proactive Diffusion Watermarking for Causal Attribution`，并报出
+  `已收录于会议或期刊 · 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)（据 crossref）`；
+  同批还有 ACM Multimedia、AAAI 的论文。**机构也在同一批里正常出现**
+  （`National University of Singapore, University of Science and Technology of China`），
+  说明之前机构为空确实是来源覆盖问题而非代码问题。
+- **DBLP 不可用（硬证据）**：带 `format=json` 请求返回 HTTP 200，但 body 是
+  `<title>Making sure you're not a bot!</title>` 的反爬挑战页，不是 JSON。**专门加这个会议索引
+  的路线被否掉，并且记录了证据，避免以后重新踩。**
+- **OpenAlex 按 source 名过滤被 API 拒绝（硬证据）**：`filter=primary_location.source.display_name.search:CVPR`
+  返回 HTTP 400，body 明确写 `is not a valid field`。按 source 过滤需要先取 source ID，是另一次查询。
+- **Semantic Scholar `venue=` 未能验证**：文档有该参数，但每次请求都是 429（样本文件里 S2 的 key 为空），
+  **因此没有实现**。
+- 结论：本轮只加 `--venue` 作为**查询提示**（前置会议名到查询串，实测有效），并新增 1 项单测守住它
+  是可选参数；**API 侧的会议过滤留到上面某条路径能被端到端验证时再做**。
+
+### 模型配置探针
+
+新增 `scripts/model_probe.py` 并实测三种情况：无配置时输出清晰的缺失变量说明并以 2 退出；指向样本
+env 文件（只有检索凭据）时同样清晰报缺；**在 `RE0_LLM_API_KEY` 设为哨兵值的情况下运行，输出中
+grep 该值命中 0 次**，即 key 不会被打印（探针只报告变量名是否设置）。
+
+**未实测**：没有用真实可用的模型凭据跑通探针的成功路径。
+
 
 
 

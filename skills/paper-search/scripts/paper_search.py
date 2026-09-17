@@ -31,6 +31,22 @@ SURVEY_WORDS = ("survey", "review", "overview", "systematic", "综述")
 EXCERPT_CHARS = 1200
 
 
+def effective_query(query: str, venue: str | None) -> str:
+    """Prepend a venue name to the query.
+
+    This is a **query hint, not an API-side venue filter**, because the two filter routes
+    are closed: DBLP — the obvious conference index — now answers non-browser clients with an
+    anti-bot challenge page instead of JSON, and OpenAlex rejects a source-name filter
+    outright (`primary_location.source.display_name.search is not a valid field`). S2 does
+    document a `venue` parameter but it could not be verified while rate-limited, so it is
+    not used. Putting the venue in the query is verified: "CVPR diffusion model watermarking"
+    returns the CVPR paper with its venue named.
+    """
+    if not venue:
+        return query
+    return f"{venue} {query}".strip()
+
+
 def load_credentials() -> str:
     """Fill unset variables from the first usable file. Reports the file, never a value."""
     explicit = os.getenv("RE0_ENV_FILE", "").strip()
@@ -159,6 +175,9 @@ def print_document(index: int, document: dict, raw: bool, verify_budget: int) ->
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--query", required=True, help="a focused search phrase")
+    parser.add_argument("--venue", default=None, metavar="NAME",
+                        help="prepend a venue name (CVPR, NeurIPS, ACL…) to the query. A query hint, "
+                             "not an API-side venue filter — see effective_query() for why.")
     parser.add_argument("--start-year", type=int, default=None)
     parser.add_argument("--end-year", type=int, default=None)
     parser.add_argument("--max-papers", type=int, default=8,
@@ -177,6 +196,9 @@ def main(argv=None) -> int:
         parser.error("--verify takes 0-5; each check costs several requests against a shared rate limit")
 
     print(f"credentials: {load_credentials()}")
+    query = effective_query(args.query, args.venue)
+    if args.venue:
+        print(f"query hint: venue '{args.venue}' prepended (not an API-side filter)")
     if args.sources == "all":
         source = "all"
     else:
@@ -187,7 +209,7 @@ def main(argv=None) -> int:
         source = chosen[0]
     try:
         result = ResearchTools(None).execute("search_papers", {
-            "query": args.query, "limit": min(8, max(1, args.max_papers)),
+            "query": query, "limit": min(8, max(1, args.max_papers)),
             "source": source, "start_year": args.start_year, "end_year": args.end_year})
     except ProviderError as exc:
         # Reported verbatim. A failed search is not an empty result.

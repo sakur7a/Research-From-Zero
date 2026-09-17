@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Venue-aware search, and a model probe that never prints a key
+
+- Add `--venue NAME` to the skill. Conference-only papers (CVPR, NeurIPS, ACL…) were already
+  covered — Crossref, Semantic Scholar and OpenAlex index proceedings and the venue is reported —
+  so the route is a **query hint that prepends the venue**, not an API-side filter. The three
+  filter routes were checked and none is usable yet: DBLP answers a non-browser client with a
+  `Making sure you're not a bot!` challenge page instead of JSON; OpenAlex rejects
+  `primary_location.source.display_name.search` with HTTP 400 *"is not a valid field"*; and
+  Semantic Scholar's documented `venue=` parameter could not be verified while rate-limited.
+  A source filter still matters for "what did CVPR 2024 accept" and is left for when one of those
+  can be verified end to end.
+- Add `scripts/model_probe.py`: tests the model endpoint held in the environment before the agent
+  uses it. It reports only whether each variable is set — never a value, not even a masked prefix —
+  and prints the endpoint URL, which is safe because `validate_endpoint` refuses a URL carrying
+  credentials or a query string. It reuses `ModelVault` and `ChatModel.test()`, so a pass means the
+  real agent can use the same endpoint.
+- Tests: 36 Python cases added.
+
 ### Multi-source literature search, and a skill for it
 
 - `search_papers` grows from two sources to five — Semantic Scholar, OpenAlex, arXiv,

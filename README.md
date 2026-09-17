@@ -92,7 +92,7 @@ Base URL 通常包含 `/v1`，不要填写 `/chat/completions`；本地服务示
 
 | 环境变量 | 用途 |
 |---|---|
-| `RE0_LLM_BASE_URL` / `RE0_LLM_MODEL` / `RE0_LLM_API_KEY` | 启动时加载模型配置 |
+| `RE0_LLM_BASE_URL` / `RE0_LLM_MODEL` / `RE0_LLM_API_KEY` | 启动时加载模型配置。可用 `RE0_ENV_FILE=... python scripts/model_probe.py` 先自检：它只报告**变量名是否已设置**与工具调用协议是否通过，**从不打印任何值**，端点 URL 可打印是因为 `validate_endpoint` 已拒绝带凭据或查询串的 URL |
 | `RE0_LLM_TOKEN_PARAMETER` | `max_tokens` 或 `max_completion_tokens`，默认前者 |
 | `RE0_LLM_ALLOWED_HOSTS` | 额外允许的远程模型域名，逗号分隔；不得交由模型修改 |
 | `TAVILY_API_KEY` | 可选全网搜索摘要服务，与模型 Key 不同 |
@@ -148,6 +148,14 @@ python skills/paper-search/scripts/paper_search.py \
 这正好补上"光看链接判断不了"的两种情况：**链接真实但仓库是空的** → 文件条目数接近 0 且无候选文件；**链接打开 404** → `indeterminate`，文案是"可能不存在、已移动或无访问权限"，**不是"不存在"**。每种结果都带"失败或未支持不等于资源未开放"。
 
 **为什么限制次数**：一次核验约 4 个 GitHub 请求，匿名额度约每小时 60 次，所以上限是 5，并且**未被核验的链接仍按候选打印、不会显示成失败**；要查更多请配 `GITHUB_TOKEN`。**没有用 subagent** —— subagent 给你一段描述，这个检查给你一个能横向比较的状态，且不会把请求失败说成"没开源"。要看得更深，用仓库里已有的 `search_repositories`／`search_hub`／`inspect_resource`／`read_repository_file`／`search_release_discussions`（走 MCP 或任务），不在 skill 里另搭流水线。
+
+**会议论文（CVPR／NeurIPS／ACL 这类只发在会议上的）已经被覆盖** —— Crossref、Semantic Scholar、OpenAlex 都索引 proceedings，venue 会报出来。`--venue NAME` 把会议名前置到查询里：
+
+```bash
+python skills/paper-search/scripts/paper_search.py --query "diffusion watermarking" --venue CVPR --start-year 2024
+```
+
+这是**查询提示，不是 API 侧的会议过滤**，原因记在 `SKILL.md` 里：DBLP（最直接的会议索引）现在对非浏览器客户端返回反爬挑战页而不是 JSON；OpenAlex 明确拒绝按 source 名过滤（HTTP 400 "is not a valid field"）；Semantic Scholar 的 `venue=` 参数有文档但一直没验证成功（无 key 时被限流），所以没用。**多接一个源并不能解决这个问题** —— 五个源已经包含数亿条会议记录，缺的是查询形态，不是源的数量。
 
 设计取舍写在 `skills/paper-search/SKILL.md` 里，其中三条值得单独说明：
 

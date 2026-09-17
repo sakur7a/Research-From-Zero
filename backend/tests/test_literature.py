@@ -328,6 +328,15 @@ def skill_document(title, abstract):
             "locator": "fixture", "content": ""}
 
 
+def test_a_venue_hint_is_prepended_and_stays_optional():
+    module = load_skill_module()
+    # A query hint, because DBLP answers non-browsers with an anti-bot page and OpenAlex
+    # rejects a source-name filter — there is no API-side venue filter to call.
+    assert module.effective_query("diffusion watermarking", "CVPR") == "CVPR diffusion watermarking"
+    assert module.effective_query("diffusion watermarking", None) == "diffusion watermarking"
+    assert module.effective_query("diffusion watermarking", "") == "diffusion watermarking"
+
+
 def test_the_verification_budget_is_global_and_unchecked_links_are_still_listed(monkeypatch, capsys):
     module = load_skill_module()
     checked = []

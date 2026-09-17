@@ -23,6 +23,36 @@ python scripts/paper_search.py --query "KV cache compression for long-context LL
 4. Sinks survey/review papers to the bottom of the list, tagged `[survey]`, without
    removing them.
 
+## Conference papers
+
+Papers published only at a conference (CVPR, NeurIPS, ACL…) are **already covered**: Crossref,
+Semantic Scholar and OpenAlex all index proceedings, and the venue is reported. A live query for
+`CVPR diffusion model watermarking` returned the CVPR paper labelled
+`已收录于会议或期刊 · 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)`.
+
+`--venue NAME` prepends a venue name to the query:
+
+```bash
+python scripts/paper_search.py --query "diffusion watermarking" --venue CVPR --start-year 2024
+```
+
+**That is a query hint, not an API-side venue filter.** The reason is worth recording so nobody
+retries these blindly:
+
+| Route | Status |
+|---|---|
+| DBLP — the obvious conference index | **Unusable.** It answers a non-browser client with a `<title>Making sure you're not a bot!</title>` challenge page instead of JSON. |
+| OpenAlex source-name filter | **Rejected by the API.** `primary_location.source.display_name.search` returns HTTP 400 — *"is not a valid field"*. Filtering by source needs a source ID from a separate lookup. |
+| Semantic Scholar `venue=` | Documented, but **unverified**: every attempt was rate-limited without an API key, so it is not used. |
+
+An API-side venue filter would be genuinely better for "what did CVPR 2024 accept", because a
+keyword query only surfaces papers whose *text* matches. It is not shipped until one of those
+routes can be verified end to end.
+
+**More sources would not fix this.** The five sources already hold hundreds of millions of records
+including conference proceedings; the remaining gap is query shape, not source count. A keyword
+search cannot ask "everything this venue accepted", and a sixth index would not change that.
+
 ## Credentials
 
 Everything comes from the environment, and nothing is hardcoded. The script loads the
