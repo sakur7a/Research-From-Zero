@@ -20,9 +20,18 @@ async function api(path, data, method = data === undefined ? 'GET' : 'POST') {
 }
 function notice(text) {
   clearTimeout(toastTimer);
+  // A modal <dialog> and its blurred ::backdrop occupy the top layer, so a toast
+  // left in <body> would paint underneath the scrim and look blurred. Keep the
+  // single toast element inside the open dialog while one exists.
   const node = document.querySelector('#notice');
+  const host = document.querySelector('dialog[open]') || document.body;
+  if (node.parentElement !== host) host.appendChild(node);
   node.textContent = text; node.classList.add('show');
   toastTimer = setTimeout(() => node.classList.remove('show'), 7000);
+}
+function noticeHome() {
+  const node = document.querySelector('#notice');
+  if (node && node.parentElement !== document.body) document.body.appendChild(node);
 }
 function sidebar() {
   document.querySelector('#history').innerHTML = runs.length ? runs.map(r => `<button class="history-item ${r.id === current?.id ? 'is-current' : ''}" data-run="${e(r.id)}"><strong>${e(r.goal)}</strong><small><i class="dot ${e(r.status)}"></i>${e(RUN_LABELS[r.status] || r.status)} · ${e(timeLabel(r.created_at))}</small></button>`).join('') : '<p class="subtle">尚无研究任务。<br>从右侧提出第一个问题。</p>';
@@ -95,6 +104,8 @@ function poll(token) {
   },1400);
 }
 function openSettings() {
+  // Settings re-renders the dialog body, which would take the toast with it.
+  noticeHome();
   const defaults = normalizeDefaults(config.task_defaults);
   const presets = Array.isArray(config.endpoint_presets) ? config.endpoint_presets : [];
   const presetOptions = presets.map(p => `<option value="${e(p.base_url)}" ${p.base_url === config.base_url ? 'selected' : ''}>${e(p.label)}</option>`).join('');
@@ -163,6 +174,8 @@ document.addEventListener('change', event=>{
   if(value==='__custom'){field.value='';field.focus();return;}
   if(value)field.value=value;
 });
+// A toast left inside a closed dialog would sit in a display:none subtree.
+settings.addEventListener('close', noticeHome);
 document.addEventListener('submit', async event=>{
   if(!['task-form','model-form','defaults-form'].includes(event.target.id))return;
   event.preventDefault();const form=event.target, data=new FormData(form), button=form.querySelector('[type=submit]');button.disabled=true;

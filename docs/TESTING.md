@@ -138,16 +138,29 @@ CSS 的全部硬编码色值已消除）后，在隔离环境（Python 3.13.12�
 | Python | `python -m pytest` | **101 passed**（96 项＋5 项模型列表用例） |
 | JavaScript | `node --test tests/*.test.js` | **25 passed**（24 项＋1 项模型候选归一化用例） |
 | JS 语法 | `node --check web/{app,core,api,agent,agent-core,theme}.js` | 6 个模块通过 |
-| Agent 浏览器 smoke | `python scripts/agent_browser_smoke.py .data/agent-browser` | **8 组全过**，`browser_errors` 为空 |
+| Agent 浏览器 smoke | `python scripts/agent_browser_smoke.py .data/agent-browser` | **9 组全过**，`browser_errors` 为空 |
 
 新增的 5 项 Python 用例覆盖：预设表的 host 必须落在目的地允许列表内（防止两者
 漂移）、`POST /api/agent/models` 要求信任标记与允许列表内的主机、远程主机必须有
 Key、返回 ID 去重排序且不把 Key 写进响应或任务配置、供应商返回 401 时只回应用自身
 的措辞（不转发供应商响应体与 Key）、超限响应与非 JSON 响应各自返回 422。
 
-**本轮浏览器 smoke 未覆盖新增的「拉取可用模型」交互**：`FixtureNetwork` 尚未加入
-`GET /models` 分支，所以只验证了新表单没有破坏既有流程（8 组原有用例仍全过）。
-该交互目前由上面的 Python 用例加 Playwright 截图人工核对，smoke 扩展待补。
+浏览器 smoke 新增 `model_picker_fills_candidates_and_its_toast_is_not_hidden_by_the_modal`：
+用 fixture 的 `GET /models` 分支点「拉取可用模型」，断言 `#model-options` 填入 2 个
+候选，并用 `elementFromPoint` 证明提示条上方没有其他层覆盖。
+
+### 同轮修复：设置面板内的提示条看不见
+
+现象：在设置面板里点「拉取可用模型」后，右下角提示条看起来被模糊、看不见。
+原因是 `dialog::backdrop{backdrop-filter:blur(3px)}` —— `#notice` 是 `position:fixed`
+挂在 `<body>` 上，不属于 top layer，因此被画在模态遮罩**下方**。影响范围不止拉取
+模型：**设置面板打开期间任何提示都是隐形的**，包括 Key 填错返回的 422。
+
+修法：`notice()` 在有 `dialog[open]` 时把提示条节点移入该对话框（留在 top layer），
+对话框关闭时移回 `<body>`；`openSettings()` 重渲染前先归位，避免节点随 `innerHTML`
+被销毁。上面的 smoke 断言就是这条回归的守卫。截图核对：`agent-settings-model-picker.png`。
+
+**现在浏览器 smoke 已覆盖「拉取可用模型」交互**（上一版记录里写的待补项已完成）。
 
 仍未配置真实模型 Key：101／25 只覆盖协议、存储与权限分支，不是真实模型科研效果
 评测。四个新增国内平台的**预设地址取自多方公开文档，但其真实可用性、`GET /models`

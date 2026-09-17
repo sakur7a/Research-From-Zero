@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Fixed
+
+- Notices raised while the settings dialog was open were invisible. The toast lives
+  in `<body>`, but a modal `<dialog>` and its `::backdrop { backdrop-filter: blur() }`
+  occupy the top layer and painted over it, so the text looked blurred and
+  unreachable. The toast is now moved into the open dialog to stay in the top layer,
+  and returned to `<body>` when the dialog closes. This affected every notice raised
+  from the dialog — including a wrong API key returning 422 — not only the model
+  picker's result.
+
 ### Model setup from a provider preset
 
 - Replace the free-text provider field with a preset list served by the backend

@@ -61,6 +61,20 @@ def run(output):
         page.locator('[name=model]').fill(CONFIG['model'])
         page.locator('[name=api_key]').fill(CONFIG['api_key'])
         page.locator('[name=trust_endpoint]').check()
+        # The picker asks the endpoint what it serves; the key rides along once.
+        page.locator('[data-action=fetch-models]').click()
+        page.wait_for_function("document.querySelectorAll('#model-options option').length===2")
+        assert page.locator('#model-options option[value="fixture-model-pro"]').count()==1
+        # Regression guard: a toast left in <body> paints *underneath* the modal
+        # dialog's blurred ::backdrop and looks invisible. It must live inside the
+        # open dialog, and nothing may cover it.
+        assert page.evaluate("document.querySelector('#settings').contains(document.querySelector('#notice'))")
+        box=page.locator('#notice').bounding_box()
+        assert box, 'notice has no layout box'
+        assert page.evaluate("([x,y])=>{const el=document.elementFromPoint(x,y);return Boolean(el&&el.closest('#notice'));}",
+                             [box['x']+box['width']/2,box['y']+box['height']/2]), 'notice is covered by another layer'
+        page.screenshot(path=str(output/'agent-settings-model-picker.png'),full_page=True)
+        checked.append('model_picker_fills_candidates_and_its_toast_is_not_hidden_by_the_modal')
         page.locator('#model-form [type=submit]').click()
         page.wait_for_function("!document.querySelector('#settings').open")
         page.locator('.topbar [data-action=settings]').click()
