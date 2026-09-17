@@ -65,7 +65,13 @@
   section to `AGENTS.md`: a report keeps only what was judged relevant and states how many records
   were set aside, never appends a "for completeness" section of rejected matches, and carries
   through what the tools reported. A dropped column makes a working feature look absent.
-- Tests: 50 Python cases added.
+- Document what each open-source layer can and cannot yield. The distinction matters because only
+  `--verify` shows that a public repository may carry **no licence**, that it may hold **code but no
+  weights**, or that it is a **fork with vendored source** — three things that change the answer and
+  none of which a name match can reveal. The section also names what no layer settles and therefore
+  stays with a person: official attribution, whether the code runs, whether the weights download, and
+  gated access, which is `access_failed` rather than closed source.
+- Tests: 51 Python cases added.
 
 ### Multi-source literature search, and a skill for it
 

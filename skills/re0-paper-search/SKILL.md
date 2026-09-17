@@ -294,6 +294,28 @@ This is exactly what a link alone cannot tell you:
 
 Every outcome carries `本次没有完成内容验证；失败或未支持不等于资源未开放。`
 
+### What each layer can and cannot yield
+
+| Layer | Fields returned | It answers | It cannot answer |
+|---|---|---|---|
+| 1a abstract regex | one URL | did the authors publish a link in the abstract | anything about what is behind it |
+| 1b name search | `full_name`/`id`, `description`, `updated_at`, `official: unverified` | does something with this project name exist | whether it is this paper's work |
+| 2 `--verify N` | `status`, commit `revision`, file count, `indicators` per category, release asset names with declared sizes, `license_id`, `limitations` | is it reachable, is it empty, what is in it, is a licence present | whether the code runs, whether the weights download, whether it implements *this* paper |
+
+Three things only layer 2 reveals, and each one changes the answer:
+
+- **A public repository can carry no licence.** An empty `license_id` is the difference between the
+  code being readable and the code being usable, and no amount of name matching shows it.
+- **A repository can hold code but no weights.** `indicators` reporting `weights=0, data=0` means the
+  companion dataset link is not optional — it is where the artifact actually lives.
+- **A repository can be a fork.** A file tree containing a vendored copy of another project's source
+  is visible in the listing and never in the name.
+
+What no layer of this tool settles, and what therefore stays with a person or a further agent step:
+**official attribution** (a name match is not authorship), **that the code runs**, **that the
+weights download**, and **gated access** — which is reported as `access_failed` and must never be
+written up as closed source.
+
 **Why it is off by default, and why not a subagent.** One check costs about four GitHub
 requests and the anonymous limit is roughly 60 per hour, so `--verify` defaults to 0, caps at 8,
 and counts the candidates it left unchecked rather than hiding them — an unchecked link is printed

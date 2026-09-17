@@ -368,6 +368,10 @@ def test_the_standing_rules_are_written_into_the_project_guidance():
     assert "## Reporting from these results" in skill
     for phrase in ("say how many you set aside", "artifact_candidates", "nobody searched them"):
         assert phrase in skill, f"SKILL.md lost: {phrase}"
+    # What a layer can yield has to be stated next to the layer, or a name match reads as authorship.
+    assert "### What each layer can and cannot yield" in skill
+    for phrase in ("no licence", "code but no weights", "can be a fork", "official attribution"):
+        assert phrase in skill, f"SKILL.md lost the layer limit: {phrase}"
 
 
 def test_the_retrieval_rules_reach_every_consumer_that_reads_them():
