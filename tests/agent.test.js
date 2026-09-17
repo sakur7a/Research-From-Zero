@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {SHIPPED_DEFAULTS,activeRun,budgetSummary,canResume,consentText,eventText,normalizeDefaults} from '../web/agent-core.js';
+import {MODEL_OPTION_LIMIT,SHIPPED_DEFAULTS,activeRun,budgetSummary,canResume,consentText,eventText,modelOptionIds,normalizeDefaults} from '../web/agent-core.js';
 import {e,link} from '../web/core.js';
 test('task lifecycle and resumability are explicit',()=>{
  assert(activeRun({status:'running'})); assert(!activeRun({status:'completed'}));
@@ -38,4 +38,12 @@ test('the composer summary states the library permission explicitly',()=>{
 test('the per-task consent names library material only when it will be sent',()=>{
  assert.ok(!consentText({use_library:false}).includes('文献库'));
  assert.ok(consentText({use_library:true}).includes('本地文献库的书目与摘要'));
+});
+test('model candidates are trimmed and deduplicated before reaching the DOM',()=>{
+ assert.deepEqual(modelOptionIds({models:['b',' a ','b','','   ']}),['b','a']);
+ assert.deepEqual(modelOptionIds({models:['x',7,null,{id:'y'}]}),['x']);
+ assert.deepEqual(modelOptionIds({}),[]);
+ assert.deepEqual(modelOptionIds(null),[]);
+ assert.deepEqual(modelOptionIds('fixture-model'),[]);
+ assert.equal(modelOptionIds({models:Array.from({length:MODEL_OPTION_LIMIT+50},(_,i)=>`m${i}`)}).length,MODEL_OPTION_LIMIT);
 });

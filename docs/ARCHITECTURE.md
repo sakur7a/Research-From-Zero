@@ -116,6 +116,16 @@ system proxy inheritance. Response limit 2 MiB; provider error bodies are not
 shown. The raw configured model credential is redacted if echoed in outputs.
 This is not a general secret detector for sensitive user-supplied task text.
 
+The settings picker uses the same destination rules. `POST /api/agent/models`
+validates the supplied base URL exactly like a model call, then performs one
+`GET {base_url}/models` with a 20-second timeout and a 512 KiB response bound, and
+returns normalized IDs. The key travels with that one request and is never stored,
+returned or checkpointed. Providers commonly omit this endpoint; the route then
+fails with an app-authored message and the user types a model ID. A returned list
+is a statement about what the service lists, **not** about tool-calling support —
+`POST /api/agent/config/test` stays the only gate. The offered presets are a subset
+of the destination allowlist, which a test asserts so the two cannot drift apart.
+
 Research tools use fixed GitHub/HF/arXiv/Crossref endpoints and the old bounded
 provider client. Optional Tavily adds search snippets via one fixed POST endpoint.
 Agent-generated URLs never become unrestricted HTTP destinations. Repository file
@@ -136,10 +146,11 @@ All write endpoints preserve the original JSON, same-origin and
 
 | Route | Purpose |
 |---|---|
-| `GET /api/agent/config` | Redacted config, capabilities, task defaults, busy status |
+| `GET /api/agent/config` | Redacted config, capabilities, task defaults, endpoint presets, busy status |
 | `PUT /api/agent/config` | Explicitly trusted model settings, memory only |
 | `DELETE /api/agent/config` | Clear in-memory settings (not shell environment) |
 | `POST /api/agent/config/test` | One potentially billed tool-call capability test |
+| `POST /api/agent/models` | One allowlist-checked `GET {base_url}/models`; key not stored |
 | `PUT /api/agent/defaults` | Workspace budgets and library permission for **new** tasks |
 | `GET, POST /api/agent/runs` | Last 100 tasks / start a task |
 | `GET /api/agent/runs/{id}` | Status, plan, report, source evidence and usage |

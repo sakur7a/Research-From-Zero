@@ -1,6 +1,6 @@
 import {e, link, timeLabel} from './core.js';
 import {initTheme} from './theme.js';
-import {RUN_LABELS, TOOL_LABELS, SHIPPED_DEFAULTS, activeRun, budgetSummary, canResume, consentText, eventText, normalizeDefaults} from './agent-core.js';
+import {RUN_LABELS, TOOL_LABELS, SHIPPED_DEFAULTS, activeRun, budgetSummary, canResume, consentText, eventText, modelOptionIds, normalizeDefaults} from './agent-core.js';
 
 initTheme();
 const workspace = document.querySelector('#workspace');
@@ -96,11 +96,14 @@ function poll(token) {
 }
 function openSettings() {
   const defaults = normalizeDefaults(config.task_defaults);
+  const presets = Array.isArray(config.endpoint_presets) ? config.endpoint_presets : [];
+  const presetOptions = presets.map(p => `<option value="${e(p.base_url)}" ${p.base_url === config.base_url ? 'selected' : ''}>${e(p.label)}</option>`).join('');
   settings.innerHTML=`<div class="dialog-header"><div><div class="eyebrow">LOCAL WORKSPACE SETTINGS</div><h2 id="settings-title">模型与任务设置</h2></div><button class="close" data-action="close-settings" aria-label="关闭设置">×</button></div><p class="subtle">使用支持 Chat Completions 工具调用的服务。API Key 只放在本地服务进程内存；重启后重新输入，或用环境变量配置。</p>
-    <form id="model-form" autocomplete="off"><label>接口地址预设<select id="preset"><option value="">选择接口形状（不代表已验证所有模型）</option><option value="https://api.openai.com/v1">OpenAI-compatible / OpenAI</option><option value="https://api.deepseek.com/v1">DeepSeek-compatible</option><option value="https://dashscope.aliyuncs.com/compatible-mode/v1">DashScope-compatible</option><option value="http://127.0.0.1:11434/v1">本地服务 / 127.0.0.1:11434</option></select></label>
+    <form id="model-form" autocomplete="off"><label>服务商<select id="preset"><option value="">选择服务商会自动填入下面的地址（不代表已实测模型兼容性）</option>${presetOptions}<option value="__custom">其他 / 自定义地址</option></select></label>
     <label>API Base URL<input name="base_url" id="base-url" type="url" value="${e(config.base_url || '')}" placeholder="https://api.example.com/v1" required></label><p class="field-note">只接受预设可信域名和显式端口的回环地址。自定义域名需设置 RE0_LLM_ALLOWED_HOSTS。</p>
-    <label>Model ID<input name="model" value="${e(config.model || '')}" placeholder="填写你实际可用且支持工具调用的模型 ID" required maxlength="150"></label>
     <label>API Key<input name="api_key" type="password" autocomplete="new-password" placeholder="${config.has_api_key?'已配置；重新保存时需再次输入，不会回填旧密钥':'本地无认证服务可留空'}" maxlength="2048"></label>
+    <label>Model ID<input name="model" list="model-options" value="${e(config.model || '')}" placeholder="填写，或从下面拉取后选择" required maxlength="150"></label><datalist id="model-options"></datalist>
+    <div class="connection-test"><button type="button" class="button" data-action="fetch-models">拉取可用模型</button><span>向该地址发出一次 GET /models。返回的列表只说明该服务报告了哪些模型，<b>不代表它们支持工具调用</b>；Key 只用于这次请求，不保存、不回填。</span></div>
     <div class="settings-grid"><label>输出预算参数<select name="token_parameter"><option value="max_tokens" ${config.token_parameter==='max_tokens'?'selected':''}>max_tokens</option><option value="max_completion_tokens" ${config.token_parameter==='max_completion_tokens'?'selected':''}>max_completion_tokens</option></select></label><label>单次输出 Token 上限<input name="max_output_tokens" type="number" value="${config.max_output_tokens || 3000}" min="256" max="8192" required></label></div>
     <label class="check"><input type="checkbox" name="trust_endpoint" required>我信任此模型服务，并同意将任务材料发送到这个地址。</label><div class="dialog-actions"><button type="button" class="quiet" data-action="clear-model">清除内存配置</button><button type="submit" class="primary">保存配置</button></div></form>
     <div class="connection-test"><button class="button" data-action="test-model" ${config.configured?'':'disabled'}>测试工具调用</button><span>会发起一次模型请求，可能计费；测试不包含文献数据。</span></div>
@@ -135,6 +138,16 @@ document.addEventListener('click', async event => {
         for(const [name,value] of Object.entries(SHIPPED_DEFAULTS)){const field=form.elements[name];if(!field)continue;if(field.type==='checkbox')field.checked=value;else field.value=value;}
         notice('已填入初始默认值；点击「保存默认值」后生效。');break;
       }
+      case 'fetch-models':{
+        const form=document.querySelector('#model-form');
+        if(!form.elements.trust_endpoint.checked){notice('请先勾选「我信任此模型服务」：拉取模型列表会把 Key 发送到该地址。');break;}
+        button.disabled=true;
+        const result=await api('/models',{base_url:form.elements.base_url.value,api_key:form.elements.api_key.value,trust_endpoint:true});
+        const ids=modelOptionIds(result);
+        document.querySelector('#model-options').innerHTML=ids.map(id=>`<option value="${e(id)}"></option>`).join('');
+        notice(ids.length?`已获取 ${ids.length} 个模型 ID：在 Model ID 里输入或选择。列表不代表支持工具调用，仍需执行「测试工具调用」。`:'该服务没有返回可用的模型 ID，请手动填写。');
+        button.disabled=false;break;
+      }
       case 'clear-model':config=await api('/config',{},'DELETE');settings.close();sidebar();if(!current)home();notice('内存中的模型配置已清除。');break;
       case 'test-model':button.disabled=true;await api('/config/test',{});notice('工具调用测试通过；不代表科研效果已评测。');button.disabled=false;break;
       case 'cancel':await api('/runs/'+current.id+'/cancel',{});notice('已请求停止，将在当前调用结束或超时后生效。');break;
@@ -142,7 +155,14 @@ document.addEventListener('click', async event => {
     }
   } catch(err){button.disabled=false;notice(err.message);}
 });
-document.addEventListener('change', event=>{if(event.target.id==='preset'&&event.target.value)document.querySelector('#base-url').value=event.target.value;});
+document.addEventListener('change', event=>{
+  if(event.target.id!=='preset')return;
+  const value=event.target.value, field=document.querySelector('#base-url');
+  // Candidate models belong to one provider; drop them when the provider changes.
+  document.querySelector('#model-options').innerHTML='';
+  if(value==='__custom'){field.value='';field.focus();return;}
+  if(value)field.value=value;
+});
 document.addEventListener('submit', async event=>{
   if(!['task-form','model-form','defaults-form'].includes(event.target.id))return;
   event.preventDefault();const form=event.target, data=new FormData(form), button=form.querySelector('[type=submit]');button.disabled=true;

@@ -3,7 +3,7 @@ from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
 from .model import ModelError
-from .schemas import Approval, ModelConfig, TaskDefaults, TaskInput
+from .schemas import Approval, ModelConfig, ModelListRequest, TaskDefaults, TaskInput
 
 
 def agent_router(runtime):
@@ -24,6 +24,11 @@ def agent_router(runtime):
     @router.post("/config/test")
     def test():
         return runtime.test_connection()
+
+    @router.post("/models")
+    def models(data: ModelListRequest):
+        # Read-only probe used by the settings picker. The key is not persisted.
+        return runtime.list_models(data)
 
     @router.put("/defaults")
     def defaults(data: TaskDefaults):

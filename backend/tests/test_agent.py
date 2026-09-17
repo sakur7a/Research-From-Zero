@@ -7,10 +7,11 @@ import time
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from urllib.parse import urlsplit
 
 from re0.main import create_app
 from re0.models import PaperInput
-from re0.agent.model import ChatModel, ModelError, validate_endpoint
+from re0.agent.model import DEFAULT_HOSTS, LOOPBACK, ChatModel, ModelError, validate_endpoint
 from re0.agent.schemas import ModelConfig, TaskDefaults, TaskInput, PaperSearchArgs, FileArgs, SearchArgs, HubSearchArgs
 from re0.agent.tools import ResearchTools, specifications
 
@@ -66,6 +67,10 @@ class FixtureNetwork:
         self.requests.append(request)
         if request.url.host == 'export.arxiv.org':
             return httpx.Response(200, content=ATOM)
+        if request.url.path.endswith('/models'):
+            assert request.url == 'https://api.openai.com/v1/models'
+            assert request.headers['Authorization'] == 'Bearer ' + CONFIG['api_key']
+            return httpx.Response(200, json={'data': [{'id': 'fixture-model'}, {'id': 'fixture-model-pro'}, {'id': 'fixture-model'}]})
         assert request.url == 'https://api.openai.com/v1/chat/completions'
         assert request.headers['Authorization'] == 'Bearer ' + CONFIG['api_key']
         data = json.loads(request.content)
@@ -369,3 +374,57 @@ def test_clearing_model_memory_keeps_defaults_and_never_echoes_the_key(client):
     # Clearing the in-memory model must not silently reset workspace policy.
     assert remaining['task_defaults']=={'max_model_calls':8,'max_tool_calls':20,'attempt_seconds':360,'use_library':True}
     assert CONFIG['api_key'] not in client.get('/api/agent/config').text
+
+
+def test_endpoint_presets_stay_inside_the_destination_allowlist(client):
+    presets=client.get('/api/agent/config').json()['endpoint_presets']
+    assert presets and len({p['id'] for p in presets})==len(presets)
+    for preset in presets:
+        assert set(preset)=={'id','label','base_url'},preset
+        host=urlsplit(preset['base_url']).hostname
+        assert host in DEFAULT_HOSTS or host in LOOPBACK,preset
+
+
+def test_model_list_requires_a_trusted_allowlisted_endpoint_and_a_key(client):
+    assert client.post('/api/agent/models',json={'base_url':CONFIG['base_url']}).status_code==422
+    assert client.post('/api/agent/models',json={'base_url':'https://evil.example/v1','api_key':'sk-aaaaaaaa','trust_endpoint':True}).status_code==422
+    assert client.post('/api/agent/models',json={'base_url':CONFIG['base_url'],'trust_endpoint':True}).status_code==422
+    assert client.post('/api/agent/models',json={'base_url':CONFIG['base_url'],'api_key':'bad\nkey','trust_endpoint':True}).status_code==422
+    assert client.post('/api/agent/models',json={'base_url':CONFIG['base_url'],'api_key':'sk-aaaaaaaa','trust_endpoint':False}).status_code==422
+
+
+def test_model_list_returns_sorted_unique_ids_without_storing_or_echoing_the_key(tmp_path):
+    network=FixtureNetwork()
+    with TestClient(create_app(str(tmp_path/'models.sqlite3'),httpx.MockTransport(network)),headers=HEADERS) as c:
+        response=c.post('/api/agent/models',json={'base_url':CONFIG['base_url'],'api_key':CONFIG['api_key'],'trust_endpoint':True})
+        assert response.status_code==200,response.text
+        body=response.json()
+        assert body['models']==['fixture-model','fixture-model-pro'] and body['total']==2 and not body['truncated']
+        assert '工具调用' in body['note']
+        assert CONFIG['api_key'] not in response.text
+        assert str(network.requests[-1].url)=='https://api.openai.com/v1/models'
+        assert network.requests[-1].headers['Authorization']=='Bearer '+CONFIG['api_key']
+        # Probing is read-only: it must not leave a model configuration behind.
+        assert not c.get('/api/agent/config').json()['configured']
+
+
+def test_model_list_failure_never_relays_the_provider_body_or_the_key(tmp_path):
+    def refuse(request):
+        return httpx.Response(401,json={'error':{'message':'invalid key '+CONFIG['api_key']}})
+    with TestClient(create_app(str(tmp_path/'refused.sqlite3'),httpx.MockTransport(refuse)),headers=HEADERS) as c:
+        response=c.post('/api/agent/models',json={'base_url':CONFIG['base_url'],'api_key':CONFIG['api_key'],'trust_endpoint':True})
+        assert response.status_code==422
+        assert CONFIG['api_key'] not in response.text and 'invalid key' not in response.text
+        assert '401' in response.json()['detail']
+
+
+def test_model_list_rejects_an_oversized_or_non_json_response(tmp_path):
+    def oversized(request):
+        return httpx.Response(200,content=b'{"data":[' + b'"model-x",' * 64000 + b']}')
+    with TestClient(create_app(str(tmp_path/'oversized.sqlite3'),httpx.MockTransport(oversized)),headers=HEADERS) as c:
+        assert c.post('/api/agent/models',json={'base_url':CONFIG['base_url'],'api_key':CONFIG['api_key'],'trust_endpoint':True}).status_code==422
+    def not_json(request):
+        return httpx.Response(200,content=b'<html>no</html>')
+    with TestClient(create_app(str(tmp_path/'notjson.sqlite3'),httpx.MockTransport(not_json)),headers=HEADERS) as c:
+        response=c.post('/api/agent/models',json={'base_url':CONFIG['base_url'],'api_key':CONFIG['api_key'],'trust_endpoint':True})
+        assert response.status_code==422 and 'JSON' in response.json()['detail']

@@ -1,6 +1,29 @@
 # Changelog
 
-## Unreleased — task budgets and permissions move into settings
+## Unreleased
+
+### Model setup from a provider preset
+
+- Replace the free-text provider field with a preset list served by the backend
+  (`endpoint_presets` in `GET /api/agent/config`), so a user picks a platform and
+  pastes only an API key. Presets: OpenAI, DeepSeek, DashScope (both regions),
+  Moonshot, Zhipu GLM, SiliconFlow, Volcengine Ark, OpenRouter and local Ollama.
+- Add `POST /api/agent/models`: one bounded, allowlist-checked
+  `GET {base_url}/models` that returns candidate model IDs for the picker. The key
+  is used for that single request only and is never stored, returned, or written
+  into a task record. A provider that does not implement the endpoint fails with a
+  clear message and the user types a model ID instead; nothing is guessed.
+- Model IDs are offered through a `<datalist>` and can still be typed by hand.
+- **The returned list is not a compatibility claim.** It reports which models the
+  service lists, not which support tool calling. The existing "test tool call"
+  step remains the only gate before a research task can run.
+- Add four hosts to the destination allowlist: `open.bigmodel.cn`,
+  `api.moonshot.cn`, `api.siliconflow.cn`, `ark.cn-beijing.volces.com`. This is a
+  network destination permit, not a tested-compatibility list, and a drift test
+  asserts every offered preset host stays inside it.
+- Tests: 5 Python and 1 JavaScript cases added.
+
+### Task budgets and permissions move into settings
 
 - Move the task budget limits and the library-metadata permission out of the
   new-task form and into the settings dialog. The composer now shows a one-line

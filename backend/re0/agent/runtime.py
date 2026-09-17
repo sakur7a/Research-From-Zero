@@ -17,8 +17,8 @@ from pydantic import ValidationError
 
 from ..models import now
 from ..providers import ProviderError
-from .model import ChatModel, ModelError, ModelVault
-from .schemas import ModelConfig, PlanArgs, Report, TaskDefaults, TaskInput
+from .model import ENDPOINT_PRESETS, ChatModel, ModelError, ModelVault, list_models as fetch_model_list
+from .schemas import ModelConfig, ModelListRequest, PlanArgs, Report, TaskDefaults, TaskInput
 from .storage import TaskStore
 from .tools import ResearchTools, specifications
 
@@ -58,6 +58,7 @@ class AgentRuntime:
         self.vault = ModelVault()
         self.tools = ResearchTools(library, transport)
         self.model_factory = model_factory or (lambda config: ChatModel(config, transport))
+        self._transport = transport
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="re0-agent")
@@ -75,7 +76,12 @@ class AgentRuntime:
     def public(self):
         return {**self.vault.public(), "busy": self.busy(), "runtime": "native-durable-tool-loop",
                 "web_search_enabled": self.tools.web_enabled, "task_defaults": self.task_defaults().model_dump(),
+                "endpoint_presets": ENDPOINT_PRESETS,
                 "tool_names": [x["function"]["name"] for x in specifications(True, self.tools.web_enabled)]}
+
+    def list_models(self, credential: ModelListRequest):
+        """Ask one allowlisted endpoint what it serves. Nothing is stored or logged."""
+        return fetch_model_list(credential, transport=self._transport)
 
     def task_defaults(self) -> TaskDefaults:
         """Stored workspace defaults for new tasks. Credentials are never stored here."""

@@ -10,18 +10,40 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import ValidationError
 
-from .schemas import ModelConfig
+from .schemas import ModelConfig, ModelListRequest
 
+# A destination permit, not a compatibility claim. Every host here still has to
+# pass the tool-call capability check before it can run a research task.
 DEFAULT_HOSTS = {"api.openai.com", "api.deepseek.com", "dashscope.aliyuncs.com",
-                 "dashscope-intl.aliyuncs.com", "openrouter.ai"}
+                 "dashscope-intl.aliyuncs.com", "openrouter.ai",
+                 "open.bigmodel.cn", "api.moonshot.cn", "api.siliconflow.cn",
+                 "ark.cn-beijing.volces.com"}
 LOOPBACK = {"127.0.0.1", "::1"}
+
+# Offered to the settings UI so a user only has to paste a key. Hosts must stay
+# inside DEFAULT_HOSTS or an existing deployment variable; see the drift test.
+ENDPOINT_PRESETS = [
+    {"id": "openai", "label": "OpenAI", "base_url": "https://api.openai.com/v1"},
+    {"id": "deepseek", "label": "DeepSeek", "base_url": "https://api.deepseek.com/v1"},
+    {"id": "dashscope", "label": "阿里云百炼 · 通义千问", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"},
+    {"id": "dashscope-intl", "label": "阿里云百炼 · 国际站", "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"},
+    {"id": "moonshot", "label": "月之暗面 Kimi", "base_url": "https://api.moonshot.cn/v1"},
+    {"id": "zhipu", "label": "智谱 AI · GLM", "base_url": "https://open.bigmodel.cn/api/paas/v4"},
+    {"id": "siliconflow", "label": "硅基流动", "base_url": "https://api.siliconflow.cn/v1"},
+    {"id": "volcengine", "label": "火山方舟 · 豆包", "base_url": "https://ark.cn-beijing.volces.com/api/v3"},
+    {"id": "openrouter", "label": "OpenRouter", "base_url": "https://openrouter.ai/api/v1"},
+    {"id": "ollama", "label": "本地服务 · Ollama", "base_url": "http://127.0.0.1:11434/v1"},
+]
+
+MODEL_LIST_LIMIT = 400
+MODEL_LIST_BYTES = 512 * 1024
 
 
 class ModelError(Exception):
     """Only application-authored, credential-free messages may be exposed."""
 
 
-def validate_endpoint(config: ModelConfig) -> ModelConfig:
+def validate_endpoint(config: "ModelConfig | ModelListRequest"):
     try:
         p = urlsplit(config.base_url)
         allowed = DEFAULT_HOSTS | {h.strip().lower() for h in os.getenv("RE0_LLM_ALLOWED_HOSTS", "").split(",") if h.strip()}
@@ -41,6 +63,57 @@ def validate_endpoint(config: ModelConfig) -> ModelConfig:
     except ValueError as exc:
         raise ModelError("模型地址不受信任：使用预设 HTTPS 主机，或显式端口的 127.0.0.1 / [::1]；自定义主机需由部署者设置 RE0_LLM_ALLOWED_HOSTS") from exc
     return config.model_copy(update={"base_url": config.base_url.rstrip("/")})
+
+
+def _model_entries(payload):
+    """Accept the shapes providers actually use; never invent an entry."""
+    if isinstance(payload, dict):
+        for key in ("data", "models"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+            if isinstance(value, dict) and isinstance(value.get("models"), list):
+                return value["models"]
+    return []
+
+
+def list_models(credential: "ModelConfig | ModelListRequest", *, transport=None) -> dict:
+    """One bounded `GET {base_url}/models`.
+
+    A provider that does not implement this endpoint, or a gated one, is reported
+    as a failure. The caller falls back to typing a model ID; nothing is guessed.
+    """
+    config = validate_endpoint(credential)
+    headers = {"Content-Type": "application/json"}
+    key = config.api_key.get_secret_value()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    try:
+        with httpx.Client(transport=transport, timeout=20, follow_redirects=False, trust_env=False) as client:
+            with client.stream("GET", config.base_url + "/models", headers=headers) as response:
+                if response.status_code != 200:
+                    # Provider bodies can echo request headers; keep our own wording.
+                    raise ModelError(f"模型列表接口返回 HTTP {response.status_code}；请改用手动填写 Model ID")
+                body = bytearray()
+                for chunk in response.iter_bytes():
+                    body.extend(chunk)
+                    if len(body) > MODEL_LIST_BYTES:
+                        raise ModelError("模型列表响应超过大小上限；请改用手动填写 Model ID")
+    except httpx.HTTPError as exc:
+        raise ModelError("无法读取模型列表；检查网络、Key 权限与该服务是否实现 GET /models，或手动填写 Model ID") from exc
+    try:
+        payload = json.loads(body)
+    except ValueError as exc:
+        raise ModelError("模型列表响应不是有效 JSON；请改用手动填写 Model ID") from exc
+    found = set()
+    for item in _model_entries(payload):
+        name = item if isinstance(item, str) else ((item.get("id") or item.get("name")) if isinstance(item, dict) else None)
+        if isinstance(name, str) and name.strip():
+            found.add(name.strip()[:150])
+    ordered = sorted(found)
+    return {"ok": True, "models": ordered[:MODEL_LIST_LIMIT], "total": len(ordered),
+            "truncated": len(ordered) > MODEL_LIST_LIMIT,
+            "note": "列表只说明该服务报告了哪些模型，不代表它们支持工具调用；请用「测试工具调用」确认。"}
 
 
 class ModelVault:

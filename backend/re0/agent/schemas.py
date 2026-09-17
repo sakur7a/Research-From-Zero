@@ -9,6 +9,14 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+def clean_secret(value: SecretStr) -> SecretStr:
+    """Keys are single-line printable ASCII; anything else is rejected, not truncated."""
+    raw = value.get_secret_value()
+    if len(raw) > 2048 or any(ord(c) < 33 or ord(c) > 126 for c in raw):
+        raise ValueError("密钥格式无效")
+    return value
+
+
 class ModelConfig(StrictModel):
     base_url: str = Field(min_length=8, max_length=400)
     model: str = Field(min_length=1, max_length=150, pattern=r"^[\w./:@-]+$")
@@ -20,15 +28,26 @@ class ModelConfig(StrictModel):
     @field_validator("api_key")
     @classmethod
     def valid_secret(cls, value: SecretStr):
-        raw = value.get_secret_value()
-        if len(raw) > 2048 or any(ord(c) < 33 or ord(c) > 126 for c in raw):
-            raise ValueError("密钥格式无效")
-        return value
+        return clean_secret(value)
 
     def public(self) -> dict:
         return {**self.model_dump(exclude={"api_key", "trust_endpoint"}),
                 "configured": True, "has_api_key": bool(self.api_key.get_secret_value()),
                 "storage": "server_memory", "protocol": "chat-completions-tools"}
+
+
+class ModelListRequest(StrictModel):
+    """Transient probe for `GET {base_url}/models`. The key is used for that one
+    request and is never stored, returned, or written into a task record."""
+
+    base_url: str = Field(min_length=8, max_length=400)
+    api_key: SecretStr = SecretStr("")
+    trust_endpoint: Literal[True]
+
+    @field_validator("api_key")
+    @classmethod
+    def valid_secret(cls, value: SecretStr):
+        return clean_secret(value)
 
 
 BUDGET_FIELDS = ("max_model_calls", "max_tool_calls", "attempt_seconds", "use_library")

@@ -27,6 +27,14 @@ export function consentText(raw) {
     ? '我同意将任务、检索到的材料，以及本地文献库的书目与摘要发送至所配置的模型服务，并承担相应调用费用。'
     : '我同意将任务及检索到的材料发送至所配置的模型服务，并承担相应调用费用。';
 }
+// Candidate model IDs for the settings picker. The server already dedupes and
+// sorts; this only keeps a malformed or hostile payload from reaching the DOM.
+export const MODEL_OPTION_LIMIT = 400;
+export function modelOptionIds(payload) {
+  const list = payload && Array.isArray(payload.models) ? payload.models : [];
+  const ids = list.map(x => (typeof x === 'string' ? x.trim() : '')).filter(Boolean);
+  return [...new Set(ids)].slice(0, MODEL_OPTION_LIMIT);
+}
 export function eventText(event) {
   const d = event.data || {};
   if (event.kind === 'tool_started') return `正在${TOOL_LABELS[d.tool] || d.tool}`;
