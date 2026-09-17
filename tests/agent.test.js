@@ -47,3 +47,7 @@ test('model candidates are trimmed and deduplicated before reaching the DOM',()=
  assert.deepEqual(modelOptionIds('fixture-model'),[]);
  assert.equal(modelOptionIds({models:Array.from({length:MODEL_OPTION_LIMIT+50},(_,i)=>`m${i}`)}).length,MODEL_OPTION_LIMIT);
 });
+test('evidence read-back and context compaction are visible in the trace',()=>{
+ assert.match(eventText({kind:'tool_started',data:{tool:'read_evidence'}}),/取回证据正文/);
+ assert.match(eventText({kind:'context_compacted',data:{message:'已收起 3 条较早的工具摘录；证据保留'}}),/已收起 3 条较早的工具摘录/);
+});

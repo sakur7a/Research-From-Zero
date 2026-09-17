@@ -56,7 +56,9 @@ web/agent.html + agent.js        web/index.html + app.js
 4. Reassign unique per-turn call IDs. Save pending calls before executing them.
 5. Validate the named tool, task consent and arguments. Reserve tool budget.
 6. Execute one bounded read-only tool, atomically store its evidence plus result,
-   then append the result to model context and checkpoint.
+   then append a **bounded excerpt** of that result to model context and checkpoint.
+   Whole source bodies never enter the conversation; `read_evidence` serves a slice
+   of a stored body on request.
 7. Repeat. The model can change queries, inspect discovered resources, read files,
    revise its plan, or finish; no fixed ordering is baked into this loop.
 8. `finish_report` must use valid per-task evidence IDs. On success the runtime
@@ -106,9 +108,29 @@ implemented yet. Create a new scoped task instead.
 Task defaults are 12 model calls, 20 tool calls and 360 seconds per explicit
 attempt; schema upper bounds are 24, 40 and 900. In-flight calls can finish or time
 out after a cancellation/time boundary. This is not a hard wall-clock or monetary
-cap. Prompt/context text is capped at 150,000 serialized characters; there is no
-automatic context compaction yet. Hitting the cap preserves evidence and fails
-explicitly rather than silently dropping source context.
+cap. Prompt/context text is capped at 150,000 serialized characters.
+
+Context cost is managed in three steps, because a tool result is re-sent on every
+later model call and its size therefore multiplies by the remaining turns:
+
+- A tool result enters the conversation as metadata plus a bounded excerpt: 6,000
+  characters shared across one result, one item allowed to claim all of it. Each
+  item records `content_chars` and `elided`, so the model can see that it is reading
+  a excerpt. Whole bodies stay in `agent_evidence`.
+- `read_evidence` serves a slice of a stored body (200–12,000 characters, with an
+  offset to continue), so a long body does not have to sit in context for the whole
+  task. It reads only evidence belonging to the current task.
+- Once the serialized conversation passes 110,000 characters, the excerpts of all
+  but the two most recent tool results are dropped, the model is told in-band how to
+  fetch them back, and a `context_compacted` event is recorded in the public trace.
+  Evidence rows are never deleted or rewritten. This is a stated elision, not a
+  silent loss of source context.
+
+The 150,000-character cap remains as a last-resort explicit failure: an elided
+conversation that still exceeds it fails rather than quietly shrinking further.
+Compaction reduces prompt size; it is **not** a claim of lower billing, and no
+currency estimate is produced. Whether these bounds match a real provider's cache
+behaviour has not been measured.
 
 Model HTTP uses a selected endpoint, HTTPS for allowlisted remote domains, or an
 explicit-port loopback service. No redirects, auto retries, provider failover or

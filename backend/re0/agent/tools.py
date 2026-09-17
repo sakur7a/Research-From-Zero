@@ -16,7 +16,7 @@ from ..models import PaperInput, normalize_arxiv
 from ..providers import (ProviderClient, ProviderError, check_resource, resolve_metadata,
                          repository_identity, _arxiv_lock)
 from .schemas import (SearchArgs, PaperSearchArgs, ResolveArgs, ResourceArgs, HubSearchArgs,
-                      FileArgs, PlanArgs, Report)
+                      FileArgs, EvidenceReadArgs, PlanArgs, Report)
 
 TOOL_TYPES = {
     "update_plan": (PlanArgs, "Publish or revise a short user-visible research plan. Do not include private chain-of-thought."),
@@ -26,6 +26,7 @@ TOOL_TYPES = {
     "search_hub": (HubSearchArgs, "Search Hugging Face models/datasets. Returns candidates, NOT verified paper-resource relationships."),
     "inspect_resource": (ResourceArgs, "Inspect a GitHub repository root or Hugging Face model/dataset. Files, release metadata and resource links; no code execution or downloads."),
     "read_repository_file": (FileArgs, "Read a bounded text/code file from a GitHub repository, pinned to a resolved commit; never execute it."),
+    "read_evidence": (EvidenceReadArgs, "Read back a bounded slice of an evidence body already stored for THIS task. The conversation only keeps a short excerpt, so call this when you need more of a source you already retrieved; use offset to continue."),
     "search_release_discussions": (SearchArgs, "Search GitHub issues/PRs for release/checkpoint discussions. Include repo:owner/name in query. Discussion is a declaration, not a verified release."),
     "search_library": (SearchArgs, "Search user-authorized local library metadata. Never returns private notes or fictional demo data."),
     "search_web": (SearchArgs, "Search the public web using configured Tavily. Returns search snippets, NOT fetched full pages."),
@@ -56,7 +57,7 @@ class ResearchTools:
         return bool(os.getenv("TAVILY_API_KEY"))
 
     def execute(self, name, raw_args, *, use_library=False):
-        if name not in TOOL_TYPES or name in {"update_plan", "finish_report"}:
+        if name not in TOOL_TYPES or name in {"update_plan", "finish_report", "read_evidence"}:
             raise ValueError("未知或非检索工具")
         args = TOOL_TYPES[name][0].model_validate(raw_args)
         if name == "search_library" and not use_library:

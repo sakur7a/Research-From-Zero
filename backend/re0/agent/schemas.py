@@ -114,6 +114,15 @@ class FileArgs(StrictModel):
     line_count: int = Field(default=100, ge=1, le=200)
 
 
+class EvidenceReadArgs(StrictModel):
+    """Read back a stored evidence body. The conversation only carries an excerpt,
+    so the model asks for a slice by ID instead of every result staying in context."""
+
+    evidence_id: str = Field(min_length=1, max_length=80)
+    offset: int = Field(default=0, ge=0, le=100000)
+    chars: int = Field(default=6000, ge=200, le=12000)
+
+
 class PlanArgs(StrictModel):
     steps: list[str] = Field(min_length=1, max_length=8)
 

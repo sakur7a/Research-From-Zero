@@ -166,3 +166,31 @@ Key、返回 ID 去重排序且不把 Key 写进响应或任务配置、供应�
 评测。四个新增国内平台的**预设地址取自多方公开文档，但其真实可用性、`GET /models`
 是否实现、以及是否支持工具调用，都需要用户用真实 Key 跑一次才能确认**。
 
+## 2026-09-17 变更后复跑（上下文体积：有界摘录 + read_evidence + 压缩）
+
+| 层次 | 命令 | 结果 |
+|---|---|---|
+| Python | `python -m pytest` | **105 passed**（101 项＋4 项上下文用例） |
+| JavaScript | `node --test tests/*.test.js` | **26 passed**（25 项＋1 项轨迹文案用例） |
+| JS 语法 | `node --check web/{app,core,api,agent,agent-core,theme}.js` | 6 个模块通过 |
+| Agent 浏览器 smoke | `python scripts/agent_browser_smoke.py .data/agent-browser` | **9 组全过**，`browser_errors` 为空 |
+
+新增用例覆盖：工具结果只携带元数据与有界摘录（断言 `content` 不在对话里、`content_chars`
+与 `elided` 存在、`evidence_note` 指明取回方式）、摘录预算在同一次工具结果内被共享
+（`[4000,2000,0,0,0,0]`）、`read_evidence` 返回的切片与证据库正文逐字符一致、
+跨任务 ID 与低于 schema 下限的读取都被拒绝、压缩收起旧摘录后证据数量不变且
+`context_compacted` 事件带 `read_evidence` 指引。
+
+### 顺带修好的测试脆弱性
+
+`wait_done()` 的完成等待上限原为 10 秒。实测这台机器上**一个平凡的 GET 也要
+51–193 ms**（Windows 加当前负载下的 SQLite 往返延迟），因此若干轮模型／工具往返的
+fixture 任务需要 10 秒以上墙钟时间，导致
+`test_saved_defaults_persist_and_are_applied_to_new_tasks` 等用例**偶发**
+"Fixture task did not finish"（单独运行则通过）。已把上限放宽到 30 秒；该值只影响
+失败用例的等待时长，正常任务仍立即返回。
+
+**未实测**：这些是 prompt 体积上限，不是计费优化。是否命中提供商的 KV cache、真实
+任务的 token 用量与实际费用均未测量，也没有做金额估算。
+
+

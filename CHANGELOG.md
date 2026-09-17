@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Context cost of the agent loop
+
+- A tool result no longer pastes whole source bodies into the conversation. It
+  carries metadata plus a bounded excerpt (6000 characters shared per result; a
+  single item may claim all of it), with `content_chars` and `elided` recording
+  what was left out. The full body stays in `agent_evidence`. A tool result is
+  re-sent on every later model call, so this was the dominant context cost of a
+  long task and it multiplied by the number of remaining turns.
+- Add `read_evidence(evidence_id, offset, chars)` so the model can pull a stored
+  body back, or continue past an excerpt, instead of the body having to stay in
+  context for the whole task. It serves only this task's evidence and is bounded
+  (200–12000 characters per call, 0–100000 offset).
+- Add in-band compaction. Once the serialized conversation passes 110000
+  characters, the excerpts of all but the two most recent tool results are dropped,
+  the model is told in-band how to fetch them back, and a `context_compacted` event
+  is written to the public trace. Evidence rows are never deleted, so this is a
+  stated elision rather than a silent loss of source context; the 150000-character
+  cap in the model gateway remains as a last-resort explicit failure.
+- Widen `wait_done` in the backend tests from 10 s to 30 s. Measured here, a trivial
+  GET costs 51–193 ms, so a fixture task with several rounds needs more than 10 s of
+  wall time; the old deadline made a few tests flaky rather than wrong.
+- Tests: 4 Python and 1 JavaScript cases added.
+
 ### Fixed
 
 - Notices raised while the settings dialog was open were invisible. The toast lives

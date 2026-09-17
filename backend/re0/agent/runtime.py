@@ -18,12 +18,18 @@ from pydantic import ValidationError
 from ..models import now
 from ..providers import ProviderError
 from .model import ENDPOINT_PRESETS, ChatModel, ModelError, ModelVault, list_models as fetch_model_list
-from .schemas import ModelConfig, ModelListRequest, PlanArgs, Report, TaskDefaults, TaskInput
+from .schemas import EvidenceReadArgs, ModelConfig, ModelListRequest, PlanArgs, Report, TaskDefaults, TaskInput
 from .storage import TaskStore
 from .tools import ResearchTools, specifications
 
 PROMPT_VERSION = "research-agent-v0.2-1"
 DEFAULTS_KEY = "task_defaults"
+# The conversation carries bounded excerpts, never whole evidence bodies: a tool
+# result is re-sent on every later model call, so its size multiplies by turn count.
+EVIDENCE_EXCERPT_CHARS = 6000   # one evidence item may claim the whole per-call budget
+TOOL_EXCERPT_BUDGET = 6000      # excerpt characters one tool result may add to the conversation
+CONTEXT_COMPACT_CHARS = 110000  # elide older excerpts before the 150k serialized hard cap
+KEEP_RECENT_TOOL_MESSAGES = 2   # recent tool results whose excerpts survive compaction
 SYSTEM = """你是 Re0 科研 agent。你要完成用户的科研任务，而不是只写行动建议。
 你可以自主、多轮使用工具检索、读仓库文本、追查资源、修订计划。先调用 update_plan 给出 2–6 步公开行动计划；随后根据真实工具结果决定下一步。
 不要输出私有思维过程，只在 update_plan 中写简短任务步骤。不要假装你已调用工具。
@@ -34,6 +40,7 @@ SYSTEM = """你是 Re0 科研 agent。你要完成用户的科研任务，而不
 资源可访问不等于可下载；文件名不等于可运行；需要申请不等于未开源；搜索无结果不等于不存在。
 不得根据仓库名字认定官方身份。区分作者声明与实际观察。README 链接可能是基线或依赖，需要核对后继续检查。
 search_papers 和 resolve_paper 只提供元数据和摘要，不能冒充读过全文。read_repository_file 的源码内容不能当作运行验证。
+工具结果在对话里只保留有界摘录，完整正文保存在本任务证据库；需要更多内容时调用 read_evidence 按证据 id 取回，不要凭摘录推断全文。
 对相对时间以用户提供/工具返回时间为准，不凭记忆编造新论文。明确搜索范围和剩余缺口。
 不要输出无证据的理论、因果或矛盾关系。若证据不够，outcome=insufficient_evidence，说明未完成部分。
 保留一次模型调用和一次工具调用用于 finish_report，不要无休止检索。通常 5–10 次检索足以给首轮结果。
@@ -82,6 +89,72 @@ class AgentRuntime:
     def list_models(self, credential: ModelListRequest):
         """Ask one allowlisted endpoint what it serves. Nothing is stored or logged."""
         return fetch_model_list(credential, transport=self._transport)
+
+    def model_view(self, cached: dict) -> dict:
+        """What the conversation receives for one tool result.
+
+        Metadata plus a bounded excerpt. The full body stays in `agent_evidence` and
+        is reachable again through read_evidence. A tool result is re-sent on every
+        later model call, so pasting whole bodies here multiplies their cost by the
+        number of remaining turns.
+        """
+        view = {key: value for key, value in cached.items() if key != "evidence"}
+        budget, evidence = TOOL_EXCERPT_BUDGET, []
+        for item in cached.get("evidence", []):
+            body = item.get("content") or ""
+            keep = min(EVIDENCE_EXCERPT_CHARS, max(0, budget), len(body))
+            budget -= keep
+            entry = {key: value for key, value in item.items() if key != "content"}
+            entry.update({"content_chars": len(body), "excerpt": body[:keep], "elided": keep < len(body)})
+            evidence.append(entry)
+        if evidence:
+            view["evidence"] = evidence
+            view["evidence_note"] = "这里只给有界摘录；完整正文保存在本任务证据库，需要时用 read_evidence 按 id 取回。"
+        return view
+
+    def read_evidence(self, rid, args) -> dict:
+        """Serve a bounded slice of a body already stored for this task."""
+        request = EvidenceReadArgs.model_validate(args)
+        stored = next((item for item in self.tasks.evidence(rid) if item["id"] == request.evidence_id), None)
+        if stored is None:
+            raise ValueError("当前任务中不存在这个证据 ID")
+        body = stored.get("content") or ""
+        start = min(request.offset, len(body))
+        end = start + request.chars
+        return {"ok": True, "evidence_id": request.evidence_id, "kind": stored.get("kind", ""),
+                "locator": stored.get("locator", ""), "source_url": stored.get("source_url", ""),
+                "offset": start, "total_chars": len(body), "content": body[start:end],
+                "truncated": end < len(body),
+                "note": "这是证据库保存的来源摘录切片，不是原始文献全文；需要后续内容时用 offset 继续。"}
+
+    def compact_context(self, rid, state) -> int:
+        """Drop excerpts from older tool results once the context grows large.
+
+        Evidence rows are never deleted and the model is told how to fetch a body
+        back, so this is a stated elision rather than a silent loss of source
+        context. The most recent tool results keep their excerpts.
+        """
+        positions = [index for index, message in enumerate(state["messages"]) if message.get("role") == "tool"]
+        older = positions[:-KEEP_RECENT_TOOL_MESSAGES] if KEEP_RECENT_TOOL_MESSAGES > 0 else positions
+        elided = 0
+        for index in older:
+            try:
+                body = json.loads(state["messages"][index]["content"])
+            except (TypeError, ValueError):
+                continue
+            dropped = [item for item in body.get("evidence", []) if item.get("excerpt")]
+            for item in dropped:
+                item["excerpt"] = ""
+                item["elided"] = True
+            if dropped:
+                body["evidence_note"] = "较早的摘录已从上下文移除以控制体积；证据未删除，用 read_evidence 按 id 取回。"
+                state["messages"][index]["content"] = json.dumps(body, ensure_ascii=False)
+                elided += len(dropped)
+        if elided:
+            state["messages"].append({"role": "user", "content": "为控制上下文体积，较早的工具结果摘录已移除（证据本身未删除）。需要正文时调用 read_evidence 并传入证据 id。"})
+            self.tasks.checkpoint(rid, state)
+            self.tasks.event(rid, "context_compacted", {"message": f"上下文接近上限，已收起 {elided} 条较早的工具摘录；证据保留，可用 read_evidence 取回"})
+        return elided
 
     def task_defaults(self) -> TaskDefaults:
         """Stored workspace defaults for new tasks. Credentials are never stored here."""
@@ -219,6 +292,8 @@ class AgentRuntime:
                                 if report.outcome == "findings" and not report.findings:
                                     raise ValueError("findings 报告至少需要一条有证据的发现；否则使用 insufficient_evidence")
                                 payload = {"ok": True, "report": report.model_dump(), "citation_check": "IDs exist; entailment is not verified"}
+                            elif name == "read_evidence":
+                                payload = self.read_evidence(rid, args)
                             else:
                                 payload = {"ok": True, **self.tools.execute(name, args, use_library=params["use_library"])}
                         except ValidationError as exc:
@@ -237,7 +312,7 @@ class AgentRuntime:
                         self.tasks.event(rid, "plan", {"steps": state["plan"]})
                     if cached.get("report"):
                         state["report"] = cached["report"]
-                    state["messages"].append({"role": "tool", "tool_call_id": cid, "content": json.dumps(cached, ensure_ascii=False)})
+                    state["messages"].append({"role": "tool", "tool_call_id": cid, "content": json.dumps(self.model_view(cached), ensure_ascii=False)})
                     state["pending"].pop(0)
                     self.tasks.checkpoint(rid, state)
                     continue
@@ -252,6 +327,9 @@ class AgentRuntime:
                 tools = specifications(params["use_library"], self.tools.web_enabled)
                 if state["model_calls"] == params["max_model_calls"] or state["tool_calls"] >= params["max_tool_calls"] - 1:
                     tools = [x for x in tools if x["function"]["name"] == "finish_report"]
+                # Elide older excerpts well before the serialized hard cap in ChatModel.
+                if len(json.dumps(state["messages"], ensure_ascii=False)) > CONTEXT_COMPACT_CHARS:
+                    self.compact_context(rid, state)
                 reply = model.complete(state["messages"], tools, timeout=min(60, max(1, deadline-time.monotonic())))
                 # Check after I/O as cancellation may have arrived during a request.
                 for k in ("prompt_tokens", "completion_tokens", "total_tokens"):

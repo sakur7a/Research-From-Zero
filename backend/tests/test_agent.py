@@ -36,7 +36,10 @@ def report(ids=None):
 
 
 def wait_done(client, rid):
-    deadline = time.monotonic() + 10
+    # Measured on this machine, even a trivial GET costs 51-193 ms, so a fixture
+    # task with several model/tool rounds can need more than 10 s of wall time.
+    # The deadline only bounds a failing test; a finishing task returns immediately.
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         run = client.get('/api/agent/runs/' + rid).json()
         if run['status'] not in {'queued', 'running'} and not client.get('/api/agent/config').json()['busy']:
@@ -428,3 +431,88 @@ def test_model_list_rejects_an_oversized_or_non_json_response(tmp_path):
     with TestClient(create_app(str(tmp_path/'notjson.sqlite3'),httpx.MockTransport(not_json)),headers=HEADERS) as c:
         response=c.post('/api/agent/models',json={'base_url':CONFIG['base_url'],'api_key':CONFIG['api_key'],'trust_endpoint':True})
         assert response.status_code==422 and 'JSON' in response.json()['detail']
+
+
+def test_tool_result_keeps_metadata_with_a_bounded_excerpt(client):
+    agent=client.app.state.agent
+    view=agent.model_view({'ok':True,'evidence':[{'id':'ev_1','kind':'code','locator':'train.py:1-200','source_url':'https://github.com/lab/paper','content':'x'*20000}]})
+    item=view['evidence'][0]
+    assert item['id']=='ev_1' and item['locator']=='train.py:1-200' and item['source_url']=='https://github.com/lab/paper'
+    assert item['content_chars']==20000 and 'content' not in item
+    assert len(item['excerpt'])==6000 and item['elided'] is True
+    assert 'read_evidence' in view['evidence_note']
+    assert len(json.dumps(view,ensure_ascii=False))<20000
+
+
+def test_the_excerpt_budget_is_shared_across_one_tool_result(client):
+    agent=client.app.state.agent
+    view=agent.model_view({'ok':True,'evidence':[{'id':f'ev_{i}','kind':'source','content':'y'*4000} for i in range(6)]})
+    assert [len(x['excerpt']) for x in view['evidence']]==[4000,2000,0,0,0,0]
+    assert view['evidence'][0]['elided'] is False and view['evidence'][1]['elided'] is True
+    assert all(x['content_chars']==4000 for x in view['evidence'])
+
+
+def test_read_evidence_slices_a_stored_body_and_rejects_bad_requests(tmp_path):
+    def multi(calls):
+        return {"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[
+            {"id":f"call_read_{index}","type":"function","function":{"name":name,"arguments":json.dumps(args,ensure_ascii=False)}}
+            for index,(name,args) in enumerate(calls)]}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}
+    class ReadBack:
+        def __init__(self):
+            self.prompts=[]
+        def __call__(self,request):
+            if request.url.host=='export.arxiv.org':
+                return httpx.Response(200,content=ATOM)
+            data=json.loads(request.content)
+            if isinstance(data.get('tool_choice'),dict):
+                return httpx.Response(200,json=completion('connection_check',{}))
+            self.prompts.append(data)
+            step=len(self.prompts)
+            if step==1:
+                return httpx.Response(200,json=completion('update_plan',{'steps':['检索','取回正文','整理报告']}))
+            if step==2:
+                return httpx.Response(200,json=completion('search_papers',{'query':'layout','limit':1,'source':'arxiv'}))
+            known=[ev['id'] for m in data['messages'] if m['role']=='tool' for ev in json.loads(m['content']).get('evidence',[])]
+            if step==3:
+                # One round: a valid slice, a foreign id, and a read below the schema floor.
+                return httpx.Response(200,json=multi([('read_evidence',{'evidence_id':known[0],'offset':0,'chars':200}),
+                                                      ('read_evidence',{'evidence_id':'ev_not_mine','offset':0,'chars':200}),
+                                                      ('read_evidence',{'evidence_id':known[0],'offset':0,'chars':10})]))
+            return httpx.Response(200,json=completion('finish_report',report(known)))
+    network=ReadBack()
+    with TestClient(create_app(str(tmp_path/'readback.sqlite3'),httpx.MockTransport(network)),headers=HEADERS) as c:
+        c.put('/api/agent/config',json=CONFIG)
+        final=wait_done(c,c.post('/api/agent/runs',json=GOAL).json()['id'])
+        assert final['status']=='completed',final
+        payloads=[json.loads(m['content']) for m in network.prompts[-1]['messages'] if m['role']=='tool']
+        # The conversation carries metadata and a bounded excerpt, not whole bodies.
+        search=next(p for p in payloads if p.get('evidence'))
+        item=search['evidence'][0]
+        assert 'content' not in item and item['content_chars']>0
+        assert 'excerpt' in item and 'elided' in item and 'read_evidence' in search['evidence_note']
+        # A valid read serves an exact slice of the body kept in the evidence store.
+        served=next(p for p in payloads if p.get('evidence_id'))
+        body=next(e['content'] for e in final['evidence'] if e['id']==served['evidence_id'])
+        assert served['content']==body[:200] and len(served['content'])==min(200,len(body))
+        assert served['total_chars']==len(body) and served['truncated'] is (len(body)>200)
+        assert served['locator'] and served['source_url'] and 'offset' in served
+        # A foreign id and a below-floor read are both refused, never silently widened.
+        assert len([p for p in payloads if p.get('ok') is False])==2,payloads
+
+
+def test_context_compaction_elides_older_excerpts_without_losing_evidence(tmp_path,monkeypatch):
+    monkeypatch.setattr('re0.agent.runtime.CONTEXT_COMPACT_CHARS',300)
+    monkeypatch.setattr('re0.agent.runtime.KEEP_RECENT_TOOL_MESSAGES',0)
+    network=FixtureNetwork()
+    with TestClient(create_app(str(tmp_path/'compact.sqlite3'),httpx.MockTransport(network)),headers=HEADERS) as c:
+        c.put('/api/agent/config',json=CONFIG)
+        rid=c.post('/api/agent/runs',json=GOAL).json()['id']
+        final=wait_done(c,rid)
+        assert final['status']=='completed',final
+        # Compaction must never remove the evidence itself.
+        assert final['evidence'],'evidence did not survive compaction'
+        compacted=[e for e in c.get(f'/api/agent/runs/{rid}/events').json() if e['kind']=='context_compacted']
+        assert compacted and 'read_evidence' in compacted[0]['data']['message'],compacted
+        # The model must be told, in-band, how to fetch an elided body back.
+        exchanges=[json.loads(r.content)['messages'] for r in network.requests if r.url.path=='/v1/chat/completions']
+        assert any('read_evidence' in m['content'] for p in exchanges for m in p if m['role']=='user')
