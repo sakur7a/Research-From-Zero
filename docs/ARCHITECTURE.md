@@ -37,6 +37,8 @@ web/agent.html + agent.js        web/index.html + app.js
 | `agent/schemas.py` | Config, task, approval, tool and report input contracts |
 | `agent/model.py` | In-memory BYOK config, destination validation, bounded HTTP, common tool-call protocol |
 | `agent/tools.py` | Tool registry, argument validation, consent-scoped adapters, source documents |
+| `literature.py` | Multi-source scholarly connectors, cross-source de-duplication, year window |
+| `env_file.py` | Opt-in dotenv loader; fills only unset variables and never prints a value |
 | `agent/storage.py` | Additive schema, append-only evidence/events, replayable results, atomic approved import |
 | `agent/runtime.py` | Model/tool iteration, budget reservation, cancellation, checkpoint/recovery, context bounds, report validation |
 | `agent/api.py` | UI-facing task/config endpoints, no credentials or internal messages in reads/exports |
@@ -154,6 +156,25 @@ provider client. Optional Tavily adds search snippets via one fixed POST endpoin
 Agent-generated URLs never become unrestricted HTTP destinations. Repository file
 reads resolve the requested ref to a commit and return bounded text, not code
 execution. GitHub token, Tavily token and model token are separately scoped.
+
+`search_papers` queries five scholarly services (`semanticscholar`, `openalex`,
+`arxiv`, `openreview`, `crossref`) with one shared client: `max_calls=12`,
+`seconds=60`, `read_timeout=20`. The longer read timeout is not cosmetic — arXiv
+measures over 5 s for a plain query, so the 8 s default tuned for metadata endpoints
+would fail it every time. There is one retry for a transient status (429/500/502/503/504)
+and none otherwise: an automatic retry of a paid or rate-limited request must stay visible.
+
+De-duplication matches on **every** identifier a record carries (DOI, arXiv ID, and a
+normalised title of at least 16 characters), not one chosen key. A single key fails the
+common case where one service reports a DOI and another only a title, and the merged
+entry keeps the list of services that reported it. Sources are queried in signal order,
+so the first to report a work supplies its fields; a later duplicate only adds
+provenance, a higher citation count, and identifiers the first source lacked.
+
+A source that fails is reported with its own error and is **never** folded into an empty
+result. If every source fails the call raises instead of returning an empty list, because
+an empty list would be read as "no such work". Unknown publication years are not filtered
+by the year window: "we could not tell" is not "out of range".
 
 Library metadata tools are absent unless the task carries the library permission.
 That flag now defaults from the workspace setting and the per-task consent text

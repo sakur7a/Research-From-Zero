@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Multi-source literature search, and a skill for it
+
+- `search_papers` grows from two sources to five — Semantic Scholar, OpenAlex, arXiv,
+  OpenReview and Crossref — with an optional `start_year`/`end_year` window. `source='all'`
+  is now the default; a single source name still works for a targeted recheck.
+- Results are de-duplicated **across** sources. Matching uses every identifier a record
+  carries (DOI, arXiv ID, and a normalised title of at least 16 characters) rather than one
+  chosen key, because a single key misses the common case where one service reports a DOI
+  and another only a title. The merged entry keeps which services reported it, the highest
+  citation count, and identifiers only a later source had. A short title is not used for
+  matching at all — "Survey" is too easy to collide on.
+- **A failing source is reported, not swallowed.** Rate limits, timeouts and bad tokens are
+  listed per source, and if *every* source fails the call raises instead of returning an
+  empty list, because an empty list reads as "no such work". Unknown publication years are
+  never filtered out by the year window. One transient retry (429/5xx) is attempted and
+  nothing else: an automatic retry of a rate-limited request must stay visible.
+- Raise the per-request read timeout for retrieval to 20 s. arXiv measures over 5 s for a
+  plain query, so the 8 s default tuned for GitHub/HF metadata failed it every time.
+- Add `skills/paper-search/`: a self-contained skill that runs the multi-source search
+  from the command line, prints per-source hit counts, lists failures on stderr, and sinks
+  survey/review papers to the bottom as `[survey]` without removing them. It deliberately
+  has no "model knowledge" source, and no semantic relevance filter that could hide rows.
+- Add opt-in credential loading: `RE0_ENV_FILE` (also honoured by `run.py`) loads a dotenv
+  file, filling only variables that are not already set. Values are never printed, logged
+  or written to a task record; Re0 still reads no file unless asked.
+- Tests: 27 Python cases added.
+
 ### MCP retrieval surface
 
 - Add `re0/mcp_server.py`: an MCP-over-stdio server that exposes the read-only

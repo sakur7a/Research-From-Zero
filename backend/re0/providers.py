@@ -20,7 +20,8 @@ import httpx
 
 from .models import Evidence, Observation, PaperInput, normalize_arxiv, normalize_doi
 
-ALLOWED_HOSTS = {"api.github.com", "huggingface.co", "export.arxiv.org", "api.crossref.org"}
+ALLOWED_HOSTS = {"api.github.com", "huggingface.co", "export.arxiv.org", "api.crossref.org",
+                 "api.openalex.org", "api.semanticscholar.org", "api2.openreview.net"}
 MAX_BYTES = 2 * 1024 * 1024
 SEGMENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,150}$")
 _arxiv_lock = threading.Lock()
@@ -35,33 +36,45 @@ class ProviderError(Exception):
 
 
 class ProviderClient:
-    """A bounded, allowlisted client. Credentials are scoped to api.github.com."""
-    def __init__(self, transport: httpx.BaseTransport | None = None):
-        self.client = httpx.Client(transport=transport, timeout=8, follow_redirects=False, trust_env=False)
-        self.deadline = time.monotonic() + 35
+    """A bounded, allowlisted client.
+
+    Credentials are scoped per host and read from the environment at call time
+    (`GITHUB_TOKEN` for api.github.com, `SEMANTIC_SCHOLAR_API_KEY` for Semantic
+    Scholar, and so on). A connector supplies only its own provider's header, so no
+    key can travel to a host it does not belong to. No key is logged or cached.
+    """
+
+    def __init__(self, transport: httpx.BaseTransport | None = None, *,
+                 max_calls: int = 8, seconds: float = 35, read_timeout: float = 8):
+        self.client = httpx.Client(transport=transport, timeout=read_timeout, follow_redirects=False, trust_env=False)
+        self.max_calls, self.deadline = max_calls, time.monotonic() + seconds
+        self.read_timeout = read_timeout
         self.calls = 0
         self.digests: list[str] = []
 
     def close(self):
         self.client.close()
 
-    def read(self, url: str, params: dict | None = None) -> bytes:
+    def read(self, url: str, params: dict | None = None, headers: dict | None = None) -> bytes:
         parsed = urlsplit(url)
         if (parsed.scheme != "https" or parsed.hostname not in ALLOWED_HOSTS
                 or parsed.port not in (None, 443) or parsed.username or parsed.password):
             raise ProviderError("请求目标不在允许的提供商列表内", "unsupported")
-        if self.calls >= 8 or time.monotonic() >= self.deadline:
+        if self.calls >= self.max_calls or time.monotonic() >= self.deadline:
             raise ProviderError("本次检查已达到请求预算；没有据此判断资源不存在")
         self.calls += 1
-        headers = {"User-Agent": "re0/0.1.0 (local research resource checker)", "Accept": "application/json"}
+        request_headers = {"User-Agent": "re0/0.1.0 (local research resource checker)", "Accept": "application/json"}
         if parsed.hostname == "api.github.com":
-            headers["X-GitHub-Api-Version"] = "2022-11-28"
+            request_headers["X-GitHub-Api-Version"] = "2022-11-28"
             token = os.getenv("GITHUB_TOKEN", "")
             if token:
-                headers["Authorization"] = f"Bearer {token}"
+                request_headers["Authorization"] = f"Bearer {token}"
+        if headers:
+            # Caller-supplied per-provider credentials. The caller owns the scoping.
+            request_headers.update(headers)
         try:
-            with self.client.stream("GET", url, params=params, headers=headers,
-                                    timeout=min(8, max(0.1, self.deadline - time.monotonic()))) as response:
+            with self.client.stream("GET", url, params=params, headers=request_headers,
+                                    timeout=min(self.read_timeout, max(0.1, self.deadline - time.monotonic()))) as response:
                 status = response.status_code
                 if status != 200:
                     if status == 429 or (status == 403 and response.headers.get("x-ratelimit-remaining") == "0"):
@@ -87,9 +100,9 @@ class ProviderClient:
         self.digests.append(hashlib.sha256(raw).hexdigest())
         return raw
 
-    def json(self, url: str, params: dict | None = None):
+    def json(self, url: str, params: dict | None = None, headers: dict | None = None):
         try:
-            return json.loads(self.read(url, params))
+            return json.loads(self.read(url, params, headers))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise ProviderError("提供商返回了无法解析的数据") from exc
 

@@ -12,15 +12,20 @@ from urllib.parse import quote, urlsplit
 import httpx
 from pydantic import ValidationError
 
+from ..literature import CONNECTORS, in_year_range, merge_records
 from ..models import PaperInput, normalize_arxiv
 from ..providers import (ProviderClient, ProviderError, check_resource, resolve_metadata,
                          repository_identity, _arxiv_lock)
-from .schemas import (SearchArgs, PaperSearchArgs, ResolveArgs, ResourceArgs, HubSearchArgs,
-                      FileArgs, EvidenceReadArgs, PlanArgs, Report)
+from .schemas import (PAPER_SOURCES, SearchArgs, PaperSearchArgs, ResolveArgs, ResourceArgs,
+                      HubSearchArgs, FileArgs, EvidenceReadArgs, PlanArgs, Report)
+
+# Transient statuses worth one retry when one call queries several services.
+RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+RETRY_DELAY_SECONDS = 1.5
 
 TOOL_TYPES = {
     "update_plan": (PlanArgs, "Publish or revise a short user-visible research plan. Do not include private chain-of-thought."),
-    "search_papers": (PaperSearchArgs, "Search arXiv or Crossref for real paper metadata and abstracts. Results are not full paper text."),
+    "search_papers": (PaperSearchArgs, "Search scholarly metadata and abstracts. source='all' queries Semantic Scholar, OpenAlex, arXiv, OpenReview and Crossref and merges duplicates (DOI > arXiv ID > normalised title); pass one source name to recheck it alone. Optional start_year/end_year filter on the publication year. These are bibliographic records, never full text, and a source that fails is reported instead of being read as 'not found'."),
     "resolve_paper": (ResolveArgs, "Resolve a DOI/arXiv identifier to source-derived paper metadata."),
     "search_repositories": (SearchArgs, "Search public GitHub repositories. Name matches do NOT establish official authorship."),
     "search_hub": (HubSearchArgs, "Search Hugging Face models/datasets. Returns candidates, NOT verified paper-resource relationships."),
@@ -48,6 +53,22 @@ def doc(url, content, *, kind="source", locator="", paper=None):
     return item
 
 
+def paper_document(record: dict) -> dict:
+    """One merged paper as source material. Keeps which services reported it, so a
+    reader can tell a single-source hit from one several services agree on."""
+    paper, sources = record["paper"], record["sources"]
+    lines = [paper.title, "authors: " + (", ".join(paper.authors) or "unknown")]
+    for label, value in (("year", paper.year), ("venue", paper.venue), ("doi", paper.doi),
+                         ("arxiv", paper.arxiv_id), ("citations", record.get("citations"))):
+        if value not in (None, ""):
+            lines.append(f"{label}: {value}")
+    lines.append("sources: " + ", ".join(sources))
+    if paper.abstract:
+        lines.append("abstract: " + paper.abstract)
+    return doc(paper.paper_url, "\n".join(lines), kind="paper",
+               locator="metadata from " + ", ".join(sources) + "; not full text", paper=paper)
+
+
 class ResearchTools:
     def __init__(self, library, transport=None):
         self.library, self.transport = library, transport
@@ -68,54 +89,133 @@ class ResearchTools:
         return method(args)
 
     def search_papers(self, args):
-        client = ProviderClient(self.transport)
+        """Query one source, or every source and merge duplicates across them.
+
+        A source that fails contributes a failure entry, not an empty result: a rate
+        limit or an outage is not evidence that a paper does not exist.
+        """
+        sources = PAPER_SOURCES if args.source == "all" else (args.source,)
+        records, failures, counts = [], [], {}
+        # Scholarly APIs are slower than the metadata endpoints the default 8s was
+        # tuned for: arXiv alone measures >5s for a plain query.
+        client = ProviderClient(self.transport, max_calls=12, seconds=60, read_timeout=20)
         try:
-            if args.source == "crossref":
-                url = "https://api.crossref.org/works"
-                data = client.json(url, {"query.bibliographic": args.query, "rows": args.limit})
-                documents = []
-                for item in data.get("message", {}).get("items", [])[:args.limit]:
-                    doi = item.get("DOI", "")
-                    title = " ".join(item.get("title", []))[:600]
-                    if not doi or not title:
-                        continue
-                    date = item.get("issued", {}).get("date-parts", [[]])[0]
-                    paper = PaperInput(title=title, doi=doi,
-                        authors=[((" ".join([a.get("given", ""), a.get("family", "")])).strip() or a.get("name", "Unknown"))[:160] for a in item.get("author", [])[:30]],
-                        year=date[0] if date and isinstance(date[0], int) and 1900 <= date[0] <= 2100 else None,
-                        paper_url="https://doi.org/" + doi)
-                    documents.append(doc(paper.paper_url, json.dumps(paper.model_dump(mode="json"), ensure_ascii=False), kind="paper", locator="Crossref metadata", paper=paper))
-                return {"documents": documents, "scope": "Crossref 书目匹配；未阅读全文", "query": args.query}
-            # A search is bounded and serialized according to arXiv API guidance.
-            from .. import providers
-            with _arxiv_lock:
-                delay = 3.0 - (time.monotonic() - providers._arxiv_last)
-                if delay > 0 and self.transport is None:
-                    time.sleep(delay)
-                raw = client.read("https://export.arxiv.org/api/query", {
-                    "search_query": args.query if re.search(r"\b(all|ti|au|abs|cat):", args.query) else "all:" + args.query,
-                    "start": 0, "max_results": args.limit, "sortBy": "relevance"})
-                providers._arxiv_last = time.monotonic()
-            if b"<!DOCTYPE" in raw.upper() or b"<!ENTITY" in raw.upper():
-                raise ProviderError("拒绝包含实体声明的 XML")
-            root = ET.fromstring(raw)
-            ns = {"a": "http://www.w3.org/2005/Atom"}
-            documents = []
-            for entry in root.findall("a:entry", ns)[:args.limit]:
-                identifier = normalize_arxiv(entry.findtext("a:id", "", ns))
-                title = " ".join(entry.findtext("a:title", "", ns).split())
-                if not identifier or not title:
+            for name in sources:
+                try:
+                    found = self._records_with_retry(client, name, args)
+                except ProviderError as exc:
+                    failures.append({"source": name, "error": str(exc)})
+                    counts[name] = 0
                     continue
-                abstract = " ".join(entry.findtext("a:summary", "", ns).split())[:8000]
-                published = entry.findtext("a:published", "", ns)
-                paper = PaperInput(title=title, arxiv_id=identifier, abstract=abstract,
-                    authors=[x.findtext("a:name", "", ns) for x in entry.findall("a:author", ns)][:30],
-                    year=int(published[:4]) if published[:4].isdigit() else None,
-                    paper_url="https://arxiv.org/abs/" + identifier)
-                documents.append(doc(paper.paper_url, title + "\n" + abstract, kind="paper", locator="arXiv Atom title/abstract; not full text", paper=paper))
-            return {"documents": documents, "scope": "arXiv 元数据与摘要，不是全文分析", "query": args.query}
+                except (ValueError, KeyError, TypeError, ET.ParseError, UnicodeError):
+                    failures.append({"source": name, "error": "该来源返回了无法解析的数据"})
+                    counts[name] = 0
+                    continue
+                counts[name] = len(found)
+                records.extend(found)
+            if failures and not records:
+                # Nothing was actually searched. Returning an empty list here would be
+                # read as "no such work", so fail loudly instead and name every source.
+                detail = "；".join(f"{item['source']}：{item['error']}" for item in failures)
+                raise ProviderError(f"所有来源都未返回结果（{detail}）；这不代表论文不存在", "indeterminate")
         finally:
             client.close()
+        merged, duplicates = merge_records(records)
+        kept = [record for record in merged if in_year_range(record["paper"].year, args.start_year, args.end_year)]
+        result = {
+            "documents": [paper_document(record) for record in kept],
+            "scope": "跨源书目匹配；同源与跨源重复项已合并；未阅读全文",
+            "query": args.query,
+            "sources_queried": list(sources),
+            "source_counts": counts,
+            "duplicates_merged": duplicates,
+            "dropped_out_of_range": len(merged) - len(kept),
+        }
+        if failures:
+            # Reported verbatim so a caller can tell "quiet" from "broken".
+            result["source_failures"] = failures
+        if len(sources) > 1:
+            result["note"] = ("多源结果按 DOI > arXiv ID > 归一化标题合并；某来源失败只表示该来源未返回，"
+                              "不代表论文不存在。未知年份的结果不会被年份区间过滤掉。")
+        return result
+
+    def _source_records(self, client, name, args) -> list:
+        if name == "arxiv":
+            return self._arxiv_records(client, args)
+        if name == "crossref":
+            return self._crossref_records(client, args)
+        connector = CONNECTORS.get(name)
+        if connector is None:
+            raise ProviderError("未知的文献来源", "unsupported")
+        return connector(client, args.query, args.limit,
+                         start_year=args.start_year, end_year=args.end_year)
+
+    def _records_with_retry(self, client, name, args) -> list:
+        """One extra attempt for a transient status.
+
+        A 429 or a 503 means the service declined to answer; it is not a negative
+        result, and scholarly APIs rate-limit aggressively. Anything else propagates.
+        """
+        try:
+            return self._source_records(client, name, args)
+        except ProviderError as exc:
+            if exc.http_status not in RETRY_STATUSES:
+                raise
+        time.sleep(RETRY_DELAY_SECONDS)
+        return self._source_records(client, name, args)
+
+    def _crossref_records(self, client, args) -> list:
+        params = {"query.bibliographic": args.query, "rows": args.limit}
+        if args.start_year or args.end_year:
+            params["filter"] = "from-pub-date:%d-01-01,until-pub-date:%d-12-31" % (
+                args.start_year or 1800, args.end_year or 2100)
+        data = client.json("https://api.crossref.org/works", params)
+        records = []
+        for item in data.get("message", {}).get("items", [])[:args.limit]:
+            doi = item.get("DOI", "")
+            title = " ".join(item.get("title", []))[:600]
+            if not doi or not title:
+                continue
+            date = item.get("issued", {}).get("date-parts", [[]])[0]
+            paper = PaperInput(title=title, doi=doi,
+                authors=[((" ".join([a.get("given", ""), a.get("family", "")])).strip() or a.get("name", "Unknown"))[:160] for a in item.get("author", [])[:30]],
+                year=date[0] if date and isinstance(date[0], int) and 1900 <= date[0] <= 2100 else None,
+                paper_url="https://doi.org/" + doi)
+            records.append({"source": "crossref", "paper": paper, "citations": None, "venue": ""})
+        return records
+
+    def _arxiv_records(self, client, args) -> list:
+        query = args.query if re.search(r"\b(all|ti|au|abs|cat):", args.query) else "all:" + args.query
+        if args.start_year or args.end_year:
+            window = "submittedDate:[%d01010000 TO %d12312359]" % (args.start_year or 1800, args.end_year or 2100)
+            query = f"({query}) AND {window}"
+        # A search is bounded and serialized according to arXiv API guidance.
+        from .. import providers
+        with _arxiv_lock:
+            delay = 3.0 - (time.monotonic() - providers._arxiv_last)
+            if delay > 0 and self.transport is None:
+                time.sleep(delay)
+            raw = client.read("https://export.arxiv.org/api/query", {
+                "search_query": query, "start": 0, "max_results": args.limit, "sortBy": "relevance"})
+            providers._arxiv_last = time.monotonic()
+        if b"<!DOCTYPE" in raw.upper() or b"<!ENTITY" in raw.upper():
+            raise ProviderError("拒绝包含实体声明的 XML")
+        root = ET.fromstring(raw)
+        ns = {"a": "http://www.w3.org/2005/Atom"}
+        records = []
+        for entry in root.findall("a:entry", ns)[:args.limit]:
+            identifier = normalize_arxiv(entry.findtext("a:id", "", ns))
+            title = " ".join(entry.findtext("a:title", "", ns).split())
+            if not identifier or not title:
+                continue
+            abstract = " ".join(entry.findtext("a:summary", "", ns).split())[:8000]
+            published = entry.findtext("a:published", "", ns)
+            paper = PaperInput(title=title, arxiv_id=identifier, abstract=abstract,
+                authors=[x.findtext("a:name", "", ns) for x in entry.findall("a:author", ns)][:30],
+                year=int(published[:4]) if published[:4].isdigit() else None,
+                paper_url="https://arxiv.org/abs/" + identifier)
+            records.append({"source": "arxiv", "paper": paper, "citations": None, "venue": ""})
+        return records
 
     def resolve_paper(self, args):
         paper = resolve_metadata(args.identifier, self.transport)

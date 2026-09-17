@@ -58,7 +58,8 @@ Base URL 通常包含 `/v1`，不要填写 `/chat/completions`；本地服务示
 
 | 工具 | 实际范围 |
 |---|---|
-| `search_papers` / `resolve_paper` | arXiv、Crossref 的论文元数据与可用摘要；**不是全文阅读** |
+| `search_papers` | **多源**论文元数据与可用摘要：`source="all"` 会查 Semantic Scholar、OpenAlex、arXiv、OpenReview、Crossref 并按 **DOI > arXiv ID > 归一化标题** 合并重复项；可给 `start_year`／`end_year`；某个来源失败会被单独列出，**不当作"不存在"**；**不是全文阅读** |
+| `resolve_paper` | 用 DOI／arXiv ID 解析来源元数据 |
 | `search_repositories` | GitHub 仓库搜索，名称匹配不代表官方实现 |
 | `search_hub` | Hugging Face 模型／数据集候选搜索 |
 | `inspect_resource` | 复用静态核验：版本、文件清单、README、有限 Release、候选外链 |
@@ -87,12 +88,18 @@ Base URL 通常包含 `/v1`，不要填写 `/chat/completions`；本地服务示
 
 默认允许的远程模型主机：`api.openai.com`、`api.deepseek.com`、`dashscope.aliyuncs.com`、`dashscope-intl.aliyuncs.com`、`openrouter.ai`、`open.bigmodel.cn`、`api.moonshot.cn`、`api.siliconflow.cn`、`ark.cn-beijing.volces.com`。远程必须 HTTPS；自定义域名需由部署者通过 `RE0_LLM_ALLOWED_HOSTS` 明确加入。这个列表是**网络目的地许可，不是已通过实测的模型兼容性清单**；界面里的服务商预设是本列表的子集，且「拉取可用模型」只向这些地址之一发请求。本地服务允许 `127.0.0.1` / `[::1]` 加显式端口，Key 可以留空。
 
+**文献检索有另一套独立白名单**（`providers.py` 的 `ALLOWED_HOSTS`）：`api.github.com`、`huggingface.co`、`export.arxiv.org`、`api.crossref.org`、`api.openalex.org`、`api.semanticscholar.org`、`api2.openreview.net`。模型和检索的目标列表互不影响，模型也无法把工具调用变成任意 URL 请求。
+
 | 环境变量 | 用途 |
 |---|---|
 | `RE0_LLM_BASE_URL` / `RE0_LLM_MODEL` / `RE0_LLM_API_KEY` | 启动时加载模型配置 |
 | `RE0_LLM_TOKEN_PARAMETER` | `max_tokens` 或 `max_completion_tokens`，默认前者 |
 | `RE0_LLM_ALLOWED_HOSTS` | 额外允许的远程模型域名，逗号分隔；不得交由模型修改 |
 | `TAVILY_API_KEY` | 可选全网搜索摘要服务，与模型 Key 不同 |
+| `RE0_ENV_FILE` | 可选：**显式指定**一个 dotenv 文件，启动时载入其中尚未设置的变量。不设置就不读任何文件；已在环境中存在的变量优先。只打印变量名与个数，**不打印值** |
+| `OPENALEX_API_KEY` / `OPENALEX_MAILTO` | 可选：OpenAlex 检索（`mailto` 用于礼貌池） |
+| `SEMANTIC_SCHOLAR_API_KEY`（别名 `SEMANTICSCHOLAR_API_KEY`） | 可选但**强烈建议**：Semantic Scholar 匿名调用会被硬限流 |
+| `OPENREVIEW_TOKEN` | 可选：OpenReview 的公开检索不需要账号，token 用于更宽的读取范围 |
 | `GITHUB_TOKEN` | 可选 GitHub API 凭证，仅发往 GitHub API |
 | `RE0_DB` | SQLite 路径，默认仓库下 `.data/re0.sqlite3` |
 | `RE0_HOST` / `RE0_PORT` | 默认 `127.0.0.1:8000` |
@@ -100,6 +107,25 @@ Base URL 通常包含 `/v1`，不要填写 `/chat/completions`；本地服务示
 `.env.example` 只是说明文件，**不自动加载**。环境配置启动后仍只保存在进程内存；从界面清除并不会删除 shell 环境变量，下一次启动可能重新加载。HTTP 客户端当前不读取系统代理变量。
 
 **本地部署不等于材料不出本机。** 执行任务会把目标、工具返回的公开材料、以及经授权的文献库元数据发送到你选择的模型服务。任务和证据在本地明文存储，导出也可能包含敏感研究主题。无登录、认证、多用户隔离或加密数据库，**不要直接暴露到公网或不可信局域网**。安全限制见 [SECURITY.md](SECURITY.md)。
+
+## 作为 skill 使用（多源文献检索）
+
+`skills/paper-search/` 是一个自包含的 skill：一条命令跨五个学术源检索并合并重复项。
+
+```bash
+python skills/paper-search/scripts/paper_search.py \
+    --query "KV cache compression for long-context LLMs" --start-year 2024 --end-year 2026
+```
+
+输出形如 `per-source hits: semanticscholar=3, openalex=2, arxiv=0, … · 5 unique (1 duplicates merged)`，并在 stderr 单独列出**失败**的来源。survey／review 类论文被标 `[survey]` 并沉到列表末尾，但**不会被删掉**。
+
+设计取舍写在 `skills/paper-search/SKILL.md` 里，其中三条值得单独说明：
+
+- **去重优先级 DOI > arXiv ID > 归一化标题**，且一条记录会用它的**全部**标识符参与匹配 —— 只用单一 key 的话，"一家报了 DOI、另一家只报了标题"这种最常见的情况就合并不了。
+- **来源失败不是负面结果。** 限流、超时、坏 token 都会被显式列出；"没搜到"与"没搜成"必须分开，否则会把一次故障读成"这工作不存在"。
+- **不设"模型记忆"来源。** 让模型凭训练数据回忆论文，是文献列表长出"看起来很像但不存在"的标题的最常见方式。这里只返回服务真正返回的东西；经典老论文若在所有源都缺失，这个缺口会被如实报告，而不是用记忆补上。
+
+凭据全部来自环境变量，**没有任何硬编码**。脚本按 `$RE0_ENV_FILE` → `./.env` → `~/.codex/skills/.env` → `~/.re0/.env` 顺序找到第一个可用文件，只填充**尚未设置**的变量；真实环境变量永远优先。运行时只打印载入了几个变量，**从不打印值**。
 
 ## 作为 MCP 服务器接入其他 agent
 

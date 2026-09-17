@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 
 class StrictModel(BaseModel):
@@ -90,8 +90,21 @@ class SearchArgs(StrictModel):
     limit: int = Field(default=5, ge=1, le=8)
 
 
+PAPER_SOURCES = ("semanticscholar", "openalex", "arxiv", "openreview", "crossref")
+
+
 class PaperSearchArgs(SearchArgs):
-    source: Literal["arxiv", "crossref"] = "arxiv"
+    # `all` queries every source whose credentials or public access allow it, then
+    # merges duplicates. A single source stays available for a targeted recheck.
+    source: Literal["all", "semanticscholar", "openalex", "arxiv", "openreview", "crossref"] = "all"
+    start_year: int | None = Field(default=None, ge=1800, le=2100)
+    end_year: int | None = Field(default=None, ge=1800, le=2100)
+
+    @model_validator(mode="after")
+    def ordered_years(self):
+        if self.start_year and self.end_year and self.end_year < self.start_year:
+            raise ValueError("结束年份不能早于开始年份")
+        return self
 
 
 class ResolveArgs(StrictModel):

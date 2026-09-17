@@ -225,5 +225,43 @@ opentelemetry 等一批依赖，而本仓库的运行时依赖刻意只有 4 个
 **未实测**：没有从真实第三方 agent（Claude Code / Codex / dsh）内部跑过工具调用；MCP 入口
 下的真实检索质量与外网连通性同样未验证。
 
+## 2026-09-17 变更后复跑（多源文献检索 + skill）
+
+| 层次 | 命令 | 结果 |
+|---|---|---|
+| Python | `python -m pytest` | **127 passed**（112 项＋15 项检索／环境变量用例） |
+| JavaScript | `node --test tests/*.test.js` | **26 passed** |
+| JS 语法 | `node --check web/{app,core,api,agent,agent-core,theme}.js` | 6 个模块通过 |
+
+新增的 15 项用例覆盖：五源并发后跨源合并、**用全部标识符匹配**（一条有 DOI、一条只有标题
+也必须合并）、短标题不参与匹配（`"Survey"` 不产生 key）、合并时取最大引用数并补齐首个来源
+缺失的字段、某个源失败只记为该源的失败且不影响其他源、**全部源失败时报错而不是返回空列表**、
+某个源返回非 JSON 时只记该源失败、年份区间既下发到各源 API 又对本地结果生效、**未知年份不被
+过滤**、起止年份倒置被契约拒绝、OpenAlex 的倒排索引被还原成摘要正文、**每个 key 只发往拥有
+它的主机**（并断言 key 不出现在结果里）、以及 dotenv 解析（引号／注释／`export ` 前缀／空值
+跳过／不覆盖已存在的环境变量）。
+
+### 真实来源可用性（手工实测，未纳入自动化）
+
+用 `RE0_ENV_FILE` 指向一份真实的凭据文件跑 `skills/paper-search/scripts/paper_search.py`：
+
+- **成功过的来源**：Semantic Scholar（返回 3 条并带摘要）、OpenAlex（返回 2 条并带
+  `cited_by_count`）、Crossref（返回 2–3 条）、OpenReview（返回 1 条）。
+- **跨源去重实测生效**：同一篇 ChunkKV 由 Semantic Scholar 与 Crossref 同时返回，被合并为
+  一条并保留两处来源，DOI 与 arXiv ID 都被补齐。
+- **`[survey]` 沉底实测生效**：一条标题含 "Review of:" 的记录被标 `[survey]` 并排到最后。
+- **失败隔离实测生效**：某次运行中 S2 返回 429、arXiv 连接失败，两者被分别列为
+  `source failures`，其余来源的结果照常返回。
+
+**必须说明的环境限制**：本机沙箱对 Python 的 TLS 出网**不稳定** —— 同一批 URL 用 `curl` 可
+拿到 HTTP 200，用 Python 却间歇性报
+`ConnectError: [SSL: UNEXPECTED_EOF_WHILE_READING]`；`trust_env=True/False` 都失败，环境中
+也没有代理变量，因此**不是** Re0 不继承代理造成的。所以这五个来源的**真实可用性是部分验证**，
+不能据此声称它们在任何网络下都能用。
+
+**未实测**：Semantic Scholar 的凭据在样本文件里是空的，因此其带 key 的调用路径未验证；真实
+检索的召回率与结果质量没有评测；DBLP、Exa 等未接入。
+
+
 
 
