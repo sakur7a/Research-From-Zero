@@ -51,7 +51,7 @@ if _backend is not None:
 try:
     from re0.agent.tools import ResearchTools          # noqa: E402
     from re0.env_file import load                      # noqa: E402
-    from re0.literature import PUBLICATION_LABELS, artifact_urls  # noqa: E402
+    from re0.literature import PUBLICATION_CAVEAT, PUBLICATION_LABELS, artifact_urls  # noqa: E402
     from re0.providers import ProviderError, check_resource  # noqa: E402
 except ModuleNotFoundError:
     print("re0 is not importable from here. Either install it (pip install -e <repo>) or point\n"
@@ -177,6 +177,25 @@ def institutions_line(document: dict) -> str:
     return "     机构: " + shown
 
 
+SOURCE_CREDENTIALS = {
+    "semanticscholar": (("SEMANTIC_SCHOLAR_API_KEY", "SEMANTICSCHOLAR_API_KEY"),
+                        "匿名调用会被硬限流，这是 429 的主要原因；而且该源会把同一工作的多个版本合并并给出 venue"),
+    "openalex": (("OPENALEX_MAILTO",), "填一个邮箱即可进入礼貌池，降低被限流的概率"),
+    "openreview": (("OPENREVIEW_TOKEN",), "只有需要超出公开检索的读取范围时才需要"),
+}
+
+
+def failure_hint(source: str) -> str:
+    """A failing source is worth one actionable line, not just an error string."""
+    entry = SOURCE_CREDENTIALS.get(source)
+    if not entry:
+        return ""
+    names, reason = entry
+    if any(os.getenv(name) for name in names):
+        return ""
+    return f"  ← 未配置 {' 或 '.join(names)}：{reason}"
+
+
 def print_document(index: int, document: dict, raw: bool, verify_budget: int) -> int:
     """Print one result. Returns how many artifact candidates were actually verified."""
     paper = document["paper"]
@@ -189,14 +208,20 @@ def print_document(index: int, document: dict, raw: bool, verify_budget: int) ->
     for label, url in links_for(paper):
         print(f"     {label}: {url}")
     print(f"     来源: {document['locator']}")
+    candidates = artifact_urls(paper.get("abstract", ""))
     used = 0
-    for url in artifact_urls(paper.get("abstract", "")):
+    for url in candidates:
         if used >= verify_budget:
             # Still shown, just not fetched: an unverified link is not a failed one.
-            print(f"     artifact candidate (from the abstract, unverified): {url}")
+            print(f"     开源线索（摘要中自述，未核验）: {url}")
             continue
         used += 1
         verify_candidate(url)
+    if not candidates:
+        # Shown even when empty, so its absence reads as a finding rather than an omission.
+        print("     开源线索: 摘要中未提及 code/dataset 链接（摘要通常不含代码链接，见 SKILL.md）")
+    elif used < len(candidates):
+        print(f"     ↑ 另有 {len(candidates) - used} 条未核验；--verify {len(candidates)} 可核验")
     if raw:
         print(document["content"])
     elif paper.get("abstract"):
@@ -207,14 +232,19 @@ def print_document(index: int, document: dict, raw: bool, verify_budget: int) ->
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--query", required=True, help="a focused search phrase")
+    parser.add_argument("--query", required=True,
+                        help="a focused phrase. Several short queries recall more than one long "
+                             "one: arXiv and Semantic Scholar treat space-separated terms "
+                             "restrictively, so 'layer decomposition' beats 'layered representation "
+                             "decomposition single image into layers'. Run it once per phrase.")
     parser.add_argument("--venue", default=None, metavar="NAME",
                         help="prepend a venue name (CVPR, NeurIPS, ACL…) to the query. A query hint, "
                              "not an API-side venue filter — see effective_query() for why.")
     parser.add_argument("--start-year", type=int, default=None)
     parser.add_argument("--end-year", type=int, default=None)
-    parser.add_argument("--max-papers", type=int, default=8,
-                        help="per source; the tool bounds this to 8 to keep evidence small")
+    parser.add_argument("--max-papers", type=int, default=20,
+                        help="per source (default 20, tool maximum 25). This is the recall ceiling: "
+                             "raise it before adding more queries.")
     parser.add_argument("--sources", default="all",
                         help="'all' or a comma-separated subset of semanticscholar,openalex,arxiv,openreview,crossref")
     parser.add_argument("--json", dest="json_path", default=None,
@@ -222,11 +252,12 @@ def main(argv=None) -> int:
     parser.add_argument("--raw", action="store_true", help="print every field instead of a table")
     parser.add_argument("--verify", type=int, default=0, metavar="N",
                         help="run Re0's bounded resource check on the first N artifact candidates "
-                             "(0 = none, max 5). One check costs about four GitHub requests and the "
-                             "anonymous limit is roughly 60 per hour, so keep N small or set GITHUB_TOKEN.")
+                             "(0 = none, max 8). Off by default because one check costs about four "
+                             "GitHub requests against an anonymous limit of roughly 60 per hour; "
+                             "set GITHUB_TOKEN to raise that. Unchecked candidates are still listed.")
     args = parser.parse_args(argv)
-    if not 0 <= args.verify <= 5:
-        parser.error("--verify takes 0-5; each check costs several requests against a shared rate limit")
+    if not 0 <= args.verify <= 8:
+        parser.error("--verify takes 0-8; each check costs several requests against a shared rate limit")
 
     print(f"credentials: {load_credentials()}")
     query = effective_query(args.query, args.venue)
@@ -242,7 +273,7 @@ def main(argv=None) -> int:
         source = chosen[0]
     try:
         result = ResearchTools(None).execute("search_papers", {
-            "query": query, "limit": min(8, max(1, args.max_papers)),
+            "query": query, "limit": min(25, max(1, args.max_papers)),
             "source": source, "start_year": args.start_year, "end_year": args.end_year})
     except ProviderError as exc:
         # Reported verbatim. A failed search is not an empty result.
@@ -253,7 +284,8 @@ def main(argv=None) -> int:
     if result.get("source_failures"):
         print("source failures (these sources were not searched; this is not 'not found'):", file=sys.stderr)
         for failure in result["source_failures"]:
-            print(f"  {failure['source']}: {failure['error']}", file=sys.stderr)
+            print(f"  {failure['source']}: {failure['error']}" + failure_hint(failure["source"]),
+                  file=sys.stderr)
     if args.json_path:
         Path(args.json_path).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"full results written to {args.json_path}")
@@ -267,6 +299,8 @@ def main(argv=None) -> int:
     budget = args.verify
     for index, document in enumerate(documents, start=1):
         budget -= print_document(index, document, args.raw, budget)
+    if any((document.get("publication") or {}).get("state") == "preprint" for document in documents):
+        print("\n关于发表状态：" + PUBLICATION_CAVEAT)
     print("\nThese are bibliographic records, not full text. Confirm anything load-bearing "
           "against the paper itself before citing it.")
     return 0

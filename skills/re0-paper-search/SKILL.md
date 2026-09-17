@@ -99,7 +99,9 @@ Recognised names, each sent only to the service that owns it:
 | `OPENREVIEW_TOKEN` | OpenReview, for anything beyond public reads | optional |
 
 The script prints how many variables the file supplied, **never a value**. No key is
-written to the result file, the cache, or any log.
+written to the result file, the cache, or any log. When a source fails, the failure line names the
+variable that would fix it if that variable is unset — a 429 from Semantic Scholar is usually a
+missing key rather than a broken service.
 
 OpenReview is queried publicly and needs no account. Credentialed access uses a bearer
 token rather than the username/password pair in some existing setups: posting a password
@@ -115,8 +117,15 @@ wider read scope.
   such. Never write "no such work exists" because a source was unreachable.
 - **An empty list is not evidence of absence.** Widen the query, change the year window,
   or recheck one source alone before concluding anything.
-- `--max-papers` is bounded at 8 per source by the tool, to keep each result small
-  enough to stay citable. Raise recall with a better query, not a bigger page.
+- `--max-papers` defaults to 20; the tool caps it at 25. **This is the recall ceiling** — a paper
+  no source returned cannot be merged, corrected or counted, so raise it first when a survey feels
+  thin.
+- **A bigger page means a noisier head, not a better one.** These sources rank by their own
+  relevance and nothing here re-ranks, so a two-word query like `layer decomposition` puts
+  mathematics and finance papers first. Recall comes from the page size; **precision comes from the
+  query** — use the words the target literature uses (`image layer decomposition RGBA`) and run
+  several short queries rather than one long phrase. arXiv and Semantic Scholar treat
+  space-separated terms restrictively, so a long phrase can return *less* than two words do.
 
 ## Accepted, submitted, or preprint
 
@@ -132,13 +141,23 @@ call is checkable instead of hidden:
 
 | State | Meaning |
 |---|---|
-| `已收录于会议或期刊` | a journal or conference is named |
+| `有会议或期刊版本` | a service named a journal or conference |
 | `投稿或评审中` | the record describes a submission (OpenReview's "… Conference Submission") |
-| `仅预印本` | only a preprint server is named (arXiv, bioRxiv, Research Square, …) |
-| `无可用信息` | no source carried a venue |
+| `仅见预印本版本` | **the services reached this run** named only a preprint server |
+| `来源未给出发表信息` | no service carried a venue |
 
-**An unstated venue is `无可用信息`, never `仅预印本`.** A service with no venue has told us
-nothing, and calling that "just a preprint" would be an invented conclusion.
+**An unstated venue is `来源未给出发表信息`, never `仅见预印本版本`.** A service with no venue has
+told us nothing, and calling that "just a preprint" would be an invented conclusion.
+
+**Why the wording is `仅见预印本版本`.** A preprint and its published version are normally **two
+separate records** — OpenAlex keeps the arXiv work and the ICCV work apart, each with its own DOI —
+so a run that reached only the preprint record must not report the absence of a publication. Two
+things fix it, in order of effect:
+
+1. **Set `SEMANTIC_SCHOLAR_API_KEY`.** Semantic Scholar merges the versions of one work into a
+   single entry and reports its venue, making it the largest correction here. It is also the main
+   source of preprint affiliations and citation counts, so it fixes three complaints at once.
+2. **Raise `--max-papers`.** A published record only reaches the merge if some source returned it.
 
 A paper is often **both** — an arXiv version plus a published one — so when sources disagree the
 stronger claim wins and the weaker one is still reported (`注: 同一工作另有预印本版本被索引`).
@@ -188,8 +207,14 @@ Two layers, and you decide how far to go.
 **Layer 1 — always on.** Prints the links above, plus code/data URLs **the authors themselves
 put in the abstract**, marked `artifact candidate (from the abstract, unverified)`.
 
+Extraction reads **the abstract**, and most abstracts do not contain a code or dataset link — so
+empty is the common case rather than a failure. The line prints even when empty
+(`开源线索: 摘要中未提及 code/dataset 链接`), so an absence reads as a finding instead of an
+omission. A link usually lives in the paper body, a README or a badge, none of which a
+bibliographic record carries.
+
 **Layer 2 — opt-in, `--verify N`.** Runs Re0's bounded resource check on the first N candidate
-links (0–5, default 0) and prints the outcome under that paper:
+links (0–8, default 0) and prints the outcome under that paper:
 
 ```
      → https://github.com/microsoft/LoRA
@@ -210,9 +235,10 @@ This is exactly what a link alone cannot tell you:
 
 Every outcome carries `本次没有完成内容验证；失败或未支持不等于资源未开放。`
 
-**Why it is bounded, and why not a subagent.** One check costs about four GitHub requests and
-the anonymous limit is roughly 60 per hour, so `--verify` caps at 5 and says when a link was
-left unchecked: an unchecked link is printed as a candidate, never as a failure. A subagent
+**Why it is off by default, and why not a subagent.** One check costs about four GitHub
+requests and the anonymous limit is roughly 60 per hour, so `--verify` defaults to 0, caps at 8,
+and counts the candidates it left unchecked rather than hiding them — an unchecked link is printed
+as a candidate, never as a failure. Set `GITHUB_TOKEN` to raise the ceiling. A subagent
 reading the repository would hand back prose, whereas this check hands back a **status you can
 compare across papers** and refuses to turn a failed request into a missing release. Set
 `GITHUB_TOKEN` if you need to check more than a couple.

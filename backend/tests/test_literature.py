@@ -12,6 +12,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
+from re0.agent.schemas import PaperSearchArgs
 from re0.agent.tools import ResearchTools
 from re0.env_file import load, parse
 from re0.literature import (arxiv_id_from_doi, artifact_urls, classify_venue, finalize_publication,
@@ -107,7 +108,7 @@ def test_a_named_venue_outranks_a_preprint_claim_and_the_preprint_is_still_repor
     result = run(router)
     published = next(document for document in result["documents"] if document["paper"]["title"] == "Fixture Layout Study")
     # Semantic Scholar and Crossref name a conference; OpenAlex and arXiv call it a preprint.
-    assert "publication: 已收录于会议或期刊 — Neural Information Processing Systems" in published["content"]
+    assert "publication: 有会议或期刊版本 — Neural Information Processing Systems" in published["content"]
     assert "publication note: a preprint version is also indexed" in published["content"]
     # The weaker claim is summarised, never dropped, and the raw string stays visible.
     assert "arXiv (Cornell University)" not in published["content"].split("publication:")[1].split("\n")[0]
@@ -375,7 +376,7 @@ def test_the_verification_budget_is_global_and_unchecked_links_are_still_listed(
     printed = capsys.readouterr().out
     assert "status metadata_accessible" in printed and "candidate files: training=1" in printed
     # A link left unchecked is reported as a candidate, never as a failure.
-    assert "unverified): https://github.com/c/d" in printed
+    assert "开源线索（摘要中自述，未核验）: https://github.com/c/d" in printed
 
 
 def test_a_check_that_raises_is_reported_as_unverified_not_as_absent(monkeypatch, capsys):
@@ -418,3 +419,43 @@ def test_env_file_never_shadows_a_real_variable(tmp_path, monkeypatch):
     assert os.environ["RE0_TEST_KEY"] == "from-environment"
     assert load(path, override=True) == ["RE0_TEST_KEY", "RE0_TEST_OTHER"]
     assert os.environ["RE0_TEST_KEY"] == "from-file"
+
+
+def test_the_search_limit_can_be_raised_beyond_the_old_eight():
+    # Recall is bounded by this cap, not by how many queries run. Eight made any survey a
+    # matter of luck; conversation cost is bounded separately by the excerpt budget, so a
+    # larger page per source is safe.
+    assert PaperSearchArgs(query="x", limit=25).limit == 25
+    with pytest.raises(ValidationError):
+        PaperSearchArgs(query="x", limit=26)
+
+
+def test_the_longest_abstract_wins_so_a_code_link_survives_the_merge():
+    short = {"source": "a", "citations": None, "venue": "",
+             "paper": PaperInput(title="Same Long Enough Title", abstract="No link here.")}
+    long = {"source": "b", "citations": None, "venue": "",
+            "paper": PaperInput(title="Same Long Enough Title",
+                                abstract="We release code at https://github.com/lab/paper today.")}
+    merged, duplicates = merge_records([short, long])
+    assert duplicates == 1
+    # First-source-wins would have kept the link-free abstract and lost the artifact scan.
+    assert artifact_urls(merged[0]["paper"].abstract) == ["https://github.com/lab/paper"]
+
+
+def test_a_failing_source_reports_the_credential_that_would_fix_it(monkeypatch):
+    module = load_skill_module()
+    monkeypatch.delenv("SEMANTIC_SCHOLAR_API_KEY", raising=False)
+    monkeypatch.delenv("SEMANTICSCHOLAR_API_KEY", raising=False)
+    assert "SEMANTIC_SCHOLAR_API_KEY" in module.failure_hint("semanticscholar")
+    monkeypatch.setenv("SEMANTICSCHOLAR_API_KEY", "configured")
+    assert module.failure_hint("semanticscholar") == ""   # the alias counts as configured
+    assert module.failure_hint("crossref") == ""          # no credential exists for it
+
+
+def test_the_artifact_line_prints_even_when_the_abstract_has_no_link(capsys):
+    module = load_skill_module()
+    document = skill_document("No links at all", "We release nothing in this paper.")
+    module.print_document(1, document, False, 0)
+    printed = capsys.readouterr().out
+    # An absent artifact module has to read as a finding, not as an omission.
+    assert "开源线索: 摘要中未提及" in printed

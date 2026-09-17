@@ -87,7 +87,10 @@ class Approval(StrictModel):
 
 class SearchArgs(StrictModel):
     query: str = Field(min_length=1, max_length=300)
-    limit: int = Field(default=5, ge=1, le=8)
+    # 25 rather than 8. At 8, one source could not contribute enough for a survey to be
+    # anything but luck, and recall is bounded by this rather than by how many queries run.
+    # Conversation cost is bounded separately, by the excerpt budget per tool result.
+    limit: int = Field(default=5, ge=1, le=25)
 
 
 PAPER_SOURCES = ("semanticscholar", "openalex", "arxiv", "openreview", "crossref")

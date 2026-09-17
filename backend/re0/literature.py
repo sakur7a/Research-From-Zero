@@ -103,8 +103,15 @@ PREPRINT_HINTS = ("arxiv", "biorxiv", "medrxiv", "preprint", "ssrn", "research s
 REVIEW_HINTS = ("submission", "under review", "workshop proposal", "withdrawn", "rejected")
 
 PUBLICATION_RANK = {"venue": 3, "under_review": 2, "preprint": 1, "unknown": 0}
-PUBLICATION_LABELS = {"venue": "已收录于会议或期刊", "preprint": "仅预印本",
-                      "under_review": "投稿或评审中", "unknown": "无可用信息"}
+# These describe what the services reported, not what is true of the paper. "仅见预印本版本"
+# rather than "仅预印本" is deliberate: a preprint and its published version are normally two
+# separate records, so a conference record this run did not reach must not be reported as the
+# absence of one.
+PUBLICATION_LABELS = {"venue": "有会议或期刊版本", "preprint": "仅见预印本版本",
+                      "under_review": "投稿或评审中", "unknown": "来源未给出发表信息"}
+PUBLICATION_CAVEAT = ("「仅见预印本版本」指本次检索到的来源里没有会议/期刊版本，不等于不存在："
+                      "预印本与已发表版本通常是两条独立记录。配置 SEMANTIC_SCHOLAR_API_KEY 会显著改善，"
+                      "因为该源会把同一工作的多个版本合并并给出 venue。")
 
 
 def classify_venue(name: str) -> str:
@@ -357,9 +364,13 @@ def merge_records(records: list[dict]) -> tuple[list[dict], int]:
             for name in record.get("institutions") or []:
                 if name not in current["institutions"]:
                     current["institutions"].append(name)
-            for field in ("doi", "arxiv_id", "abstract", "venue", "year", "paper_url"):
+            for field in ("doi", "arxiv_id", "venue", "year", "paper_url"):
                 if not getattr(current["paper"], field) and getattr(record["paper"], field):
                     setattr(current["paper"], field, getattr(record["paper"], field))
+            # Keep the longest abstract rather than the first: a longer one is likelier to
+            # carry the code or data link the artifact scan looks for.
+            if len(record["paper"].abstract) > len(current["paper"].abstract):
+                current["paper"].abstract = record["paper"].abstract
         for key in keys:
             index.setdefault(key, current)
     for entry in merged:

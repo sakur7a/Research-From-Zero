@@ -18,7 +18,22 @@
   and prints the endpoint URL, which is safe because `validate_endpoint` refuses a URL carrying
   credentials or a query string. It reuses `ModelVault` and `ChatModel.test()`, so a pass means the
   real agent can use the same endpoint.
-- Tests: 36 Python cases added.
+- Raise the search page from 8 to 25 per source (skill default 20). Recall is bounded by this,
+  so eight made any survey a matter of luck; conversation cost is bounded separately by the excerpt
+  budget. The trade-off is stated rather than hidden: a larger page means a noisier head, because
+  these sources rank by their own relevance and nothing here re-ranks.
+- Keep the **longest** abstract when merging rather than the first, so a code link that only one
+  service's abstract carries is not dropped in favour of a shorter one.
+- Reword the publication states to report evidence instead of asserting a fact:
+  `有会议或期刊版本` / `投稿或评审中` / `仅见预印本版本` / `来源未给出发表信息`. A preprint and its
+  published version are normally two separate records, so a run that reached only the preprint
+  record must not report the absence of a publication. The skill adds a caveat when any result is
+  `仅见预印本版本`, naming `SEMANTIC_SCHOLAR_API_KEY` as the largest correction.
+- Always print the artifact line, including `摘要中未提及 code/dataset 链接` when there is none, and
+  count the candidates left unchecked: an absent module should read as a finding, not an omission.
+- Print the credential that would fix a failing source when it is unset, so a 429 from Semantic
+  Scholar is not mistaken for a broken service.
+- Tests: 40 Python cases added.
 
 ### Multi-source literature search, and a skill for it
 
