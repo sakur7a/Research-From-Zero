@@ -121,7 +121,22 @@ python skills/paper-search/scripts/paper_search.py \
 
 每条结果给三级链接，最优在前：**arXiv → DOI → 来源记录页**。很多服务只报 arXiv 的 DOI（`10.48550/arXiv.<id>`），所以没有直接给出 arXiv ID 时会从 DOI 还原 —— 那通常才是想点开的那个链接。
 
-**开源情况（code／weights／dataset）这个 skill 不替你判断。** 它只做两件事：给出上面的链接，以及把**作者自己在摘要里写的** code／data 链接抽出来，标为 `artifact candidate (from the abstract, unverified)`。停在这里是有意的：按论文标题去 GitHub 搜同名仓库**什么也证明不了**（Re0 自己的规则就是"名称匹配不代表官方实现"），而摘要里的链接是**声明**不是核验。真要查，用仓库里已有的工具（走 MCP 或任务）：`search_repositories` 找仓库、`search_hub` 找权重与数据集、`inspect_resource` 看它究竟发布了什么、`read_repository_file` 读具体文件、`search_release_discussions` 看是否只是"声明计划发布"。**没有为这件事新建第二条流水线。**
+**开源情况（code／weights／dataset）分两层，由你决定走多远。**
+
+第一层永远生效：给出上面的链接，并把**作者自己在摘要里写的** code／data 链接抽出来，标为 `artifact candidate (from the abstract, unverified)`。
+
+第二层是 `--verify N`（0–5，默认 0）：对前 N 个候选链接跑 Re0 已有的**有界资源核验**，把结果显示在该论文下面：
+
+```
+     → https://github.com/microsoft/LoRA
+       status metadata_accessible · depth file_listing · provider github
+       仓库元数据可访问；扫描到 1189 个文件条目，功能与可复现性尚未验证。
+       candidate files: training=12, inference=1, evaluation=12, weights=2, data=1, environment=12
+```
+
+这正好补上"光看链接判断不了"的两种情况：**链接真实但仓库是空的** → 文件条目数接近 0 且无候选文件；**链接打开 404** → `indeterminate`，文案是"可能不存在、已移动或无访问权限"，**不是"不存在"**。每种结果都带"失败或未支持不等于资源未开放"。
+
+**为什么限制次数**：一次核验约 4 个 GitHub 请求，匿名额度约每小时 60 次，所以上限是 5，并且**未被核验的链接仍按候选打印、不会显示成失败**；要查更多请配 `GITHUB_TOKEN`。**没有用 subagent** —— subagent 给你一段描述，这个检查给你一个能横向比较的状态，且不会把请求失败说成"没开源"。要看得更深，用仓库里已有的 `search_repositories`／`search_hub`／`inspect_resource`／`read_repository_file`／`search_release_discussions`（走 MCP 或任务），不在 skill 里另搭流水线。
 
 设计取舍写在 `skills/paper-search/SKILL.md` 里，其中三条值得单独说明：
 

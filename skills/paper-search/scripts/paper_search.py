@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 from re0.agent.tools import ResearchTools          # noqa: E402
 from re0.env_file import load                      # noqa: E402
 from re0.literature import artifact_urls           # noqa: E402
-from re0.providers import ProviderError            # noqa: E402
+from re0.providers import ProviderError, check_resource  # noqa: E402
 
 ENV_FILES = (".env", "~/.codex/skills/.env", "~/.re0/.env")
 SURVEY_WORDS = ("survey", "review", "overview", "systematic", "综述")
@@ -79,22 +79,51 @@ def links_for(paper: dict) -> list:
     return links
 
 
-def print_document(index: int, document: dict, raw: bool) -> None:
+def verify_candidate(url: str) -> None:
+    """Run Re0's bounded resource check on one candidate link.
+
+    This is the answer to the two cases a link alone cannot distinguish: a repository
+    that exists but is empty, and a link that no longer resolves. The status vocabulary
+    is deliberately blunt — an unanswered request is reported as unverified, never as
+    "not released" — so the output stays comparable between papers.
+    """
+    try:
+        observation = check_resource(url)
+    except Exception:
+        # Never relay a raw traceback; an exception is not evidence about the resource.
+        print(f"     → {url}\n       verification did not complete (unexpected error); unverified")
+        return
+    print(f"     → {url}")
+    print(f"       status {observation.status} · depth {observation.depth} · provider {observation.provider}")
+    print(f"       {observation.summary[:300]}")
+    if observation.indicators:
+        print("       candidate files: " + ", ".join(f"{kind}={len(hits)}" for kind, hits in observation.indicators.items()))
+    for limitation in observation.limitations[:2]:
+        print(f"       limit: {limitation}")
+
+
+def print_document(index: int, document: dict, raw: bool, verify_budget: int) -> int:
+    """Print one result. Returns how many artifact candidates were actually verified."""
     paper = document["paper"]
     tag = "[survey] " if is_survey(paper["title"]) else ""
     print(f"\n{index:>3}. {tag}{paper['title']}")
     print(f"     {paper.get('year') or 'year unknown'} · {paper.get('venue') or 'no venue'} · {document['locator']}")
     for label, url in links_for(paper):
         print(f"     {label}: {url}")
-    # Extraction finds what the authors *said* they released. Checking it is a separate
-    # step, deliberately not folded in here.
+    used = 0
     for url in artifact_urls(paper.get("abstract", "")):
-        print(f"     artifact candidate (from the abstract, unverified): {url}")
+        if used >= verify_budget:
+            # Still shown, just not fetched: an unverified link is not a failed one.
+            print(f"     artifact candidate (from the abstract, unverified): {url}")
+            continue
+        used += 1
+        verify_candidate(url)
     if raw:
         print(document["content"])
     elif paper.get("abstract"):
         print("     abstract: " + paper["abstract"][:EXCERPT_CHARS]
               + ("…" if len(paper["abstract"]) > EXCERPT_CHARS else ""))
+    return used
 
 
 def main(argv=None) -> int:
@@ -109,7 +138,13 @@ def main(argv=None) -> int:
     parser.add_argument("--json", dest="json_path", default=None,
                         help="write the complete result set here; stdout stays readable")
     parser.add_argument("--raw", action="store_true", help="print every field instead of a table")
+    parser.add_argument("--verify", type=int, default=0, metavar="N",
+                        help="run Re0's bounded resource check on the first N artifact candidates "
+                             "(0 = none, max 5). One check costs about four GitHub requests and the "
+                             "anonymous limit is roughly 60 per hour, so keep N small or set GITHUB_TOKEN.")
     args = parser.parse_args(argv)
+    if not 0 <= args.verify <= 5:
+        parser.error("--verify takes 0-5; each check costs several requests against a shared rate limit")
 
     print(f"credentials: {load_credentials()}")
     if args.sources == "all":
@@ -144,8 +179,9 @@ def main(argv=None) -> int:
               "widen the query, change the year window, or recheck a source named above.")
         return 0
 
+    budget = args.verify
     for index, document in enumerate(documents, start=1):
-        print_document(index, document, args.raw)
+        budget -= print_document(index, document, args.raw, budget)
     print("\nThese are bibliographic records, not full text. Confirm anything load-bearing "
           "against the paper itself before citing it.")
     return 0

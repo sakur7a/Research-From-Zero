@@ -271,10 +271,23 @@ opentelemetry 等一批依赖，而本仓库的运行时依赖刻意只有 4 个
   `artifact candidate (from the abstract, unverified)` 标注。**未核验**，也刻意没有自动去核验。
 - 同一次运行还暴露出脚本的一个参数 bug：`--sources openalex` 被拆成列表传给只接受单值的契约，
   已改为「只接受 `all` 或单个来源名」并在传入多源时报错。**这就是跑真实路径的价值。**
+- **有界核验实测**（`--verify 1`，真实网络）：`https://github.com/microsoft/LoRA` 返回
+  `status metadata_accessible · depth file_listing · provider github`、
+  "扫描到 1189 个文件条目"、以及 `training=12, inference=1, evaluation=12, weights=2, data=1,
+  environment=12` 的候选文件计数。**同一批次里第二个候选因超出上限未被核验，仍按候选打印**，
+  证明上限是全局的而不是每篇一次。
+- **三种异常路径实测**：不存在的 GitHub 仓库返回 `indeterminate` +
+  "接口返回 404：可能不存在、已移动或无访问权限"（**没有说"不存在"**）；不存在的 HF 模型返回
+  `access_failed` + "访问被拒绝；可能需要授权，尚不能确定资源状态"；非 GitHub/HF 链接返回
+  `unsupported`。三者都带"本次没有完成内容验证；失败或未支持不等于资源未开放"。
+
+新增的 2 项自动化用例守住：`--verify` 上限是**全局**的（两篇论文共用一个额度，绝不多查一次）、
+未被核验的链接仍以候选形式打印，以及核验函数抛异常时输出 `unverified` 且**不泄露 traceback 与
+内部路径**。
 
 **未实测**：Semantic Scholar 的凭据在样本文件里是空的，因此其带 key 的调用路径未验证；真实
-检索的召回率与结果质量没有评测；DBLP、Exa 等未接入；开源候选链接的**核验路径**（`inspect_resource`
-等）没有在这次运行里跟着走一遍。
+检索的召回率与结果质量没有评测；DBLP、Exa 等未接入；`--verify` 在大额度下对 GitHub 匿名限流的
+实际影响未测。
 
 
 

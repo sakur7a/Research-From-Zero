@@ -81,19 +81,42 @@ supplied it directly. A source page is never the primary link when a better one 
 
 ## Open-source status (code, weights, data)
 
-**This skill does not decide it.** It does two things and stops:
+Two layers, and you decide how far to go.
 
-1. Prints the links above, so a paper is one click away.
-2. Extracts code/data URLs **the authors themselves put in the abstract**, printed as
-   `artifact candidate (from the abstract, unverified)`.
+**Layer 1 — always on.** Prints the links above, plus code/data URLs **the authors themselves
+put in the abstract**, marked `artifact candidate (from the abstract, unverified)`.
 
-Why it stops there. Searching GitHub for a repository *named like the paper* proves nothing —
-Re0's own rule is that a name match does not establish official authorship, so "they have a
-repo" would be a guess dressed up as a finding. And a URL in the abstract is a **claim**, not a
-check: a link existing is not a download, and a file listing is not something that runs.
+**Layer 2 — opt-in, `--verify N`.** Runs Re0's bounded resource check on the first N candidate
+links (0–5, default 0) and prints the outcome under that paper:
 
-Verification already has tools in this repository. Use them — through the MCP server or a Re0
-task — rather than growing a second pipeline here:
+```
+     → https://github.com/microsoft/LoRA
+       status metadata_accessible · depth file_listing · provider github
+       仓库元数据可访问；扫描到 1189 个文件条目，功能与可复现性尚未验证。
+       candidate files: training=12, inference=1, evaluation=12, weights=2, data=1, environment=12
+       limit: 仅检查默认分支文件名、README 和前 10 个 Release；未下载权重或数据、未运行代码。
+```
+
+This is exactly what a link alone cannot tell you:
+
+| What you see | What the check reports |
+|---|---|
+| the link resolves but the repository is **empty** | `metadata_accessible` with a **file count near zero** and no candidate files |
+| the link **404s** | `indeterminate` — "可能不存在、已移动或无访问权限", **not** "不存在" |
+| access is refused or the model is gated | `access_failed` — "可能需要授权，尚不能确定资源状态" |
+| not a GitHub/Hugging Face page | `unsupported` — the link is stored, nothing is claimed |
+
+Every outcome carries `本次没有完成内容验证；失败或未支持不等于资源未开放。`
+
+**Why it is bounded, and why not a subagent.** One check costs about four GitHub requests and
+the anonymous limit is roughly 60 per hour, so `--verify` caps at 5 and says when a link was
+left unchecked: an unchecked link is printed as a candidate, never as a failure. A subagent
+reading the repository would hand back prose, whereas this check hands back a **status you can
+compare across papers** and refuses to turn a failed request into a missing release. Set
+`GITHUB_TOKEN` if you need to check more than a couple.
+
+Going further is a separate step with the tools already in this repository — use them through
+the MCP server or a Re0 task rather than growing a second pipeline here:
 
 | Question | Tool |
 |---|---|

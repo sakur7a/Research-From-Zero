@@ -31,12 +31,19 @@
   arXiv ID from an arXiv DOI (`10.48550/arXiv.<id>`) when no service supplied it directly.
   That is the link most readers want, and several services report only the DOI.
 - Surface code/data URLs that the abstract itself advertises, as
-  `artifact candidate (from the abstract, unverified)`. Extraction stops there on purpose: a
-  repository merely *named* like the paper does not establish official authorship, and a link
-  in an abstract is an author's claim rather than a check. Verification reuses the existing
-  `search_repositories` / `search_hub` / `inspect_resource` / `read_repository_file` tools
-  (through MCP or a task) instead of a second pipeline grown inside the skill.
-- Tests: 29 Python cases added.
+  `artifact candidate (from the abstract, unverified)`. Extraction uses the existing
+  `artifact_urls` helper and deliberately does not search GitHub by title: a repository merely
+  *named* like the paper does not establish official authorship, so "they have a repo" would be
+  a guess presented as a finding.
+- Add opt-in `--verify N` (0–5, default 0) to the skill: Re0's bounded resource check runs on
+  the first N artifact candidates, which is what a link alone cannot answer. A link that
+  resolves to an **empty** repository shows up as `metadata_accessible` with a file count near
+  zero and no candidate files; a link that **404s** reports `indeterminate` with
+  "可能不存在、已移动或无访问权限" and never "不存在". The cap is global rather than per paper, one
+  check costs about four GitHub requests against an anonymous limit of roughly 60/hour, and an
+  unchecked link still prints as a candidate instead of appearing to have failed. A subagent was
+  rejected here: it returns prose, while this returns a status comparable across papers.
+- Tests: 31 Python cases added.
 
 ### MCP retrieval surface
 

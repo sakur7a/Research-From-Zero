@@ -3,8 +3,10 @@
 Only the provider HTTP is replaced (`httpx.MockTransport`); merging, parsing and
 failure handling are the real code paths.
 """
+import importlib.util
 import json
 import os
+from pathlib import Path
 
 import httpx
 import pytest
@@ -14,7 +16,7 @@ from re0.agent.tools import ResearchTools
 from re0.env_file import load, parse
 from re0.literature import (arxiv_id_from_doi, artifact_urls, in_year_range,
                             merge_records, paper_keys)
-from re0.models import PaperInput
+from re0.models import Observation, PaperInput
 from re0.providers import ProviderError
 
 OPENALEX = {
@@ -253,6 +255,58 @@ def test_an_arxiv_doi_yields_the_arxiv_id_so_the_primary_link_is_recoverable():
     assert arxiv_id_from_doi("10.1109/lsp.2024.3377590") == ""
     assert arxiv_id_from_doi("") == "" and arxiv_id_from_doi(None) == ""
     assert arxiv_id_from_doi("10.48550/arxiv.not-an-id") == ""
+
+
+SKILL_SCRIPT = Path(__file__).resolve().parents[2] / "skills" / "paper-search" / "scripts" / "paper_search.py"
+
+
+def load_skill_module():
+    spec = importlib.util.spec_from_file_location("paper_search_skill", SKILL_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def observation():
+    return Observation(status="metadata_accessible", summary="仓库元数据可访问；扫描到 5 个文件条目。",
+                       provider="github", depth="file_listing", scope="仅限公开元数据接口",
+                       indicators={"training": ["train.py"]}, limitations=["仅检查默认分支文件名。"])
+
+
+def skill_document(title, abstract):
+    return {"paper": {"title": title, "abstract": abstract, "paper_url": "", "doi": "", "arxiv_id": ""},
+            "locator": "fixture", "content": ""}
+
+
+def test_the_verification_budget_is_global_and_unchecked_links_are_still_listed(monkeypatch, capsys):
+    module = load_skill_module()
+    checked = []
+    monkeypatch.setattr(module, "check_resource", lambda url: checked.append(url) or observation())
+    documents = [skill_document("First", "Code at https://github.com/a/b"),
+                 skill_document("Second", "Code at https://github.com/c/d")]
+    budget = 1
+    for index, document in enumerate(documents, start=1):
+        budget -= module.print_document(index, document, False, budget)
+    # The cap is global, not per paper: one check across two papers, never two.
+    assert checked == ["https://github.com/a/b"]
+    printed = capsys.readouterr().out
+    assert "status metadata_accessible" in printed and "candidate files: training=1" in printed
+    # A link left unchecked is reported as a candidate, never as a failure.
+    assert "unverified): https://github.com/c/d" in printed
+
+
+def test_a_check_that_raises_is_reported_as_unverified_not_as_absent(monkeypatch, capsys):
+    module = load_skill_module()
+
+    def explode(url):
+        raise RuntimeError("boom: /Users/someone/secret/path")
+
+    monkeypatch.setattr(module, "check_resource", explode)
+    module.print_document(1, skill_document("First", "Code at https://github.com/a/b"), False, 1)
+    printed = capsys.readouterr().out
+    assert "unverified" in printed
+    # No traceback and no internal path in the output.
+    assert "boom" not in printed and "Traceback" not in printed and "secret" not in printed
 
 
 def test_env_file_parsing_is_conservative(tmp_path):
