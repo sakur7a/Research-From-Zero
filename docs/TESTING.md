@@ -341,7 +341,20 @@ opentelemetry 等一批依赖，而本仓库的运行时依赖刻意只有 4 个
 env 文件（只有检索凭据）时同样清晰报缺；**在 `RE0_LLM_API_KEY` 设为哨兵值的情况下运行，输出中
 grep 该值命中 0 次**，即 key 不会被打印（探针只报告变量名是否设置）。
 
-**未实测**：没有用真实可用的模型凭据跑通探针的成功路径。
+**成功路径也实测了**（本地回环，不依赖外网）：起一个只回固定 `tool_calls` 的
+`127.0.0.1:<随机端口>/v1/chat/completions`，把 `RE0_LLM_BASE_URL` 指向它、`RE0_LLM_MODEL`
+设为 `fixture-loopback-model`、`RE0_LLM_API_KEY` 设为哨兵值，探针**以 0 退出**并输出
+
+```
+endpoint: http://127.0.0.1:54893/v1 | model: fixture-loopback-model | output parameter: max_tokens
+tool-call probe passed — 只验证了本次工具调用协议，不代表科研效果已评测
+provider-reported usage: {'prompt_tokens': 11, 'completion_tokens': 3, 'total_tokens': 14}
+```
+
+同时断言**哨兵值没有出现在 stdout/stderr**，且服务端确实收到了 `Authorization` 头。
+这证明了 `RE0_LLM_BASE_URL` / `RE0_LLM_MODEL` / `RE0_LLM_API_KEY` 这条链路可用。
+
+**未实测**：没有用真实第三方模型服务的凭据跑过探针；也没有从 WorkBuddy 客户端取到它的模型端点。
 
 
 
