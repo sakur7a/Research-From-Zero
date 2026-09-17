@@ -1,15 +1,38 @@
 ---
-name: paper-search
-description: Find literature across arXiv, OpenAlex, Semantic Scholar, OpenReview and Crossref at once, merge the duplicates each source reports separately, and report which sources failed instead of reading a failure as "no such paper". Use it for literature discovery, prior-art checks and topic surveys, and whenever a claim needs a source that can be checked.
+name: re0-paper-search
+description: Find literature across arXiv, OpenAlex, Semantic Scholar, OpenReview and Crossref at once, merge the duplicates each source reports separately, report acceptance status and affiliations, and list which sources failed instead of reading a failure as "no such paper". Optionally verify that a paper's own code/data links resolve and are not empty. Use it for literature discovery, prior-art checks and topic surveys, and whenever a claim needs a source that can be checked.
 ---
 
-# Paper search
+# Re0 paper search
 
-One query, five scholarly sources, one de-duplicated list.
+One query, five scholarly sources, one de-duplicated list. The name is deliberately distinct from
+a plain `paper_search` skill: if both are installed, this one is the one that reports failed
+sources rather than silently returning fewer results.
+
+## Installing it outside the repository
+
+The script finds the `re0` package in this order, so a copy can live anywhere:
+
+1. `RE0_HOME=/path/to/re0` — an explicit checkout, checked strictly and reported if wrong;
+2. the repository the skill still sits in (`<repo>/skills/<skill>/scripts/`);
+3. the ambient environment, i.e. an installed `re0-research` (`pip install -e <repo>`).
+
+`~/.codex/skills/<skill>/` is **another application's** directory; install there only if that
+agent is the one you want to use, and never let this skill write to it.
+
+```bash
+# A copy works as long as re0 is either installed or RE0_HOME points at a checkout.
+cp -r skills/re0-paper-search ~/.learnbuddy/skills/
+RE0_HOME=/path/to/re0 python ~/.learnbuddy/skills/re0-paper-search/scripts/paper_search.py \
+    --query "your topic"
+```
+
+A copy is a snapshot: re-copy after changing the repository, or run it from the repository.
 
 ```bash
 python scripts/paper_search.py --query "KV cache compression for long-context LLMs" \
     --start-year 2024 --end-year 2026 --json /tmp/papers.json
+
 ```
 
 ## What it does

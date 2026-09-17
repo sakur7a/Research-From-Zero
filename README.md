@@ -110,10 +110,10 @@ Base URL 通常包含 `/v1`，不要填写 `/chat/completions`；本地服务示
 
 ## 作为 skill 使用（多源文献检索）
 
-`skills/paper-search/` 是一个自包含的 skill：一条命令跨五个学术源检索并合并重复项。
+`skills/re0-paper-search/` 是一个自包含的 skill：一条命令跨五个学术源检索并合并重复项。
 
 ```bash
-python skills/paper-search/scripts/paper_search.py \
+python skills/re0-paper-search/scripts/paper_search.py \
     --query "KV cache compression for long-context LLMs" --start-year 2024 --end-year 2026
 ```
 
@@ -152,12 +152,12 @@ python skills/paper-search/scripts/paper_search.py \
 **会议论文（CVPR／NeurIPS／ACL 这类只发在会议上的）已经被覆盖** —— Crossref、Semantic Scholar、OpenAlex 都索引 proceedings，venue 会报出来。`--venue NAME` 把会议名前置到查询里：
 
 ```bash
-python skills/paper-search/scripts/paper_search.py --query "diffusion watermarking" --venue CVPR --start-year 2024
+python skills/re0-paper-search/scripts/paper_search.py --query "diffusion watermarking" --venue CVPR --start-year 2024
 ```
 
 这是**查询提示，不是 API 侧的会议过滤**，原因记在 `SKILL.md` 里：DBLP（最直接的会议索引）现在对非浏览器客户端返回反爬挑战页而不是 JSON；OpenAlex 明确拒绝按 source 名过滤（HTTP 400 "is not a valid field"）；Semantic Scholar 的 `venue=` 参数有文档但一直没验证成功（无 key 时被限流），所以没用。**多接一个源并不能解决这个问题** —— 五个源已经包含数亿条会议记录，缺的是查询形态，不是源的数量。
 
-设计取舍写在 `skills/paper-search/SKILL.md` 里，其中三条值得单独说明：
+设计取舍写在 `skills/re0-paper-search/SKILL.md` 里，其中三条值得单独说明：
 
 - **去重优先级 DOI > arXiv ID > 归一化标题**，且一条记录会用它的**全部**标识符参与匹配 —— 只用单一 key 的话，"一家报了 DOI、另一家只报了标题"这种最常见的情况就合并不了。
 - **来源失败不是负面结果。** 限流、超时、坏 token 都会被显式列出；"没搜到"与"没搜成"必须分开，否则会把一次故障读成"这工作不存在"。

@@ -244,7 +244,7 @@ opentelemetry 等一批依赖，而本仓库的运行时依赖刻意只有 4 个
 
 ### 真实来源可用性（手工实测，未纳入自动化）
 
-用 `RE0_ENV_FILE` 指向一份真实的凭据文件跑 `skills/paper-search/scripts/paper_search.py`：
+用 `RE0_ENV_FILE` 指向一份真实的凭据文件跑 `skills/re0-paper-search/scripts/paper_search.py`：
 
 - **成功过的来源**：Semantic Scholar（返回 3 条并带摘要）、OpenAlex（返回 2 条并带
   `cited_by_count`）、Crossref（返回 2–3 条）、OpenReview（返回 1 条）。

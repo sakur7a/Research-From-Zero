@@ -307,7 +307,7 @@ def test_an_arxiv_doi_yields_the_arxiv_id_so_the_primary_link_is_recoverable():
     assert arxiv_id_from_doi("10.48550/arxiv.not-an-id") == ""
 
 
-SKILL_SCRIPT = Path(__file__).resolve().parents[2] / "skills" / "paper-search" / "scripts" / "paper_search.py"
+SKILL_SCRIPT = Path(__file__).resolve().parents[2] / "skills" / "re0-paper-search" / "scripts" / "paper_search.py"
 
 
 def load_skill_module():
@@ -326,6 +326,30 @@ def observation():
 def skill_document(title, abstract):
     return {"paper": {"title": title, "abstract": abstract, "paper_url": "", "doi": "", "arxiv_id": ""},
             "locator": "fixture", "content": ""}
+
+
+def test_the_skill_locates_re0_whether_it_lives_in_the_repository_or_not(tmp_path, monkeypatch):
+    module = load_skill_module()
+    repo = Path(__file__).resolve().parents[2]
+    # Inside the repository: discovered from the script's own depth.
+    monkeypatch.delenv("RE0_HOME", raising=False)
+    assert module.locate_backend() == repo / "backend"
+    # Anywhere else, an explicit checkout resolves the same way.
+    monkeypatch.setenv("RE0_HOME", str(repo))
+    assert module.locate_backend() == repo / "backend"
+    # A wrong RE0_HOME fails loudly instead of silently falling back to something else.
+    monkeypatch.setenv("RE0_HOME", str(tmp_path))
+    with pytest.raises(SystemExit) as caught:
+        module.locate_backend()
+    assert caught.value.code == 2
+
+
+def test_the_skill_declares_another_apps_directory_off_limits():
+    # Installing next to other applications is supported, but writing into theirs is not:
+    # the documentation has to say so, because it would silently change that agent.
+    text = (Path(__file__).resolve().parents[2] / "skills" / "re0-paper-search" / "SKILL.md").read_text(encoding="utf-8")
+    assert "another application's" in text and "never let this skill write to it" in text
+    assert "name: re0-paper-search" in text
 
 
 def test_a_venue_hint_is_prepended_and_stays_optional():

@@ -18,13 +18,46 @@ import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(ROOT / "backend"))
+def locate_backend():
+    """Find the `re0` package, whether this skill sits inside the repository or not.
 
-from re0.agent.tools import ResearchTools          # noqa: E402
-from re0.env_file import load                      # noqa: E402
-from re0.literature import PUBLICATION_LABELS, artifact_urls  # noqa: E402
-from re0.providers import ProviderError, check_resource  # noqa: E402
+    A skill copied into an agent's skills directory is no longer at a fixed depth under the
+    repository, so `parents[3]` cannot be relied on. `RE0_HOME` names a checkout explicitly;
+    otherwise a repository the skill still lives in is tried; otherwise the ambient
+    environment is used as-is (an installed `re0-research`). Nothing is searched broadly, so
+    a wrong `RE0_HOME` fails loudly instead of picking up an unrelated package.
+    """
+    explicit = os.getenv("RE0_HOME", "").strip()
+    if explicit:
+        candidate = Path(explicit).expanduser() / "backend"
+        if (candidate / "re0" / "agent" / "tools.py").is_file():
+            return candidate
+        print(f"RE0_HOME={explicit} does not look like a Re0 checkout "
+              "(no backend/re0/agent/tools.py)", file=sys.stderr)
+        raise SystemExit(2)
+    here = Path(__file__).resolve()
+    # <repo>/skills/<skill>/scripts/paper_search.py -> <repo>
+    if len(here.parents) > 3:
+        candidate = here.parents[3] / "backend"
+        if (candidate / "re0" / "agent" / "tools.py").is_file():
+            return candidate
+    return None
+
+
+_backend = locate_backend()
+if _backend is not None:
+    sys.path.insert(0, str(_backend))
+
+try:
+    from re0.agent.tools import ResearchTools          # noqa: E402
+    from re0.env_file import load                      # noqa: E402
+    from re0.literature import PUBLICATION_LABELS, artifact_urls  # noqa: E402
+    from re0.providers import ProviderError, check_resource  # noqa: E402
+except ModuleNotFoundError:
+    print("re0 is not importable from here. Either install it (pip install -e <repo>) or point\n"
+          "this skill at a checkout: RE0_HOME=/path/to/re0 python paper_search.py ...",
+          file=sys.stderr)
+    raise SystemExit(2)
 
 ENV_FILES = (".env", "~/.codex/skills/.env", "~/.re0/.env")
 SURVEY_WORDS = ("survey", "review", "overview", "systematic", "综述")

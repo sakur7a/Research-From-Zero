@@ -38,7 +38,7 @@
   nothing else: an automatic retry of a rate-limited request must stay visible.
 - Raise the per-request read timeout for retrieval to 20 s. arXiv measures over 5 s for a
   plain query, so the 8 s default tuned for GitHub/HF metadata failed it every time.
-- Add `skills/paper-search/`: a self-contained skill that runs the multi-source search
+- Add `skills/re0-paper-search/`: a self-contained skill that runs the multi-source search
   from the command line, prints per-source hit counts, lists failures on stderr, and sinks
   survey/review papers to the bottom as `[survey]` without removing them. It deliberately
   has no "model knowledge" source, and no semantic relevance filter that could hide rows.
