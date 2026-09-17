@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import datetime
 import os
+import re
+from urllib.parse import urlsplit
 
-from .models import PaperInput
+from .models import PaperInput, normalize_arxiv
 from .providers import ProviderClient
 
 # Signal order, strongest first, as reported by the reference implementation this
@@ -114,13 +116,15 @@ def search_openalex(client: ProviderClient, query: str, limit: int, *, start_yea
         if not title:
             continue
         location = item.get("primary_location") or {}
+        doi = _text(item.get("doi"), 300).removeprefix("https://doi.org/")
         paper = PaperInput(
             title=title,
-            doi=_text(item.get("doi"), 300).removeprefix("https://doi.org/"),
+            doi=doi,
             authors=_authors((entry.get("author") or {}).get("display_name") for entry in item.get("authorships") or []),
             year=_year(item.get("publication_year")),
             venue=_text((location.get("source") or {}).get("display_name"), 200),
             abstract=_openalex_abstract(item.get("abstract_inverted_index")),
+            arxiv_id=arxiv_id_from_doi(doi),
             paper_url=_text(item.get("doi") or item.get("id") or "https://openalex.org", 2000))
         records.append(_record("openalex", paper, citations=item.get("cited_by_count"), venue=paper.venue))
     return records
@@ -145,14 +149,15 @@ def search_semanticscholar(client: ProviderClient, query: str, limit: int, *, st
         if not title:
             continue
         external = item.get("externalIds") or {}
+        doi = _text(external.get("DOI"), 300)
         paper = PaperInput(
             title=title,
             authors=_authors((entry.get("name") for entry in item.get("authors") or [])),
             year=_year(item.get("year")),
             venue=_text(item.get("venue"), 200),
             abstract=_text(item.get("abstract"), MAX_ABSTRACT),
-            doi=_text(external.get("DOI"), 300),
-            arxiv_id=_text(external.get("ArXiv"), 100),
+            doi=doi,
+            arxiv_id=_text(external.get("ArXiv"), 100) or arxiv_id_from_doi(doi),
             paper_url=_text(item.get("url"), 2000))
         records.append(_record("semanticscholar", paper, citations=item.get("citationCount"), venue=paper.venue))
     return records
@@ -259,3 +264,43 @@ def in_year_range(year: int | None, start_year=None, end_year=None) -> bool:
     if end_year and year > end_year:
         return False
     return True
+
+
+URL_PATTERN = re.compile(r"https?://[^\s<>()\[\]\"'，。；）】]+", re.IGNORECASE)
+# Hosts that hold code, weights or data. A paper's own venue (arXiv, OpenReview) is
+# deliberately absent: that link is the record, not an artifact.
+ARTIFACT_HOSTS = ("github.com", "huggingface.co", "gitlab.com", "zenodo.org",
+                  "figshare.com", "codeocean.com", "bitbucket.org")
+# arXiv assigns DOIs of the form 10.48550/arXiv.<id>, so a service that reports only the
+# DOI still tells us the arXiv ID — which is the link most readers actually want.
+ARXIV_DOI_PREFIX = "10.48550/arxiv."
+
+
+def arxiv_id_from_doi(doi: str) -> str:
+    """Recover an arXiv ID from an arXiv DOI, or return "" when it is not one."""
+    value = (doi or "").strip().lower()
+    if not value.startswith(ARXIV_DOI_PREFIX):
+        return ""
+    try:
+        return normalize_arxiv(value[len(ARXIV_DOI_PREFIX):])
+    except ValueError:
+        return ""
+
+
+def artifact_urls(*texts, limit: int = 5) -> list[str]:
+    """Code/data URLs a paper's own text advertises.
+
+    These are candidates, not a verification. A URL in an abstract is an author's claim
+    about what they released, which is exactly the thing that still has to be checked, so
+    a caller must not read this list as "the code is open".
+    """
+    found: list[str] = []
+    for text in texts:
+        for match in URL_PATTERN.findall(str(text or "")):
+            url = match.rstrip(".,;:")
+            host = (urlsplit(url).hostname or "").lower()
+            if not any(host == name or host.endswith("." + name) for name in ARTIFACT_HOSTS):
+                continue
+            if url not in found:
+                found.append(url)
+    return found[:limit]

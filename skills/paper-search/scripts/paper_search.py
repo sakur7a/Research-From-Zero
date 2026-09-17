@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 from re0.agent.tools import ResearchTools          # noqa: E402
 from re0.env_file import load                      # noqa: E402
+from re0.literature import artifact_urls           # noqa: E402
 from re0.providers import ProviderError            # noqa: E402
 
 ENV_FILES = (".env", "~/.codex/skills/.env", "~/.re0/.env")
@@ -64,6 +65,38 @@ def heading(result: dict, args) -> str:
     return line
 
 
+def links_for(paper: dict) -> list:
+    """Best link first. An arXiv ID or DOI resolves to the paper itself; a source page is
+    only where the record was found, so it comes last and only if nothing better exists."""
+    links = []
+    if paper.get("arxiv_id"):
+        links.append(("arXiv", f"https://arxiv.org/abs/{paper['arxiv_id']}"))
+    if paper.get("doi"):
+        links.append(("DOI", f"https://doi.org/{paper['doi']}"))
+    record = paper.get("paper_url") or ""
+    if record and all(record != url for _, url in links):
+        links.append(("record", record))
+    return links
+
+
+def print_document(index: int, document: dict, raw: bool) -> None:
+    paper = document["paper"]
+    tag = "[survey] " if is_survey(paper["title"]) else ""
+    print(f"\n{index:>3}. {tag}{paper['title']}")
+    print(f"     {paper.get('year') or 'year unknown'} · {paper.get('venue') or 'no venue'} · {document['locator']}")
+    for label, url in links_for(paper):
+        print(f"     {label}: {url}")
+    # Extraction finds what the authors *said* they released. Checking it is a separate
+    # step, deliberately not folded in here.
+    for url in artifact_urls(paper.get("abstract", "")):
+        print(f"     artifact candidate (from the abstract, unverified): {url}")
+    if raw:
+        print(document["content"])
+    elif paper.get("abstract"):
+        print("     abstract: " + paper["abstract"][:EXCERPT_CHARS]
+              + ("…" if len(paper["abstract"]) > EXCERPT_CHARS else ""))
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--query", required=True, help="a focused search phrase")
@@ -79,11 +112,18 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     print(f"credentials: {load_credentials()}")
-    sources = args.sources if args.sources == "all" else args.sources.split(",")
+    if args.sources == "all":
+        source = "all"
+    else:
+        chosen = [part.strip() for part in args.sources.split(",") if part.strip()]
+        if len(chosen) != 1:
+            parser.error("--sources takes 'all' or exactly one source name; "
+                         "run once per source for a longer list")
+        source = chosen[0]
     try:
         result = ResearchTools(None).execute("search_papers", {
             "query": args.query, "limit": min(8, max(1, args.max_papers)),
-            "source": sources, "start_year": args.start_year, "end_year": args.end_year})
+            "source": source, "start_year": args.start_year, "end_year": args.end_year})
     except ProviderError as exc:
         # Reported verbatim. A failed search is not an empty result.
         print(f"search failed: {exc}", file=sys.stderr)
@@ -105,20 +145,7 @@ def main(argv=None) -> int:
         return 0
 
     for index, document in enumerate(documents, start=1):
-        paper = document["paper"]
-        tag = "[survey] " if is_survey(paper["title"]) else ""
-        print(f"\n{index:>3}. {tag}{paper['title']}")
-        print(f"     {paper.get('year') or 'year unknown'} · {paper.get('venue') or 'no venue'} · {document['locator']}")
-        identifiers = [f"{key}: {paper[key]}" for key in ("doi", "arxiv_id") if paper.get(key)]
-        if identifiers:
-            print("     " + " · ".join(identifiers))
-        if paper.get("paper_url"):
-            print(f"     {paper['paper_url']}")
-        if args.raw:
-            print(document["content"])
-        elif paper.get("abstract"):
-            print("     abstract: " + paper["abstract"][:EXCERPT_CHARS]
-                  + ("…" if len(paper["abstract"]) > EXCERPT_CHARS else ""))
+        print_document(index, document, args.raw)
     print("\nThese are bibliographic records, not full text. Confirm anything load-bearing "
           "against the paper itself before citing it.")
     return 0

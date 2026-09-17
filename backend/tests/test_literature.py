@@ -12,7 +12,8 @@ from pydantic import ValidationError
 
 from re0.agent.tools import ResearchTools
 from re0.env_file import load, parse
-from re0.literature import in_year_range, merge_records, paper_keys
+from re0.literature import (arxiv_id_from_doi, artifact_urls, in_year_range,
+                            merge_records, paper_keys)
 from re0.models import PaperInput
 from re0.providers import ProviderError
 
@@ -229,6 +230,29 @@ def test_openalex_abstract_is_rebuilt_from_its_inverted_index():
 def test_a_reversed_year_window_is_rejected_by_the_contract():
     with pytest.raises(ValidationError):
         run(router, start_year=2025, end_year=2020)
+
+
+def test_artifact_candidates_come_from_the_text_and_never_from_a_paper_venue():
+    abstract = ("Code is at https://github.com/lab/paper, weights at "
+                "https://huggingface.co/lab/weights, the record is "
+                "https://arxiv.org/abs/2401.00001, and a blog is https://example.com/post.")
+    assert artifact_urls(abstract) == ["https://github.com/lab/paper", "https://huggingface.co/lab/weights"]
+    # Trailing sentence punctuation belongs to the sentence, not to the URL.
+    assert artifact_urls("See https://github.com/lab/paper.") == ["https://github.com/lab/paper"]
+    assert artifact_urls("") == [] and artifact_urls(None) == []
+    assert artifact_urls("https://github.com/a/b https://github.com/c/d", limit=1) == ["https://github.com/a/b"]
+    # No artifact host mentioned means no candidates, never a guessed search URL.
+    assert artifact_urls("We release nothing. See https://doi.org/10.1000/x") == []
+    assert artifact_urls("We release nothing at all.") == []
+
+
+def test_an_arxiv_doi_yields_the_arxiv_id_so_the_primary_link_is_recoverable():
+    # OpenAlex and Crossref often report only arXiv's DOI; the ID is encoded in it.
+    assert arxiv_id_from_doi("10.48550/arXiv.2106.09685") == "2106.09685"
+    assert arxiv_id_from_doi("10.48550/arxiv.2401.00001") == "2401.00001"
+    assert arxiv_id_from_doi("10.1109/lsp.2024.3377590") == ""
+    assert arxiv_id_from_doi("") == "" and arxiv_id_from_doi(None) == ""
+    assert arxiv_id_from_doi("10.48550/arxiv.not-an-id") == ""
 
 
 def test_env_file_parsing_is_conservative(tmp_path):

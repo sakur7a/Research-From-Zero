@@ -119,6 +119,10 @@ python skills/paper-search/scripts/paper_search.py \
 
 输出形如 `per-source hits: semanticscholar=3, openalex=2, arxiv=0, … · 5 unique (1 duplicates merged)`，并在 stderr 单独列出**失败**的来源。survey／review 类论文被标 `[survey]` 并沉到列表末尾，但**不会被删掉**。
 
+每条结果给三级链接，最优在前：**arXiv → DOI → 来源记录页**。很多服务只报 arXiv 的 DOI（`10.48550/arXiv.<id>`），所以没有直接给出 arXiv ID 时会从 DOI 还原 —— 那通常才是想点开的那个链接。
+
+**开源情况（code／weights／dataset）这个 skill 不替你判断。** 它只做两件事：给出上面的链接，以及把**作者自己在摘要里写的** code／data 链接抽出来，标为 `artifact candidate (from the abstract, unverified)`。停在这里是有意的：按论文标题去 GitHub 搜同名仓库**什么也证明不了**（Re0 自己的规则就是"名称匹配不代表官方实现"），而摘要里的链接是**声明**不是核验。真要查，用仓库里已有的工具（走 MCP 或任务）：`search_repositories` 找仓库、`search_hub` 找权重与数据集、`inspect_resource` 看它究竟发布了什么、`read_repository_file` 读具体文件、`search_release_discussions` 看是否只是"声明计划发布"。**没有为这件事新建第二条流水线。**
+
 设计取舍写在 `skills/paper-search/SKILL.md` 里，其中三条值得单独说明：
 
 - **去重优先级 DOI > arXiv ID > 归一化标题**，且一条记录会用它的**全部**标识符参与匹配 —— 只用单一 key 的话，"一家报了 DOI、另一家只报了标题"这种最常见的情况就合并不了。

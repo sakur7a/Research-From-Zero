@@ -27,7 +27,16 @@
 - Add opt-in credential loading: `RE0_ENV_FILE` (also honoured by `run.py`) loads a dotenv
   file, filling only variables that are not already set. Values are never printed, logged
   or written to a task record; Re0 still reads no file unless asked.
-- Tests: 27 Python cases added.
+- Print links best-first — arXiv, then DOI, then the source record page — and recover the
+  arXiv ID from an arXiv DOI (`10.48550/arXiv.<id>`) when no service supplied it directly.
+  That is the link most readers want, and several services report only the DOI.
+- Surface code/data URLs that the abstract itself advertises, as
+  `artifact candidate (from the abstract, unverified)`. Extraction stops there on purpose: a
+  repository merely *named* like the paper does not establish official authorship, and a link
+  in an abstract is an author's claim rather than a check. Verification reuses the existing
+  `search_repositories` / `search_hub` / `inspect_resource` / `read_repository_file` tools
+  (through MCP or a task) instead of a second pipeline grown inside the skill.
+- Tests: 29 Python cases added.
 
 ### MCP retrieval surface
 

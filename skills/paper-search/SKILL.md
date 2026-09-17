@@ -65,6 +65,48 @@ wider read scope.
 - `--max-papers` is bounded at 8 per source by the tool, to keep each result small
   enough to stay citable. Raise recall with a better query, not a bigger page.
 
+## Links
+
+Each result prints three tiers, best first:
+
+```
+arXiv:  https://arxiv.org/abs/2106.09685        ← the paper itself
+DOI:    https://doi.org/10.48550/arxiv.2106.09685
+record: https://www.semanticscholar.org/paper/… ← only where it was found
+```
+
+arXiv comes first because that is usually the link people want. Many services report only
+arXiv's DOI (`10.48550/arXiv.<id>`), so the ID is recovered from the DOI when no service
+supplied it directly. A source page is never the primary link when a better one exists.
+
+## Open-source status (code, weights, data)
+
+**This skill does not decide it.** It does two things and stops:
+
+1. Prints the links above, so a paper is one click away.
+2. Extracts code/data URLs **the authors themselves put in the abstract**, printed as
+   `artifact candidate (from the abstract, unverified)`.
+
+Why it stops there. Searching GitHub for a repository *named like the paper* proves nothing —
+Re0's own rule is that a name match does not establish official authorship, so "they have a
+repo" would be a guess dressed up as a finding. And a URL in the abstract is a **claim**, not a
+check: a link existing is not a download, and a file listing is not something that runs.
+
+Verification already has tools in this repository. Use them — through the MCP server or a Re0
+task — rather than growing a second pipeline here:
+
+| Question | Tool |
+|---|---|
+| Is there a matching repository? | `search_repositories` |
+| Are there companion weights or datasets? | `search_hub` |
+| What did the repository actually publish (releases, file listing, resource links in the README)? | `inspect_resource` |
+| What is in that file? | `read_repository_file` |
+| Did the authors merely announce a plan to release? | `search_release_discussions` |
+
+Keep Re0's wording when reporting the outcome: `metadata readable ≠ downloaded`,
+`a filename ≠ something runnable`, `gated access ≠ closed source`, `not found ≠ does not exist`,
+and a link in a README may be a baseline or a dependency rather than this paper's implementation.
+
 ## What this deliberately does not do
 
 - **No "model knowledge" source.** Recalling papers from a model's training data is the

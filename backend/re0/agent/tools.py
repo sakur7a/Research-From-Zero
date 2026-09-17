@@ -12,7 +12,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 from pydantic import ValidationError
 
-from ..literature import CONNECTORS, in_year_range, merge_records
+from ..literature import CONNECTORS, arxiv_id_from_doi, in_year_range, merge_records
 from ..models import PaperInput, normalize_arxiv
 from ..providers import (ProviderClient, ProviderError, check_resource, resolve_metadata,
                          repository_identity, _arxiv_lock)
@@ -177,7 +177,7 @@ class ResearchTools:
             if not doi or not title:
                 continue
             date = item.get("issued", {}).get("date-parts", [[]])[0]
-            paper = PaperInput(title=title, doi=doi,
+            paper = PaperInput(title=title, doi=doi, arxiv_id=arxiv_id_from_doi(doi),
                 authors=[((" ".join([a.get("given", ""), a.get("family", "")])).strip() or a.get("name", "Unknown"))[:160] for a in item.get("author", [])[:30]],
                 year=date[0] if date and isinstance(date[0], int) and 1900 <= date[0] <= 2100 else None,
                 paper_url="https://doi.org/" + doi)
