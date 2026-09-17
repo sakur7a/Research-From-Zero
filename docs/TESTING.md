@@ -382,6 +382,37 @@ provider-reported usage: {'prompt_tokens': 11, 'completion_tokens': 3, 'total_to
 **未实测**：`--max-papers 25` 下各源的真实截断与限流影响；把 OpenAlex 的已发表记录与 arXiv 记录
 合并起来的具体比例（需要 S2 的 key 才能有效评估）；`--verify` 在更大额度下的表现。
 
+### 用户追加的两个验收点（本轮）
+
+**验收点 A：按项目名找到摘要与正文都没有链接的开源。** 用户给出的样例是
+`RevealLayer: Disentangling Hidden and Visible Layers via Occlusion-Aware Image Decomposition`
+（摘要与正文都无链接）。先验证接口能力：`GitHub search q=RevealLayer` → `360CVGroup/RevealLayer`
+（描述即论文标题）；`HF datasets search=RevealLayer` → `qihoo360/RevealLayer-100K`。
+新增 `--find-artifacts N`（默认前 5 篇，上限 10）后**真实运行命中全部三条**：
+
+```
+  1. RevealLayer: Disentangling Hidden and Visible Layers via Occlusion-Aware Image Decomposition
+     2026 · 有会议或期刊版本 · ICML 2026 regular（据 openreview）
+     开源候选（GitHub 名称检索·仅名称匹配，未核验）: https://github.com/360CVGroup/RevealLayer
+     开源候选（HF models 名称检索·仅名称匹配，未核验）: https://huggingface.co/qihoo360/RevealLayer
+     开源候选（HF datasets 名称检索·仅名称匹配，未核验）: https://huggingface.co/datasets/qihoo360/RevealLayer-100K
+```
+
+**验收点 B：检索到用户提的两篇论文。** 真实运行命中：查询 `layer decomposition` → 第 42 条
+`Stable-Layers: Fine-Tuning Image Layer Decomposition Models with VLM-Scored Reinforcement Learning`；
+查询 `layer-native design` → 第 9 条 `UniWorld-Design: From Pixel Generation to Layer-Native Design`
+（`per-source hits: openalex=25, arxiv=25, openreview=10, crossref=25 · 75 unique`）。
+**两篇需要不同的查询词** —— 关键词检索不会用一句话同时命中两篇，这也印证了"多个短查询优于一个长句"。
+
+**同一轮修掉的一个过度声明**：`--find-artifacts 0`（检索被关闭）时，输出曾打印"检索…也无结果"，
+把"没查"说成了"查了没有"。现在三种情况严格分开：**找到候选** / **搜了确实没有** /
+**检索未完成**（瞬时 SSL 失败会明确写成未完成，并说明"这不代表没有开源"，每个接口重试一次）。
+新增 4 项单测覆盖：项目名提取（句子式标题必须拒绝）、候选排序与置信标记、
+失败必须报成未完成且**不得**出现"也无结果"、以及关闭检索时不得报成"无结果"。
+
+**未实测**：`--find-artifacts` 在 10 篇满额时对 GitHub 搜索限流（10 次/分钟）的实际影响；
+`描述与论文标题相符` 这个标记的误判率没有统计（只用样例验证过正向命中）。
+
 
 
 

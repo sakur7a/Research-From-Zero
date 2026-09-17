@@ -103,6 +103,25 @@ written to the result file, the cache, or any log. When a source fails, the fail
 variable that would fix it if that variable is unset — a 429 from Semantic Scholar is usually a
 missing key rather than a broken service.
 
+### Setting `GITHUB_TOKEN`
+
+It is a plain environment variable — never a literal in code and never a committed file:
+
+| Context | How it is supplied |
+|---|---|
+| One shell session | `export GITHUB_TOKEN=ghp_…` (bash) or `$env:GITHUB_TOKEN="ghp_…"` (PowerShell) |
+| Persisted for this skill | put `GITHUB_TOKEN=ghp_…` in the file `RE0_ENV_FILE` points at. The loader fills it like any other variable, never prints a value, and a real environment variable always wins |
+| Online deployment | it must be a **server-side environment variable**. There is no secret store yet, so it must not be committed, exported in a task record, or baked into an image |
+
+Create one at GitHub → *Settings → Developer settings → Personal access tokens*. A **classic token
+with no scopes** is enough: the repositories are public and Re0 sends this token only to
+`api.github.com`. Keep it in a `.gitignore`d file (`.env` already is).
+
+| Endpoint | Anonymous | With a token |
+|---|---|---|
+| search (`--find-artifacts`) | **10 requests/minute** — measured from the response header | 30/minute (documented, not measured here) |
+| core (`--verify`) | 60/hour (documented) | 5000/hour (documented) |
+
 OpenReview is queried publicly and needs no account. Credentialed access uses a bearer
 token rather than the username/password pair in some existing setups: posting a password
 from inside a retrieval path would add a credential-handling surface for no gain while
@@ -204,17 +223,28 @@ supplied it directly. A source page is never the primary link when a better one 
 
 Two layers, and you decide how far to go.
 
-**Layer 1 — always on.** Prints the links above, plus code/data URLs **the authors themselves
-put in the abstract**, marked `artifact candidate (from the abstract, unverified)`.
+**Layer 1a — always on.** Code/data URLs **the authors themselves put in the abstract**, marked
+as author-declared. Most abstracts do not contain one, so on its own this is usually empty.
 
-Extraction reads **the abstract**, and most abstracts do not contain a code or dataset link — so
-empty is the common case rather than a failure. The line prints even when empty
-(`开源线索: 摘要中未提及 code/dataset 链接`), so an absence reads as a finding instead of an
-omission. A link usually lives in the paper body, a README or a badge, none of which a
-bibliographic record carries.
+**Layer 1b — `--find-artifacts N`, on by default for the first 5 papers.** A paper frequently
+carries no link in any metadata field yet does have released code, weights or data, so the skill
+searches **GitHub and the Hugging Face Hub for the paper's project name** — the part of the title
+before a colon, which is also how these projects name their repositories. `RevealLayer:
+Disentangling Hidden and Visible Layers…` carries no link in its abstract or body, and this finds
+`github.com/360CVGroup/RevealLayer`, `huggingface.co/qihoo360/RevealLayer` and the
+`RevealLayer-100K` dataset.
 
-**Layer 2 — opt-in, `--verify N`.** Runs Re0's bounded resource check on the first N candidate
-links (0–8, default 0) and prints the outcome under that paper:
+Every hit is a **name match, not proof of authorship**, and is labelled as such. Two markers help
+triage: `描述与论文标题相符` means the repository description repeats the paper title (much
+stronger), `仅名称匹配` means only the name is shared. Confirming ownership stays your call —
+`--verify` answers a different question, whether a candidate resolves and is not empty.
+
+The line prints even when nothing is found, and keeps **three** outcomes apart: found candidates,
+searched and genuinely found nothing, and the search **did not complete** (each endpoint gets one
+retry, because a transient network failure must never be reported as "there is no repository").
+
+**Layer 2 — opt-in, `--verify N`.** Runs Re0's bounded resource check on the first N candidates
+of the whole run (0–8, default 0) — both layers' candidates — and prints the outcome there:
 
 ```
      → https://github.com/microsoft/LoRA

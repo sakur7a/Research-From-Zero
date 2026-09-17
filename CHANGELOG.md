@@ -33,7 +33,20 @@
   count the candidates left unchecked: an absent module should read as a finding, not an omission.
 - Print the credential that would fix a failing source when it is unset, so a 429 from Semantic
   Scholar is not mistaken for a broken service.
-- Tests: 40 Python cases added.
+- Search GitHub and the Hugging Face Hub by each paper's project name (`--find-artifacts N`,
+  default 5, 0 disables). Most papers carry no link in any metadata field yet do have released code
+  or data, so an empty artifact line was a failure rather than a finding: `RevealLayer: Disentangling
+  Hidden and Visible Layers…` carries no link in its abstract or body, and this surfaces its
+  repository, its model and its 100K dataset. Every hit is a name match, not proof of authorship,
+  and carries a marker — `描述与论文标题相符` when the repository description repeats the paper
+  title, `仅名称匹配` otherwise. Three outcomes stay apart: found, searched and empty, and
+  **search incomplete** (one retry per endpoint), because a transient network failure must never
+  read as "there is no repository".
+- Correct the documented GitHub limits. The **search** endpoint allows 10 requests/minute anonymously
+  (read off the response header) while 60/hour is the **core** endpoint; `GITHUB_TOKEN` raises both,
+  and the skill now says where that variable goes for one shell session, for `RE0_ENV_FILE`, and for
+  an online deployment, and that it must never be committed.
+- Tests: 45 Python cases added.
 
 ### Multi-source literature search, and a skill for it
 

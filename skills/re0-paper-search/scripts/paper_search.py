@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -128,6 +129,76 @@ def links_for(paper: dict) -> list:
     return links
 
 
+PROJECT_NAME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:[-_.][A-Za-z0-9]+)*")
+
+
+def short_name(title: str) -> str:
+    """The project name a paper titles itself with: the part before a colon or dash.
+
+    "RevealLayer: Disentangling Hidden and Visible Layers…" -> "RevealLayer", which is also the
+    repository name. A sentence-like head is rejected rather than searched, because searching a
+    sentence returns noise.
+    """
+    head = re.split(r"[:\u2014\u2013]|\s-\s", title, maxsplit=1)[0].strip().strip('"\'\u201c\u201d')
+    if PROJECT_NAME_PATTERN.fullmatch(head) and 3 <= len(head) <= 40:
+        return head
+    return ""
+
+
+def _normalise(value: str) -> str:
+    return re.sub(r"[-_.]", "", (value or "").lower())
+
+
+def candidate_origin(label: str, content: str, title: str, name: str) -> tuple:
+    """Rank a name match by how much evidence it carries, because a fuzzy search returns noise.
+
+    A description that repeats the paper title is the strongest cheap signal of ownership, an
+    identifier whose last segment equals the project name comes next, and a shared word alone is
+    the weakest — `Stability-AI/Stable-Layers` and `nathannlu/aperture` can both come back from
+    one query, and the reader needs to see which is which. None of it proves authorship.
+    """
+    body = content or ""
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        payload = {}
+    head = " ".join(title.split()[:4]).lower()
+    if head and head in body.lower():
+        return label + "·描述与论文标题相符", 3
+    identifier = str(payload.get("full_name") or payload.get("id") or "")
+    if _normalise(identifier.split("/")[-1]) == _normalise(name):
+        return label + "·标识名与项目名一致", 2
+    return label + "·仅名称匹配", 1
+
+
+def artifact_candidates(tools, name: str, title: str, per_kind: int, failures: list) -> list:
+    """Search GitHub and the Hugging Face Hub by the paper's project name.
+
+    Name matching never establishes authorship, which is why everything here is reported as
+    unverified. But a paper whose metadata carries no link very often does have a released
+    artifact, and searching is the only way to surface it: the alternative is reporting nothing.
+    """
+    found = []
+    for tool, extra, label in (("search_repositories", {}, "GitHub 名称检索"),
+                               ("search_hub", {"kind": "models"}, "HF models 名称检索"),
+                               ("search_hub", {"kind": "datasets"}, "HF datasets 名称检索")):
+        result, last = None, None
+        for attempt in range(2):
+            try:
+                result = tools.execute(tool, {"query": name, "limit": per_kind, **extra})
+                break
+            except (ProviderError, ValueError) as exc:
+                last = exc
+        if result is None:
+            failures.append(f"{label}: {last}")
+            continue
+        for document in result.get("documents", []):
+            origin, rank = candidate_origin(label, document.get("content", ""), title, name)
+            found.append({"url": document["source_url"], "origin": origin, "rank": rank})
+    # Strongest evidence first, so a fuzzy hit cannot sit above the likely official repository.
+    return sorted(found, key=lambda entry: -entry["rank"])
+
+
 def verify_candidate(url: str) -> None:
     """Run Re0's bounded resource check on one candidate link.
 
@@ -196,8 +267,15 @@ def failure_hint(source: str) -> str:
     return f"  ← 未配置 {' 或 '.join(names)}：{reason}"
 
 
-def print_document(index: int, document: dict, raw: bool, verify_budget: int) -> int:
-    """Print one result. Returns how many artifact candidates were actually verified."""
+def print_document(index: int, document: dict, raw: bool, verify_budget: int,
+                   tools=None, find_budget: int = 0) -> tuple:
+    """Print one result. Returns `(verified, searched)` for the two budgets.
+
+    Candidates come from two places and are verified from one budget: links the authors put in
+    the abstract, which are declarations, and links found by searching GitHub and the Hugging Face
+    Hub for the paper's project name, which are name matches. The first are listed first because
+    they are the stronger claim, but neither is a verification.
+    """
     paper = document["paper"]
     tag = "[survey] " if is_survey(paper["title"]) else ""
     print(f"\n{index:>3}. {tag}{paper['title']}")
@@ -208,26 +286,45 @@ def print_document(index: int, document: dict, raw: bool, verify_budget: int) ->
     for label, url in links_for(paper):
         print(f"     {label}: {url}")
     print(f"     来源: {document['locator']}")
-    candidates = artifact_urls(paper.get("abstract", ""))
+
+    candidates = [(url, "摘要中自述") for url in artifact_urls(paper.get("abstract", ""))]
+    name = short_name(paper["title"])
+    searched = 0
+    failures: list = []
+    if tools is not None and find_budget > 0 and name:
+        searched = 1
+        candidates += [(c["url"], c["origin"])
+                       for c in artifact_candidates(tools, name, paper["title"], 3, failures)]
     used = 0
-    for url in candidates:
+    for url, origin in candidates:
         if used >= verify_budget:
             # Still shown, just not fetched: an unverified link is not a failed one.
-            print(f"     开源线索（摘要中自述，未核验）: {url}")
+            print(f"     开源候选（{origin}，未核验）: {url}")
             continue
         used += 1
         verify_candidate(url)
+    for failure in failures:
+        print(f"     名称检索未完成: {failure}")
     if not candidates:
-        # Shown even when empty, so its absence reads as a finding rather than an omission.
-        print("     开源线索: 摘要中未提及 code/dataset 链接（摘要通常不含代码链接，见 SKILL.md）")
+        # Printed even when empty, so its absence reads as a finding rather than an omission.
+        if not name:
+            print("     开源线索: 摘要中未提及链接，标题里也没有可检索的项目名（形如「Name: ...」）")
+        elif failures:
+            print(f"     开源线索: 摘要中未提及链接；按项目名 '{name}' 的检索未完成（原因见下），"
+                  "这不代表没有开源，重跑一次通常即可")
+        elif searched:
+            print(f"     开源线索: 摘要与元数据均无链接，按项目名 '{name}' 检索 GitHub/HF 也无结果")
+        else:
+            print(f"     开源线索: 摘要中未提及链接；按项目名 '{name}' 的 GitHub/HF 检索未开启"
+                  "（用 --find-artifacts N，默认开 5 篇）")
     elif used < len(candidates):
-        print(f"     ↑ 另有 {len(candidates) - used} 条未核验；--verify {len(candidates)} 可核验")
+        print(f"     ↑ 另有 {len(candidates) - used} 条未核验；提高 --verify 可继续核验")
     if raw:
         print(document["content"])
     elif paper.get("abstract"):
         print("     abstract: " + paper["abstract"][:EXCERPT_CHARS]
               + ("…" if len(paper["abstract"]) > EXCERPT_CHARS else ""))
-    return used
+    return used, searched
 
 
 def main(argv=None) -> int:
@@ -250,14 +347,23 @@ def main(argv=None) -> int:
     parser.add_argument("--json", dest="json_path", default=None,
                         help="write the complete result set here; stdout stays readable")
     parser.add_argument("--raw", action="store_true", help="print every field instead of a table")
+    parser.add_argument("--find-artifacts", type=int, default=5, metavar="N",
+                        help="search GitHub and the Hugging Face Hub by each paper's project name for "
+                             "the first N papers (default 5, max 10, 0 disables). Most papers carry no "
+                             "link in any metadata field yet do have a released repository, so this is "
+                             "the only way to surface those. Every hit is a NAME MATCH, not proof of "
+                             "authorship, and is labelled as such.")
     parser.add_argument("--verify", type=int, default=0, metavar="N",
-                        help="run Re0's bounded resource check on the first N artifact candidates "
-                             "(0 = none, max 8). Off by default because one check costs about four "
-                             "GitHub requests against an anonymous limit of roughly 60 per hour; "
-                             "set GITHUB_TOKEN to raise that. Unchecked candidates are still listed.")
+                        help="run Re0's bounded resource check on the first N candidates per run "
+                             "(0 = none, default 0, max 8). Off by default because one check costs "
+                             "about four GitHub CORE requests, whose anonymous limit is 60/hour; the "
+                             "search endpoint used by --find-artifacts is limited to 10/minute. Set "
+                             "GITHUB_TOKEN to raise both. Unchecked candidates are still listed.")
     args = parser.parse_args(argv)
     if not 0 <= args.verify <= 8:
         parser.error("--verify takes 0-8; each check costs several requests against a shared rate limit")
+    if not 0 <= args.find_artifacts <= 10:
+        parser.error("--find-artifacts takes 0-10; the GitHub search endpoint allows 10 requests a minute")
 
     print(f"credentials: {load_credentials()}")
     query = effective_query(args.query, args.venue)
@@ -271,8 +377,9 @@ def main(argv=None) -> int:
             parser.error("--sources takes 'all' or exactly one source name; "
                          "run once per source for a longer list")
         source = chosen[0]
+    tools = ResearchTools(None)
     try:
-        result = ResearchTools(None).execute("search_papers", {
+        result = tools.execute("search_papers", {
             "query": query, "limit": min(25, max(1, args.max_papers)),
             "source": source, "start_year": args.start_year, "end_year": args.end_year})
     except ProviderError as exc:
@@ -296,9 +403,13 @@ def main(argv=None) -> int:
               "widen the query, change the year window, or recheck a source named above.")
         return 0
 
-    budget = args.verify
+    verify_left, find_left = args.verify, args.find_artifacts
     for index, document in enumerate(documents, start=1):
-        budget -= print_document(index, document, args.raw, budget)
+        used_verify, searched = print_document(index, document, args.raw, verify_left, tools, find_left)
+        verify_left -= used_verify
+        find_left -= searched
+    if args.find_artifacts and len(documents) > args.find_artifacts:
+        print(f"\n名称检索只覆盖了前 {args.find_artifacts} 篇（--find-artifacts 可调大，GitHub 搜索限 10 次/分钟）。")
     if any((document.get("publication") or {}).get("state") == "preprint" for document in documents):
         print("\n关于发表状态：" + PUBLICATION_CAVEAT)
     print("\nThese are bibliographic records, not full text. Confirm anything load-bearing "

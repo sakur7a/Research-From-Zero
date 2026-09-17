@@ -96,6 +96,7 @@ Base URL 通常包含 `/v1`，不要填写 `/chat/completions`；本地服务示
 | `RE0_LLM_TOKEN_PARAMETER` | `max_tokens` 或 `max_completion_tokens`，默认前者 |
 | `RE0_LLM_ALLOWED_HOSTS` | 额外允许的远程模型域名，逗号分隔；不得交由模型修改 |
 | `TAVILY_API_KEY` | 可选全网搜索摘要服务，与模型 Key 不同 |
+| `GITHUB_TOKEN` | 可选：提高 GitHub 限额（**search 匿名 10 次/分钟**，实测自响应头；core 匿名 60 次/小时）。**是普通环境变量，不是配置文件里的字面量**：可以 `export GITHUB_TOKEN=...`，也可以写进 `RE0_ENV_FILE` 指向的文件（同样只填未设置的变量、从不打印值）。**不要提交进仓库**；`.env` 已被 `.gitignore` 覆盖。无 scope 的 classic token 就够 |
 | `RE0_ENV_FILE` | 可选：**显式指定**一个 dotenv 文件，启动时载入其中尚未设置的变量。不设置就不读任何文件；已在环境中存在的变量优先。只打印变量名与个数，**不打印值** |
 | `OPENALEX_API_KEY` / `OPENALEX_MAILTO` | 可选：OpenAlex 检索（`mailto` 用于礼貌池） |
 | `SEMANTIC_SCHOLAR_API_KEY`（别名 `SEMANTICSCHOLAR_API_KEY`） | 可选但**强烈建议**：Semantic Scholar 匿名调用会被硬限流 |
@@ -136,7 +137,13 @@ python skills/re0-paper-search/scripts/paper_search.py \
 
 **开源情况（code／weights／dataset）分两层，由你决定走多远。**
 
-**先说清能查到什么**：抽取只读**摘要**，而摘要通常不含代码链接 —— 所以这一行为空是常态而非故障。该行**总会打印**，没有时就写「摘要中未提及 code/dataset 链接」，让缺失成为**结论**而不是看起来像遗漏。链接一般藏在正文、README 或徽章里，这些都不在书目记录里。
+**先说清能查到什么**：第一层只读**摘要**，而摘要通常不含代码链接 —— 所以单靠它常常为空。
+
+**所以默认还有第二层：按论文项目名去 GitHub 与 Hugging Face Hub 搜**（`--find-artifacts N`，默认对前 5 篇生效）。很多论文在任何元数据字段里都没有链接，但确实发布了开源；项目名就是标题冒号前那段，也正是这些项目给仓库起名的习惯。实测 `RevealLayer: Disentangling Hidden and Visible Layers…` 的摘要与正文都没有链接，而这一层找到了 `github.com/360CVGroup/RevealLayer`、`huggingface.co/qihoo360/RevealLayer` 与 `RevealLayer-100K` 数据集。
+
+**每个结果都是「名称匹配」，不是作者身份证明**，并且会标注：`描述与论文标题相符`（仓库描述复述了论文标题，强得多）或 `仅名称匹配`。归属仍需你确认 —— `--verify` 回答的是另一个问题：这个候选能不能打开、是不是空的。
+
+该行**总会打印**，并把三种情况分开：**找到候选** / **搜了但确实没有** / **检索未完成**（每个接口重试一次；瞬时网络故障绝不能被说成「没有仓库」）。
 
 第一层永远生效：给出上面的链接，并把**作者自己在摘要里写的** code／data 链接抽出来，标为「开源线索（摘要中自述，未核验）」。
 

@@ -368,15 +368,16 @@ def test_the_verification_budget_is_global_and_unchecked_links_are_still_listed(
     monkeypatch.setattr(module, "check_resource", lambda url: checked.append(url) or observation())
     documents = [skill_document("First", "Code at https://github.com/a/b"),
                  skill_document("Second", "Code at https://github.com/c/d")]
-    budget = 1
+    verify_left = 1
     for index, document in enumerate(documents, start=1):
-        budget -= module.print_document(index, document, False, budget)
+        used, _ = module.print_document(index, document, False, verify_left, None, 0)
+        verify_left -= used
     # The cap is global, not per paper: one check across two papers, never two.
     assert checked == ["https://github.com/a/b"]
     printed = capsys.readouterr().out
     assert "status metadata_accessible" in printed and "candidate files: training=1" in printed
     # A link left unchecked is reported as a candidate, never as a failure.
-    assert "开源线索（摘要中自述，未核验）: https://github.com/c/d" in printed
+    assert "开源候选（摘要中自述，未核验）: https://github.com/c/d" in printed
 
 
 def test_a_check_that_raises_is_reported_as_unverified_not_as_absent(monkeypatch, capsys):
@@ -450,6 +451,108 @@ def test_a_failing_source_reports_the_credential_that_would_fix_it(monkeypatch):
     monkeypatch.setenv("SEMANTICSCHOLAR_API_KEY", "configured")
     assert module.failure_hint("semanticscholar") == ""   # the alias counts as configured
     assert module.failure_hint("crossref") == ""          # no credential exists for it
+
+
+class StubTools:
+    """Stands in for ResearchTools so the name search can be tested without any network."""
+
+    def __init__(self, results):
+        self.results, self.calls = results, []
+
+    def execute(self, name, args):
+        self.calls.append((name, args.get("kind")))
+        outcome = self.results.get((name, args.get("kind")))
+        if isinstance(outcome, Exception):
+            raise outcome
+        return {"documents": outcome or []}
+
+
+REVEAL_LAYER = ("RevealLayer: Disentangling Hidden and Visible Layers via "
+                "Occlusion-Aware Image Decomposition")
+
+
+def test_short_name_reads_the_project_name_a_paper_titles_itself_with():
+    module = load_skill_module()
+    assert module.short_name(REVEAL_LAYER) == "RevealLayer"
+    assert module.short_name("Stable-Layers: Fine-Tuning Image Layer Decomposition Models") == "Stable-Layers"
+    assert module.short_name("UniWorld-Design: From Pixel Generation to Layer-Native Design") == "UniWorld-Design"
+    # A sentence-like head is refused: searching a sentence only returns noise.
+    assert module.short_name("Referring Layer Decomposition") == ""
+
+
+def test_a_name_search_returns_candidates_with_a_confidence_marker():
+    module = load_skill_module()
+    tools = StubTools({
+        ("search_repositories", None): [{
+            "source_url": "https://github.com/360CVGroup/RevealLayer",
+            "content": '{"description": "RevealLayer: Disentangling Hidden and Visible Layers"}'}],
+        ("search_hub", "models"): [{
+            "source_url": "https://huggingface.co/qihoo360/RevealLayer",
+            "content": '{"id": "qihoo360/RevealLayer"}'}],
+        ("search_hub", "datasets"): [],
+    })
+    failures = []
+    found = module.artifact_candidates(tools, "RevealLayer", REVEAL_LAYER, 3, failures)
+    assert [candidate["url"] for candidate in found] == [
+        "https://github.com/360CVGroup/RevealLayer", "https://huggingface.co/qihoo360/RevealLayer"]
+    # A description that repeats the paper title is the strongest cheap signal; an identifier
+    # ending in the project name is next. Neither proves authorship.
+    assert "描述与论文标题相符" in found[0]["origin"]
+    assert "标识名与项目名一致" in found[1]["origin"]
+    assert failures == []
+
+
+def test_a_fuzzy_name_match_is_marked_weak_and_sorted_last():
+    module = load_skill_module()
+    # One query for "Stable-Layers" really does return these two, and the reader has to be able
+    # to tell them apart from the official repository in the same list.
+    tools = StubTools({
+        ("search_repositories", None): [
+            {"source_url": "https://github.com/snap-research/stable-flow",
+             "content": '{"full_name": "snap-research/stable-flow", "description": null}'},
+            {"source_url": "https://github.com/Stability-AI/Stable-Layers",
+             "content": '{"full_name": "Stability-AI/Stable-Layers", "description": null}'},
+            {"source_url": "https://github.com/nathannlu/aperture",
+             "content": '{"full_name": "nathannlu/aperture", "description": null}'},
+        ],
+        ("search_hub", "models"): [],
+        ("search_hub", "datasets"): [],
+    })
+    found = module.artifact_candidates(
+        tools, "Stable-Layers", "Stable-Layers: Fine-Tuning Image Layer Decomposition Models", 3, [])
+    # The likely official repository is first even though the search returned it second.
+    assert found[0]["url"] == "https://github.com/Stability-AI/Stable-Layers"
+    assert "标识名与项目名一致" in found[0]["origin"]
+    assert all("仅名称匹配" in candidate["origin"] for candidate in found[1:])
+
+
+def test_a_failed_name_search_is_retried_and_never_reported_as_no_result(capsys):
+    module = load_skill_module()
+    calls = []
+
+    class Flaky:
+        def execute(self, name, args):
+            calls.append(name)
+            raise ProviderError("网络连接或读取失败，本次未完成验证")
+
+    document = skill_document("RevealLayer: Disentangling Hidden and Visible Layers",
+                              "an abstract that carries no link at all")
+    module.print_document(1, document, False, 0, Flaky(), 1)
+    printed = capsys.readouterr().out
+    # A failure must not be reported as "found nothing": those are different claims.
+    assert "检索未完成" in printed and "这不代表没有开源" in printed
+    assert "也无结果" not in printed
+    # Two attempts per endpoint, three endpoints.
+    assert len(calls) == 6
+
+
+def test_a_disabled_name_search_is_not_reported_as_one_that_found_nothing(capsys):
+    module = load_skill_module()
+    document = skill_document(REVEAL_LAYER, "an abstract that carries no link at all")
+    module.print_document(1, document, False, 0, StubTools({}), 0)
+    printed = capsys.readouterr().out
+    assert "检索未开启" in printed
+    assert "也无结果" not in printed
 
 
 def test_the_artifact_line_prints_even_when_the_abstract_has_no_link(capsys):
