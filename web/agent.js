@@ -1,6 +1,6 @@
 import {e, link, timeLabel} from './core.js';
 import {initTheme} from './theme.js';
-import {RUN_LABELS, TOOL_LABELS, SHIPPED_DEFAULTS, activeRun, budgetSummary, canResume, consentText, eventText, modelOptionIds, normalizeDefaults} from './agent-core.js';
+import {RUN_LABELS, TOOL_LABELS, SHIPPED_DEFAULTS, activeRun, budgetSummary, canResume, consentText, eventText, modelOptionIds, normalizeDefaults, paperCard, shortUrl} from './agent-core.js';
 
 initTheme();
 const workspace = document.querySelector('#workspace');
@@ -66,6 +66,43 @@ function runView() {
   panel(); sidebar();
   for(const id of opened){const details=document.getElementById(id)?.querySelector('details');if(details)details.open=true;}
 }
+function plainCardHtml(ev) {
+  return `<article class="evidence-card" id="${e(ev.id)}"><div class="evidence-meta"><code>${e(ev.id)}</code><span>${e(ev.kind)}</span></div><h3>${e(ev.paper?.title || TOOL_LABELS[ev.tool] || '来源材料')}</h3><p class="locator">${e(ev.locator)} · ${e(timeLabel(ev.retrieved_at))}</p><details><summary>查看来源摘录</summary><pre>${e(ev.content)}</pre></details><footer><a href="${link(ev.source_url)}" target="_blank" rel="noopener noreferrer">打开来源 ↗</a>${ev.kind==='paper' && ev.paper ? `<button class="button" data-import="${e(ev.id)}">确认加入文献库</button>` : ''}</footer></article>`;
+}
+
+// A paper card: bibliographic text on the left, source and open-source findings on the right.
+// There is no thumbnail: Re0 holds no page image and has no PDF pipeline, and inventing one
+// would misrepresent what was actually retrieved.
+function paperCardHtml(ev) {
+  const c = paperCard(ev);
+  return `<article class="evidence-card paper-card" id="${e(c.id)}">
+    <div class="paper-body">
+      <h3 class="paper-title">${e(c.title)}</h3>
+      ${c.authors.length ? `<p class="paper-authors">${c.authors.map(a=>`<span class="author-chip">${e(a)}</span>`).join('')}${c.moreAuthors?`<span class="author-more">等 ${c.moreAuthors} 位</span>`:''}</p>` : ''}
+      ${c.abstract ? `<p class="paper-abstract">${e(c.abstract)}${c.abstractTruncated?'…':''}</p>` : '<p class="paper-abstract quiet">该来源没有提供摘要。</p>'}
+      <div class="paper-chips">
+        <span class="paper-state" data-state="${e(c.state)}">${e(c.stateLabel)}</span>
+        ${c.publicationVenue?`<span class="paper-chip">${e(c.publicationVenue)}</span>`:''}
+        ${c.alsoPreprint?'<span class="paper-chip quiet">另有预印本版本</span>':''}
+        ${c.year?`<span class="paper-chip quiet">${e(c.year)}</span>`:''}
+        ${c.publicationSource?`<span class="paper-chip quiet">据 ${e(c.publicationSource)}</span>`:''}
+      </div>
+      ${c.institutions.length?`<p class="paper-institutions">机构：${c.institutions.map(e).join(' · ')}${c.moreInstitutions?` 等 ${c.moreInstitutions} 个`:''}</p>`:''}
+      <details><summary>查看来源摘录</summary><pre>${e(ev.content)}</pre></details>
+      <footer class="paper-footer"><span class="locator">${e(c.id)} · ${e(c.toolLabel)} · ${e(c.locator)} · ${e(timeLabel(ev.retrieved_at))}</span><button class="button" data-import="${e(c.id)}">确认加入文献库</button></footer>
+    </div>
+    <aside class="paper-aside">
+      <div class="section-label">来源</div>
+      <div class="paper-links">${c.links.length?c.links.map(l=>`<a href="${link(l.href)}" target="_blank" rel="noopener noreferrer">${e(l.label)} ↗</a>`).join(''):'<span class="quiet">没有可打开的书目链接</span>'}</div>
+      <div class="section-label">开源</div>
+      ${c.artifacts.length?`<ul class="artifact-list">${c.artifacts.map(a=>`<li><a href="${link(a.url)}" target="_blank" rel="noopener noreferrer">${e(shortUrl(a.url))}</a><small>${e(a.origin)}</small></li>`).join('')}</ul>`:'<p class="quiet">没有找到开源候选。</p>'}
+      ${c.artifactCoverage?`<p class="quiet">${e(c.artifactCoverage)}</p>`:''}
+      <p class="quiet">名称匹配不等于官方实现，打开后可继续核对。</p>
+    </aside></article>`;
+}
+
+function evidenceCard(ev) { return ev.kind === 'paper' && ev.paper ? paperCardHtml(ev) : plainCardHtml(ev); }
+
 function panel() {
   const node = document.querySelector('#result-panel');
   if (!node || !current) return;
@@ -75,7 +112,7 @@ function panel() {
     const r=current.report;
     node.innerHTML = r ? `<article class="report"><div class="eyebrow">${r.outcome==='insufficient_evidence'?'EVIDENCE IS INCOMPLETE':'RESEARCH FINDINGS'} · 模型生成，待复核</div><h2>${e(r.title)}</h2><p class="report-summary">${e(r.summary)}</p><h3>发现与依据</h3>${r.findings.map((f,i)=>`<section class="finding"><small>${i+1} / ${{observed:'观察',inference:'推断',uncertain:'不确定'}[f.assessment]}</small><p>${e(f.claim)}</p><div class="citations">${f.evidence_ids.map(id=>`<button data-evidence="${e(id)}">${e(id)}</button>`).join('')}</div></section>`).join('') || '<p class="subtle">没有形成有充分依据的发现。</p>'}<h3>检查范围与剩余缺口</h3><ul>${r.limitations.map(x=>`<li>${e(x)}</li>`).join('')}</ul><div class="usage">提供商报告的 Token：${e(current.usage?.total_tokens || 0)}${current.usage?.unreported_calls ? `；${e(current.usage.unreported_calls)} 次调用未报告用量` : ''}</div></article>` : '<div class="empty-result"><h2>报告还未生成</h2><p>报告只有在 agent 提交结构化结果后出现。任务失败或达到预算，不会自动填充虚构结论。</p><button class="button" data-tab="evidence">查看已收集的证据</button></div>';
   } else {
-    node.innerHTML = `<div class="evidence-list">${current.evidence.length ? current.evidence.map(ev=>`<article class="evidence-card" id="${e(ev.id)}"><div class="evidence-meta"><code>${e(ev.id)}</code><span>${e(ev.kind)}</span></div><h3>${e(ev.paper?.title || TOOL_LABELS[ev.tool] || '来源材料')}</h3><p class="locator">${e(ev.locator)} · ${e(timeLabel(ev.retrieved_at))}</p><details><summary>查看来源摘录</summary><pre>${e(ev.content)}</pre></details><footer><a href="${link(ev.source_url)}" target="_blank" rel="noopener noreferrer">打开来源 ↗</a>${ev.kind==='paper' && ev.paper ? `<button class="button" data-import="${e(ev.id)}">确认加入文献库</button>` : ''}</footer></article>`).join('') : '<div class="empty-result"><h2>尚无来源证据</h2><p>只有工具实际取得的材料才会出现在这里。</p></div>'}</div>`;
+    node.innerHTML = `<div class="evidence-list">${current.evidence.length ? current.evidence.map(evidenceCard).join('') : '<div class="empty-result"><h2>尚无来源证据</h2><p>只有工具实际取得的材料才会出现在这里。</p></div>'}</div>`;
   }
 }
 async function refreshHistory() {

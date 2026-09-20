@@ -499,6 +499,17 @@ def test_env_file_never_shadows_a_real_variable(tmp_path, monkeypatch):
     assert os.environ["RE0_TEST_KEY"] == "from-file"
 
 
+def test_the_document_carries_the_publication_label_the_ui_renders():
+    """The card shows this label, so it is produced once on the server rather than copied into
+    the frontend, where it would drift from the state vocabulary it describes."""
+    result = run(router)
+    published = next(item for item in result["documents"] if item["paper"]["title"] == "Fixture Layout Study")
+    assert published["publication"]["state"] == "venue"
+    assert published["publication"]["label"] == "有会议或期刊版本"
+    # The raw venue stays alongside it, so a wrong classification is still checkable.
+    assert published["publication"]["venue"] == "Neural Information Processing Systems"
+
+
 def test_the_search_limit_can_be_raised_beyond_the_old_eight():
     # Recall is bounded by this cap, not by how many queries run. Eight made any survey a
     # matter of luck; conversation cost is bounded separately by the excerpt budget, so a

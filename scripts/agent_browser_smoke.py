@@ -121,6 +121,18 @@ def run(output):
         page.locator('.evidence-card summary').click()
         assert 'TEST FIXTURE' in page.locator('.evidence-card pre').inner_text()
         checked.append('report_citations_open_real_task_evidence')
+        # A paper card is a two-column layout, so pin both columns and the honest statement
+        # when no open-source search ran. A missing right column would look like a design
+        # choice rather than a regression.
+        assert page.locator('.evidence-card.paper-card').count()==1
+        assert page.locator('.paper-card .paper-title').inner_text().strip()=='Fixture Layout Paper'
+        assert page.locator('.paper-card .paper-aside').is_visible()
+        assert page.locator('.paper-card .paper-links a').count()>=1
+        aside=page.locator('.paper-card .paper-aside').inner_text()
+        assert '未做开源检索' in aside and '没有找到开源候选' in aside, aside
+        assert page.locator('.paper-state').inner_text().strip()!='', 'a state chip must name the state'
+        page.screenshot(path=str(output/'agent-evidence-paper-card.png'),full_page=True)
+        checked.append('paper_evidence_renders_as_a_two_column_card')
         page.locator('[data-import]').click()
         page.wait_for_function("document.querySelector('#notice').textContent.includes('已加入文献库')")
         assert len(client.get('/api/papers').json())==1

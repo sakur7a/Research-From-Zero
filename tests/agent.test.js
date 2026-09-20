@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {MODEL_OPTION_LIMIT,SHIPPED_DEFAULTS,activeRun,budgetSummary,canResume,consentText,eventText,modelOptionIds,normalizeDefaults} from '../web/agent-core.js';
+import {MODEL_OPTION_LIMIT,SHIPPED_DEFAULTS,activeRun,budgetSummary,canResume,consentText,eventText,modelOptionIds,normalizeDefaults,paperCard,shortUrl} from '../web/agent-core.js';
 import {e,link} from '../web/core.js';
 test('task lifecycle and resumability are explicit',()=>{
  assert(activeRun({status:'running'})); assert(!activeRun({status:'completed'}));
@@ -50,4 +50,50 @@ test('model candidates are trimmed and deduplicated before reaching the DOM',()=
 test('evidence read-back and context compaction are visible in the trace',()=>{
  assert.match(eventText({kind:'tool_started',data:{tool:'read_evidence'}}),/取回证据正文/);
  assert.match(eventText({kind:'context_compacted',data:{message:'已收起 3 条较早的工具摘录；证据保留'}}),/已收起 3 条较早的工具摘录/);
+});
+
+test('a paper card bounds authors, abstract, institutions and artifacts',()=>{
+ const card = paperCard({id:'ev_1',kind:'paper',tool:'search_papers',locator:'metadata from openalex',
+  content:'body',retrieved_at:'2026-09-17T00:00:00Z',
+  paper:{title:'RevealLayer: Disentangling',authors:Array.from({length:9},(_,i)=>`A${i}`),year:2026,
+   doi:'10.1/x',arxiv_id:'2605.11818',abstract:'a'.repeat(500),paper_url:'https://openalex.org/W1'},
+  publication:{state:'preprint',label:'仅见预印本版本',venue:'arXiv (Cornell University)',source:'openalex'},
+  preprint_also:true,institutions:['清华大学','某机构','另一个','第四个'],
+  artifact_candidates:[{url:'https://github.com/1/2',origin:'标识名与项目名一致'},
+   {url:'https://huggingface.co/a'},{url:'https://huggingface.co/b'},{url:'https://huggingface.co/c'},
+   {url:'https://huggingface.co/d'}],
+  artifact_search:'searched'});
+ assert.equal(card.authors.length,6); assert.equal(card.moreAuthors,3);
+ assert.equal(card.abstract.length,300); assert.equal(card.abstractTruncated,true);
+ assert.equal(card.institutions.length,3); assert.equal(card.moreInstitutions,1);
+ assert.equal(card.artifacts.length,4);
+ assert.deepEqual(card.links.map(l=>l.label),['arXiv','DOI','来源记录']);
+ assert.equal(card.stateLabel,'仅见预印本版本'); assert.equal(card.alsoPreprint,true);
+ assert.equal(card.artifactCoverage,'');
+});
+
+test('a card never invents an abstract, a link, a year or a coverage claim',()=>{
+ const bare = paperCard({id:'ev_2',kind:'paper',tool:'search_papers',paper:{title:'仅标题'},artifact_search:'not-run'});
+ assert.deepEqual(bare.authors,[]); assert.deepEqual(bare.links,[]); assert.deepEqual(bare.artifacts,[]);
+ assert.equal(bare.abstract,''); assert.equal(bare.year,null);
+ assert.equal(bare.stateLabel,'unknown');
+ assert.match(bare.artifactCoverage,/未做开源检索/);
+ assert.match(paperCard({artifact_search:'skipped',paper:{}}).artifactCoverage,/没有可检索的项目名/);
+ assert.equal(paperCard({}).title,'未命名论文');
+ assert.equal(paperCard(undefined).title,'未命名论文');
+});
+
+test('artifact links are shortened for display but still validated before rendering',()=>{
+ assert.equal(shortUrl('https://github.com/360CVGroup/RevealLayer'),'github.com/360CVGroup/RevealLayer');
+ assert.equal(shortUrl('https://huggingface.co/datasets/qihoo360/RevealLayer-100K/'),'huggingface.co/datasets/qihoo360/RevealLayer-100K');
+ assert.doesNotThrow(()=>shortUrl('javascript:alert(1)'));
+ assert.equal(shortUrl(undefined),'');
+ assert.equal(link('javascript:alert(1)'),'#');
+});
+
+test('the publication label comes from the server rather than a second copy here',()=>{
+ const fromServer = paperCard({paper:{},publication:{state:'venue',label:'有会议或期刊版本'}});
+ assert.equal(fromServer.stateLabel,'有会议或期刊版本');
+ // Older stored evidence has no label; showing the raw state is honest, inventing one is not.
+ assert.equal(paperCard({paper:{},publication:{state:'under_review'}}).stateLabel,'under_review');
 });

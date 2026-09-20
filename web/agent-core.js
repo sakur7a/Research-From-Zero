@@ -43,3 +43,66 @@ export function eventText(event) {
   if (event.kind === 'approved_import') return d.created ? '经你确认，论文已加入文献库' : '文献库已有该论文，未覆盖内容';
   return d.message || event.kind;
 }
+
+// A paper evidence card. The server caps nothing about how many authors, links or artifact
+// candidates arrive, so the bounds belong here, where a Node test can hold them.
+export const CARD_AUTHOR_LIMIT = 6;
+export const CARD_ABSTRACT_CHARS = 300;
+export const CARD_ARTIFACT_LIMIT = 4;
+export const CARD_INSTITUTION_LIMIT = 3;
+export const CARD_TITLE_FALLBACK = '未命名论文';
+const cardText = value => (typeof value === 'string' ? value.trim() : '');
+// A label short enough for a narrow column. Display only: the href still goes through link(),
+// which refuses anything that is not http(s) without credentials.
+export function shortUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const path = (parsed.host + parsed.pathname).replace(/\/$/, '');
+    return path || String(url).slice(0, 80);
+  } catch { return String(url ?? '').slice(0, 80); }
+}
+export function artifactCoverage(evidence) {
+  const search = evidence && evidence.artifact_search;
+  if (search === 'searched') return '';
+  return search === 'skipped'
+    ? '标题里没有可检索的项目名，本次未做开源检索'
+    : '本次未做开源检索，开源情况未查';
+}
+export function paperCard(evidence) {
+  const source = evidence && typeof evidence === 'object' ? evidence : {};
+  const paper = source.paper && typeof source.paper === 'object' ? source.paper : {};
+  const publication = source.publication && typeof source.publication === 'object' ? source.publication : {};
+  const authors = (Array.isArray(paper.authors) ? paper.authors : []).map(cardText).filter(Boolean);
+  const institutions = (Array.isArray(source.institutions) ? source.institutions : []).map(cardText).filter(Boolean);
+  const abstract = cardText(paper.abstract);
+  const links = [];
+  const arxiv = cardText(paper.arxiv_id);
+  if (arxiv) links.push({label:'arXiv', href:`https://arxiv.org/abs/${arxiv}`});
+  const doi = cardText(paper.doi);
+  if (doi) links.push({label:'DOI', href:`https://doi.org/${doi}`});
+  const record = cardText(paper.paper_url);
+  if (record && !links.some(entry => entry.href === record)) links.push({label:'来源记录', href:record});
+  const artifacts = (Array.isArray(source.artifact_candidates) ? source.artifact_candidates : [])
+    .filter(entry => entry && cardText(entry.url)).slice(0, CARD_ARTIFACT_LIMIT)
+    .map(entry => ({url:cardText(entry.url), origin:cardText(entry.origin)}));
+  return {
+    id: cardText(source.id),
+    title: cardText(paper.title) || CARD_TITLE_FALLBACK,
+    authors: authors.slice(0, CARD_AUTHOR_LIMIT),
+    moreAuthors: Math.max(0, authors.length - CARD_AUTHOR_LIMIT),
+    abstract: abstract.slice(0, CARD_ABSTRACT_CHARS),
+    abstractTruncated: abstract.length > CARD_ABSTRACT_CHARS,
+    year: Number.isInteger(paper.year) ? paper.year : null,
+    state: cardText(publication.state) || 'unknown',
+    stateLabel: cardText(publication.label) || cardText(publication.state) || 'unknown',
+    publicationVenue: cardText(publication.venue),
+    publicationSource: cardText(publication.source),
+    alsoPreprint: Boolean(source.preprint_also),
+    institutions: institutions.slice(0, CARD_INSTITUTION_LIMIT),
+    moreInstitutions: Math.max(0, institutions.length - CARD_INSTITUTION_LIMIT),
+    links, artifacts,
+    artifactCoverage: artifactCoverage(source),
+    locator: cardText(source.locator),
+    toolLabel: TOOL_LABELS[source.tool] || cardText(source.tool)
+  };
+}

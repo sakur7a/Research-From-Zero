@@ -64,8 +64,10 @@ def paper_document(record: dict) -> dict:
         if value not in (None, ""):
             lines.append(f"{label}: {value}")
     # The raw venue string is kept inside this line so a wrong classification stays checkable.
-    publication = record.get("publication") or {}
+    publication = dict(record.get("publication") or {})
     described = PUBLICATION_LABELS.get(publication.get("state", "unknown"), publication.get("state", ""))
+    # Sent to callers so the UI renders the state without keeping a second copy of these labels.
+    publication["label"] = described
     if publication.get("venue"):
         described += f" — {publication['venue']}"
     if publication.get("source"):
