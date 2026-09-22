@@ -102,6 +102,18 @@ def heading(result: dict, args) -> str:
             f"({result['duplicates_merged']} duplicates merged)")
     if result.get("dropped_out_of_range"):
         line += f" · {result['dropped_out_of_range']} outside the year window"
+    coverage = result.get("coverage") or {}
+    if coverage:
+        # The same coverage the JSON and MCP exits carry, so the CLI cannot describe one call
+        # differently: which attempts ran, and whether the run was complete, partial or a real
+        # zero-hit rather than a quiet failure.
+        line += (f" · coverage: state={coverage.get('state')} "
+                 f"attempts={len(coverage.get('attempts') or [])} "
+                 f"succeeded={len(coverage.get('succeeded') or [])} "
+                 f"failed={len(coverage.get('failed') or [])}")
+        queries = result.get("queries") or []
+        if len(queries) > 1:
+            line += f" · {len(queries)} queries merged, each record keeps the ones that found it"
     return line
 
 
@@ -324,13 +336,18 @@ def print_document(index: int, document: dict, raw: bool, verify_budget: int,
 def build_parser() -> argparse.ArgumentParser:
     """The parser is separate from `main()` so a test can hold the parameter contract."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--query", required=True,
+    parser.add_argument("--query", default=None,
                         help="a focused phrase. Several short queries recall more than one long "
                              "one: arXiv and Semantic Scholar treat space-separated terms "
                              "restrictively, so 'layer decomposition' beats 'layered representation "
-                             "decomposition single image into layers'. Run it once per phrase.")
+                             "decomposition single image into layers'.")
+    parser.add_argument("--queries", default=None, metavar="A|B|C",
+                        help="up to 5 short queries in one budgeted call, separated by '|'. One "
+                             "merged list comes back, each record keeps which queries found it, and "
+                             "the coverage block lists every (query, source) attempt. Use this "
+                             "rather than running the command repeatedly and merging by hand.")
     parser.add_argument("--venue", default=None, metavar="NAME",
-                        help="prepend a venue name (CVPR, NeurIPS, ACL…) to the query. A query hint, "
+                        help="prepend a venue name (CVPR, NeurIPS, ACL…) to each query. A query hint, "
                              "not an API-side venue filter — see effective_query() for why.")
     parser.add_argument("--start-year", type=int, default=None)
     parser.add_argument("--end-year", type=int, default=None)
@@ -338,9 +355,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="per source (default 20, tool maximum 25). This is the recall ceiling: "
                              "raise it before adding more queries.")
     parser.add_argument("--sources", default="all",
-                        help="'all', or exactly one of semanticscholar, openalex, arxiv, "
-                             "openreview, crossref. One source per call, so a recheck cannot "
-                             "silently widen the query.")
+                        help="'all', one source, or a comma-separated subset "
+                             "(e.g. openalex,arxiv) for rechecking a group together. The contract "
+                             "accepts up to 5.")
     parser.add_argument("--json", dest="json_path", default=None,
                         help="write the versioned result structure here (the same shape the MCP "
                              "surface returns, with schema_version); stdout stays readable")
@@ -369,22 +386,40 @@ def main(argv=None) -> int:
         parser.error("--find-artifacts takes 0-10; the GitHub search endpoint allows 10 requests a minute")
 
     print(f"credentials: {load_credentials()}")
-    query = effective_query(args.query, args.venue)
-    if args.venue:
-        print(f"query hint: venue '{args.venue}' prepended (not an API-side filter)")
-    if args.sources == "all":
-        source = "all"
+    # Several queries in one call is the point of `--queries`: the merge happens once, every
+    # (query, source) attempt is reported, and no JSON files have to be combined by hand.
+    if args.queries:
+        queries = [part.strip() for part in args.queries.split("|") if part.strip()]
+    elif args.query:
+        queries = [args.query]
     else:
-        chosen = [part.strip() for part in args.sources.split(",") if part.strip()]
-        if len(chosen) != 1:
-            parser.error("--sources takes 'all' or exactly one source name; "
-                         "run once per source for a longer list")
-        source = chosen[0]
+        parser.error("pass --query or --queries")
+    if len(queries) > 5:
+        parser.error("--queries takes at most 5 phrases; more than that is better split into "
+                     "separate runs so each stays inside its own budget")
+    queries = [effective_query(item, args.venue) for item in queries]
+    if args.venue:
+        print(f"query hint: venue '{args.venue}' prepended to {len(queries)} query(ies) "
+              "(not an API-side filter)")
+    if args.sources == "all":
+        chosen_sources = None
+    else:
+        chosen_sources = [part.strip() for part in args.sources.split(",") if part.strip()]
+        if not chosen_sources or len(chosen_sources) > 5:
+            parser.error("--sources takes 'all', one source, or a comma-separated subset of at most 5")
+    payload = {"limit": min(25, max(1, args.max_papers)),
+               "start_year": args.start_year, "end_year": args.end_year}
+    if len(queries) == 1:
+        payload["query"] = queries[0]
+    else:
+        payload["queries"] = queries
+    if chosen_sources:
+        payload["sources"] = chosen_sources
+    else:
+        payload["source"] = "all"
     tools = ResearchTools(None)
     try:
-        result = tools.execute("search_papers", {
-            "query": query, "limit": min(25, max(1, args.max_papers)),
-            "source": source, "start_year": args.start_year, "end_year": args.end_year})
+        result = tools.execute("search_papers", payload)
     except ProviderError as exc:
         # Reported verbatim. A failed search is not an empty result.
         print(f"search failed: {exc}", file=sys.stderr)

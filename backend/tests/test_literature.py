@@ -414,7 +414,7 @@ def test_the_retrieval_rules_reach_every_consumer_that_reads_them():
              / "SKILL.md").read_text(encoding="utf-8")
     assert "## Surveying a topic" in skill
     for phrase in ("three to five short queries", "--max-papers", "per-source hits",
-                   "Cross-run duplicates are not folded"):
+                   "coverage.attempts", "A shared title is not enough to merge two works"):
         assert phrase in skill, f"the survey procedure lost: {phrase}"
 
 
@@ -690,7 +690,9 @@ def test_the_documented_flag_contract_matches_the_parser():
 
     # argparse wraps the help to the terminal width, so the assertions run on a flattened copy.
     help_text = " ".join(parser.format_help().split())
-    assert "exactly one of" in help_text
+    # `--sources` takes a subset now that the contract does; the old text promised exactly one.
+    assert "comma-separated subset" in help_text
+    assert "--queries" in help_text
     assert "default 10" in help_text and "tool maximum 25" in help_text
 
     root = Path(__file__).resolve().parents[2]
@@ -772,3 +774,104 @@ def test_another_products_credential_file_is_not_read_unless_asked(monkeypatch):
     assert skill_search.AGENT_ENV_FILES == ("~/.codex/skills/.env",)
     reported = skill_search.load_credentials()
     assert "another product" in reported or "ambient environment" in reported
+
+
+def test_the_query_and_source_contract_accepts_one_or_several():
+    """The single-query form has to keep working, and several has to be possible in one call."""
+    assert PaperSearchArgs(query="x").queries_effective() == ["x"]
+    assert PaperSearchArgs(queries=["a", " b "]).queries_effective() == ["a", "b"]
+    assert PaperSearchArgs(query="x", source="arxiv").sources_effective() == ["arxiv"]
+    assert PaperSearchArgs(queries=["a"], sources=["arxiv", "crossref"]).sources_effective() == \
+        ["arxiv", "crossref"]
+    with pytest.raises(ValidationError):
+        PaperSearchArgs(queries=[])
+    with pytest.raises(ValidationError):
+        PaperSearchArgs(queries=["a"] * 6)
+    with pytest.raises(ValidationError):
+        PaperSearchArgs(queries=["ok", "   "])
+
+
+def test_several_queries_run_in_one_call_and_each_record_keeps_which_query_found_it():
+    """Hand-merging JSON files loses this: the record carries every query that surfaced it, and a
+    work found by both queries is one record rather than two."""
+    result = run(router, queries=["layout", "fixture layout"])
+    assert result["queries"] == ["layout", "fixture layout"]
+    assert result["coverage"]["requested"]["queries"] == ["layout", "fixture layout"]
+    # Every (query, source) pair is an attempt, not only the last round's.
+    pairs = {(item["query"], item["source"]) for item in result["coverage"]["attempts"]}
+    assert ("layout", "openalex") in pairs and ("fixture layout", "openalex") in pairs
+    assert len(result["coverage"]["attempts"]) == 10
+    merged = next(item for item in result["documents"]
+                  if item["paper"]["title"] == "Fixture Layout Study")
+    assert "queries: layout, fixture layout" in merged["content"]
+    assert result["coverage"]["state"] == "ok"
+
+
+def test_coverage_separates_zero_hits_from_a_partial_run():
+    """An empty answer and a broken source are different states, and a list length cannot tell
+    them apart."""
+
+    def empty_world(request):
+        if request.url.host == "api.openalex.org":
+            return httpx.Response(200, json={"results": []})
+        return httpx.Response(200, json={"data": []})
+
+    zero = run(empty_world, source="openalex")
+    assert zero["coverage"]["state"] == "zero_hits"
+    assert zero["coverage"]["hits"]["records"] == 0 and not zero["coverage"]["failed"]
+    assert zero["source_counts"] == {"openalex": 0}
+
+    def openalex_down(request):
+        if request.url.host == "api.openalex.org":
+            return httpx.Response(500, content=b"<html>upstream detail that must not travel</html>")
+        if request.url.host == "api.semanticscholar.org":
+            return httpx.Response(200, json=SEMANTIC)
+        return httpx.Response(404)
+
+    partial = run(openalex_down, sources=["openalex", "semanticscholar"])
+    assert partial["coverage"]["state"] == "partial"
+    assert [item["source"] for item in partial["coverage"]["failed"]] == ["openalex"]
+    # The same failure sits at the top level, where callers already read it.
+    assert partial["source_failures"] == partial["coverage"]["failed"]
+    assert partial["coverage"]["succeeded"] == ["semanticscholar"]
+    # A partial run still returns what did arrive, and does not present the gap as absence.
+    assert partial["documents"]
+    assert "upstream detail" not in json.dumps(partial)
+
+
+def test_a_shared_title_does_not_merge_two_different_works():
+    """A title is the weakest key we match on. Two works that disagree on real identifiers stay two
+    records: merging them would mint a paper that does not exist."""
+    first = paper_record("openalex", PaperInput(title="A Shared And Sufficiently Long Title",
+                                                doi="10.1000/alpha", year=2020))
+    second = paper_record("crossref", PaperInput(title="A Shared And Sufficiently Long Title",
+                                                 doi="10.1000/beta", year=2022))
+    merged, duplicates = merge_records([first, second])
+    assert duplicates == 0 and len(merged) == 2
+
+
+def test_a_preprint_and_its_published_version_still_merge_and_both_dois_survive():
+    """The conservative case: an arXiv DOI beside a publisher DOI is the same work, so it merges,
+    and neither identifier is dropped."""
+    preprint = paper_record("arxiv", PaperInput(title="A Shared And Sufficiently Long Title",
+                                                doi="10.48550/arXiv.2401.00001", year=2024))
+    published = paper_record("crossref", PaperInput(title="A Shared And Sufficiently Long Title",
+                                                    doi="10.1000/real", year=2024))
+    merged, duplicates = merge_records([preprint, published])
+    assert duplicates == 1 and len(merged) == 1
+    # DOIs are case-insensitive by definition, so the normalised form is the correct one to keep.
+    assert merged[0]["paper"].doi.lower() == "10.48550/arxiv.2401.00001"
+    # The second identifier is kept rather than overwritten, so the record stays checkable.
+    assert merged[0]["other_dois"] == ["10.1000/real"]
+
+
+def test_merge_records_accumulates_the_queries_that_found_a_work():
+    first = paper_record("openalex", PaperInput(title="A Shared And Sufficiently Long Title",
+                                                doi="10.1000/same"))
+    first["queries"] = ["layer decomposition"]
+    second = paper_record("arxiv", PaperInput(title="A Shared And Sufficiently Long Title",
+                                              doi="10.1000/same"))
+    second["queries"] = ["layered image generation"]
+    merged, duplicates = merge_records([first, second])
+    assert duplicates == 1
+    assert merged[0]["queries"] == ["layer decomposition", "layered image generation"]

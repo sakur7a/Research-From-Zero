@@ -334,6 +334,25 @@ def paper_keys(paper: PaperInput) -> list[str]:
     return keys
 
 
+def is_arxiv_doi(doi: str) -> bool:
+    return (doi or "").lower().startswith("10.48550/arxiv")
+
+
+def identifiers_conflict(first: PaperInput, second: PaperInput) -> bool:
+    """True when two records that share a title are nonetheless different works.
+
+    A preprint and its published version legitimately carry different DOIs, and one of them is
+    usually the arXiv DOI, so that pair is not a conflict. Two unrelated works with a similar title,
+    different non-arXiv DOIs and different years are — merging them would mint a paper that does not
+    exist, which is worse than listing both.
+    """
+    if not (first.doi and second.doi) or first.doi.lower() == second.doi.lower():
+        return False
+    if is_arxiv_doi(first.doi) or is_arxiv_doi(second.doi):
+        return False
+    return first.year is not None and second.year is not None and first.year != second.year
+
+
 def merge_records(records: list[dict]) -> tuple[list[dict], int]:
     """Collapse duplicates across sources. Returns the merged list and the fold count.
 
@@ -349,13 +368,23 @@ def merge_records(records: list[dict]) -> tuple[list[dict], int]:
         # A record may carry no publication claim at all; `unknown` is the honest default.
         claim = record.get("publication") or {"state": "unknown", "venue": "",
                                               "source": record.get("source", "")}
-        current = next((index[key] for key in keys if key in index), None)
+        match = next(((key, index[key]) for key in keys if key in index), None)
+        current = match[1] if match else None
+        if current is not None and match[0].startswith("title:") \
+                and identifiers_conflict(current["paper"], record["paper"]):
+            # A shared title is the weakest key we match on. When the identifiers disagree about
+            # which work this is, listing both is correct and merging them would invent one.
+            current = None
         if current is None:
-            current = {**record, "sources": [record["source"]], "publication_claims": [claim]}
+            current = {**record, "sources": [record["source"]], "publication_claims": [claim],
+                       "queries": list(record.get("queries") or [])}
             merged.append(current)
             keys = keys or [f"unmatched:{len(merged)}"]
         else:
             duplicates += 1
+            for query in record.get("queries") or []:
+                if query not in current["queries"]:
+                    current["queries"].append(query)
             if record["source"] not in current["sources"]:
                 current["sources"].append(record["source"])
             if current["citations"] is None or (record["citations"] or 0) > current["citations"]:
@@ -367,6 +396,13 @@ def merge_records(records: list[dict]) -> tuple[list[dict], int]:
             for field in ("doi", "arxiv_id", "venue", "year", "paper_url"):
                 if not getattr(current["paper"], field) and getattr(record["paper"], field):
                     setattr(current["paper"], field, getattr(record["paper"], field))
+            # A second, different DOI is kept rather than dropped: a preprint and its published
+            # version carry separate ones, and losing either makes the record unverifiable.
+            incoming = getattr(record["paper"], "doi", "")
+            if incoming and incoming.lower() != (current["paper"].doi or "").lower():
+                others = current.setdefault("other_dois", [])
+                if incoming not in others:
+                    others.append(incoming)
             # Keep the longest abstract rather than the first: a longer one is likelier to
             # carry the code or data link the artifact scan looks for.
             if len(record["paper"].abstract) > len(current["paper"].abstract):

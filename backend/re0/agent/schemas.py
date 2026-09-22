@@ -100,6 +100,14 @@ class PaperSearchArgs(SearchArgs):
     # `all` queries every source whose credentials or public access allow it, then
     # merges duplicates. A single source stays available for a targeted recheck.
     source: Literal["all", "semanticscholar", "openalex", "arxiv", "openreview", "crossref"] = "all"
+    # Several short queries in one budgeted call. A caller that instead merges JSON files by hand
+    # loses which query found what and the per-source counts that make a gap visible.
+    queries: list[str] | None = Field(default=None, max_length=5)
+    # A subset, for rechecking two sources together. `source` stays for one at a time.
+    sources: list[Literal["semanticscholar", "openalex", "arxiv", "openreview", "crossref"]] | None = \
+        Field(default=None, max_length=5)
+    # Either one query or several, so the single-query form keeps working unchanged.
+    query: str | None = Field(default=None, min_length=1, max_length=300)
     start_year: int | None = Field(default=None, ge=1800, le=2100)
     end_year: int | None = Field(default=None, ge=1800, le=2100)
 
@@ -107,7 +115,20 @@ class PaperSearchArgs(SearchArgs):
     def ordered_years(self):
         if self.start_year and self.end_year and self.end_year < self.start_year:
             raise ValueError("结束年份不能早于开始年份")
+        if not self.query and not self.queries:
+            raise ValueError("需要 query 或 queries 之一")
+        if self.queries and any(not item.strip() for item in self.queries):
+            raise ValueError("queries 里不能有空查询")
         return self
+
+    def queries_effective(self) -> list[str]:
+        """The query list a search runs, with the single-query form normalised into it."""
+        return [item.strip() for item in (self.queries or ([self.query] if self.query else []))]
+
+    def sources_effective(self) -> list[str]:
+        """The source subset a search runs. An explicit subset wins over `source`."""
+        return list(self.sources) if self.sources else \
+            (list(PAPER_SOURCES) if self.source == "all" else [self.source])
 
 
 class ResolveArgs(StrictModel):

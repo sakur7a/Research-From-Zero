@@ -26,7 +26,7 @@ RETRY_DELAY_SECONDS = 1.5
 
 TOOL_TYPES = {
     "update_plan": (PlanArgs, "Publish or revise a short user-visible research plan. Do not include private chain-of-thought."),
-    "search_papers": (PaperSearchArgs, "Search scholarly metadata and abstracts. source='all' queries Semantic Scholar, OpenAlex, arXiv, OpenReview and Crossref and merges duplicates by every identifier a record carries (DOI, arXiv ID, normalised title), so one work reported by several services collapses into one entry that keeps all of them; pass one source name to recheck it alone. start_year/end_year filter the publication year. limit is the recall ceiling (default 5, max 25) and is worth raising for a survey, because a work no source returned cannot be merged, corrected or counted. One query per call, and nothing here re-ranks, so recall comes from limit while precision comes from the words the target literature actually uses: several short queries recall more than one long phrase, since these services match space-separated terms restrictively. These are bibliographic records, never full text. A source that fails is reported rather than read as 'not found'. Publication status and affiliations are per-service claims, not verified facts. To find released code, search the project name with search_repositories and search_hub: papers often carry no link in any metadata field, and a name match is a candidate rather than proof of authorship."),
+    "search_papers": (PaperSearchArgs, "Search scholarly metadata and abstracts. source='all' queries Semantic Scholar, OpenAlex, arXiv, OpenReview and Crossref and merges duplicates by every identifier a record carries (DOI, arXiv ID, normalised title), so one work reported by several services collapses into one entry that keeps all of them; pass one source name, or a sources list, to recheck a subset. Two works that share a title but carry different non-arXiv DOIs and different years are kept apart rather than merged, because a shared title must not be able to fabricate a paper. start_year/end_year filter the publication year. limit is the recall ceiling (default 5, max 25) and is worth raising for a survey, because a work no source returned cannot be merged, corrected or counted. Pass queries (up to 5) to run several short queries in one budgeted call and get a single merged list instead of hand-merging files: each record keeps which queries and which services found it, and the coverage block lists every (query, source) attempt with its own outcome, so zero hits, a partial run and a total failure stay distinguishable. Nothing here re-ranks, so recall comes from limit while precision comes from the words the target literature actually uses: several short queries recall more than one long phrase, since these services match space-separated terms restrictively. These are bibliographic records, never full text. A source that fails is reported rather than read as 'not found'. Publication status and affiliations are per-service claims, not verified facts. To find released code, search the project name with search_repositories and search_hub: papers often carry no link in any metadata field, and a name match is a candidate rather than proof of authorship."),
     "resolve_paper": (ResolveArgs, "Resolve a DOI/arXiv identifier to source-derived paper metadata."),
     "search_repositories": (SearchArgs, "Search public GitHub repositories. Name matches do NOT establish official authorship."),
     "search_hub": (HubSearchArgs, "Search Hugging Face models/datasets. Returns candidates, NOT verified paper-resource relationships."),
@@ -56,13 +56,18 @@ def doc(url, content, *, kind="source", locator="", paper=None):
 
 def paper_document(record: dict) -> dict:
     """One merged paper as source material. Keeps which services reported it, so a
-    reader can tell a single-source hit from one several services agree on."""
+    reader can tell a single-source hit from one several services agree on, and which
+    queries found it, so a multi-query run does not lose that provenance."""
     paper, sources = record["paper"], record["sources"]
     lines = [paper.title, "authors: " + (", ".join(paper.authors) or "unknown")]
     for label, value in (("year", paper.year), ("doi", paper.doi),
                          ("arxiv", paper.arxiv_id), ("citations", record.get("citations"))):
         if value not in (None, ""):
             lines.append(f"{label}: {value}")
+    # Every query that surfaced this work, not only the last one to do so.
+    queries = record.get("queries") or []
+    if queries:
+        lines.append("queries: " + ", ".join(queries))
     # The raw venue string is kept inside this line so a wrong classification stays checkable.
     publication = dict(record.get("publication") or {})
     described = PUBLICATION_LABELS.get(publication.get("state", "unknown"), publication.get("state", ""))
@@ -111,30 +116,49 @@ class ResearchTools:
         return method(args)
 
     def search_papers(self, args):
-        """Query one source, or every source and merge duplicates across them.
+        """Query one or more sources for one or more queries, and merge the duplicates once.
 
         A source that fails contributes a failure entry, not an empty result: a rate
-        limit or an outage is not evidence that a paper does not exist.
+        limit or an outage is not evidence that a paper does not exist. Every
+        (query, source) pair is recorded as an attempt, so a caller can tell a partial
+        run from a complete one without re-reading the results.
         """
-        sources = PAPER_SOURCES if args.source == "all" else (args.source,)
+        queries = args.queries_effective()
+        sources = args.sources_effective()
         records, failures, counts = [], [], {}
-        # Scholarly APIs are slower than the metadata endpoints the default 8s was
-        # tuned for: arXiv alone measures >5s for a plain query.
-        client = ProviderClient(self.transport, max_calls=12, seconds=60, read_timeout=20)
+        attempts, succeeded = [], set()
+        # Scholarly APIs are slower than the metadata endpoints the default 8s was tuned for:
+        # arXiv alone measures >5s for a plain query. The budget scales with the number of
+        # (query, source) pairs and is shared by all of them, so the ceiling still bounds the call.
+        client = ProviderClient(self.transport, max_calls=max(12, 4 * len(queries) * len(sources)),
+                                seconds=60 * max(1, len(queries)), read_timeout=20)
         try:
-            for name in sources:
-                try:
-                    found = self._records_with_retry(client, name, args)
-                except ProviderError as exc:
-                    failures.append({"source": name, "error": str(exc)})
-                    counts[name] = 0
-                    continue
-                except (ValueError, KeyError, TypeError, ET.ParseError, UnicodeError):
-                    failures.append({"source": name, "error": "该来源返回了无法解析的数据"})
-                    counts[name] = 0
-                    continue
-                counts[name] = len(found)
-                records.extend(found)
+            for query in queries:
+                query_args = args.model_copy(update={"query": query})
+                for name in sources:
+                    try:
+                        found = self._records_with_retry(client, name, query_args)
+                    except ProviderError as exc:
+                        failures.append({"source": name, "error": str(exc)})
+                        attempts.append({"query": query, "source": name, "ok": False,
+                                         "error": str(exc)})
+                        counts.setdefault(name, 0)
+                        continue
+                    except (ValueError, KeyError, TypeError, ET.ParseError, UnicodeError):
+                        failures.append({"source": name, "error": "该来源返回了无法解析的数据"})
+                        attempts.append({"query": query, "source": name, "ok": False,
+                                         "error": "该来源返回了无法解析的数据"})
+                        counts.setdefault(name, 0)
+                        continue
+                    for record in found:
+                        # Which query found it travels with it, so a later round adds provenance
+                        # instead of overwriting the earlier round's.
+                        record["queries"] = [query]
+                    counts[name] = counts.get(name, 0) + len(found)
+                    succeeded.add(name)
+                    attempts.append({"query": query, "source": name, "ok": True,
+                                     "records": len(found)})
+                    records.extend(found)
             if failures and not records:
                 # Nothing was actually searched. Returning an empty list here would be
                 # read as "no such work", so fail loudly instead and name every source.
@@ -144,19 +168,48 @@ class ResearchTools:
             client.close()
         merged, duplicates = merge_records(records)
         kept = [record for record in merged if in_year_range(record["paper"].year, args.start_year, args.end_year)]
+        # Zero hits, a partial run and a wholly failed one are different states, and a caller
+        # cannot tell them apart from a list length alone.
+        if not records and not failures:
+            state = "zero_hits"
+        elif failures and not succeeded:
+            state = "all_failed"
+        elif failures:
+            state = "partial"
+        else:
+            state = "ok"
         result = {
             "documents": [paper_document(record) for record in kept],
             "scope": "跨源书目匹配；同源与跨源重复项已合并；未阅读全文",
-            "query": args.query,
+            "query": args.query or "",
+            "queries": queries,
             "sources_queried": list(sources),
             "source_counts": counts,
             "duplicates_merged": duplicates,
             "dropped_out_of_range": len(merged) - len(kept),
+            "coverage": {
+                "requested": {"queries": queries, "sources": list(sources), "limit": args.limit,
+                              "start_year": args.start_year, "end_year": args.end_year},
+                "attempts": attempts,
+                "succeeded": sorted(succeeded),
+                "failed": failures,
+                "hits": {"records": len(records), "unique": len(merged),
+                         "duplicates_merged": duplicates,
+                         "dropped_out_of_range": len(merged) - len(kept),
+                         "unknown_year": sum(1 for record in merged if record["paper"].year is None)},
+                "state": state,
+                "note": "每次 (query, source) 尝试都列在 attempts 里；state=partial 表示有来源未完成，"
+                        "不等于论文不存在；未命中的查询与失败的查询是两件事。",
+            },
         }
         if failures:
-            # Reported verbatim so a caller can tell "quiet" from "broken".
+            # Kept at the top level as well: it is the field callers already read, and the coverage
+            # block repeats the same list rather than inventing a second vocabulary for it.
             result["source_failures"] = failures
-        if len(sources) > 1:
+        if len(queries) > 1:
+            result["note"] = ("多个查询的结果合并后统一去重，每个记录保留命中它的查询；"
+                              "某来源失败只表示该来源未返回，不代表论文不存在。")
+        elif len(sources) > 1:
             result["note"] = ("多源结果按 DOI > arXiv ID > 归一化标题合并；某来源失败只表示该来源未返回，"
                               "不代表论文不存在。未知年份的结果不会被年份区间过滤掉。")
         return result

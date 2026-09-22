@@ -413,6 +413,33 @@ provider-reported usage: {'prompt_tokens': 11, 'completion_tokens': 3, 'total_to
 **未实测**：`--find-artifacts` 在 10 篇满额时对 GitHub 搜索限流（10 次/分钟）的实际影响；
 `描述与论文标题相符` 这个标记的误判率没有统计（只用样例验证过正向命中）。
 
+## 2026-09-22（Issue #5 PR A：多查询与覆盖模型）
+
+**真实网络实测**（`--queries "layer decomposition|layered image generation" --sources openalex`）：
+
+```
+per-source hits: openalex=10 · 9 unique (1 duplicates merged) ·
+  coverage: state=ok attempts=2 succeeded=1 failed=0 ·
+  2 queries merged, each record keeps the ones that found it
+```
+
+2 个查询 × 1 源 = 2 次 attempt；10 条里 **1 条被跨查询去重**（证明跨查询合并生效）；每条记录带
+`queries:` 说明是哪几个查询命中它的。
+
+**新增 6 项自动化用例**（`backend/tests/test_literature.py`，全部 fixture、无网络）：
+单查询契约保持兼容 / `queries` 上限 5 且不接受空串 / 多查询只合并一次且保留查询来源 /
+**coverage 三态可分**（`zero_hits` 与 `partial` 断言、失败同时出现在顶层 `source_failures` 与
+`coverage.failed`、且上游正文不外泄）/ **同标题不同标识符不合并** / **预印本与出版版仍合并且保留
+第二个 DOI** / `merge_records` 累积查询来源。
+
+**未实测**：多查询的真实召回效果（需要固定标注集，见 #7）；PR B 的分页与请求预算尚未开始。
+
+**环境事故（本轮，已修复）**：修改 `literature.py` 时该文件被**两次**写入损坏 —— 一次丢了 3 个
+中文字的末字节、一次丢了破折号的**首**字节（表现为孤立续字节 `\xa1\xaa`）。第一次的扫描只匹配
+"高位字节 + 字面 `?`"，**漏掉了第二种形态**。已改用**完整 UTF-8 合法性遍历**扫描，并按
+`git show HEAD:` 核对原文后逐字节修复（曾据此纠正一处：`」` 实为 `。`）。
+**结论：含中文的文件不再用会整体重写的编辑方式；每次改完立刻做合法性校验，而不是等 `SyntaxError`。**
+
 ## 2026-09-22（Issue #4 第二部分：显式 workspace 与协议加固）
 
 **真实子进程实测**（`python -m re0.mcp_server --workspace <tmp>` + 真实 openalex）：

@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Several queries in one budgeted call, and a coverage model (#5)
+
+- `search_papers` accepts `queries` (up to 5) and a `sources` subset beside the existing single
+  `query` / `source`, which keep working unchanged. One call merges once, so a work found by several
+  queries becomes one record instead of two, and each record keeps **which queries found it** rather
+  than only the last — provenance that hand-merging JSON files cannot preserve.
+- Every `(query, source)` pair is recorded as an attempt, and the result carries a `coverage` block
+  with `requested`, `attempts`, `succeeded`, `failed`, `hits` (records, unique, duplicates merged,
+  records dropped by the year window, records with an unknown year) and a `state` of `ok`, `partial`,
+  `all_failed` or `zero_hits`. Zero hits, a partial run and a total failure are now distinguishable;
+  previously a failed source showed `=0` in the per-source line, which reads as "no hits".
+- Add a conservative merge guard: two records that share a title but disagree on real identifiers
+  (different non-arXiv DOIs and different years) are **kept apart**, because merging them would
+  invent a work. A preprint and its published version still merge, and the second DOI is kept on the
+  record as `other_dois` rather than being overwritten.
+- The skill gains `--queries "a|b|c"` and multi-source `--sources`, and its heading now prints the
+  coverage state, so the CLI cannot describe a call differently from the JSON and MCP exits. The
+  tool description was updated with the contract.
+
 ### An opt-in source workspace, and a protocol that validates (#4)
 
 - Add `backend/re0/workspace.py` and `re0 mcp --workspace DIR`. The default surface stays stateless

@@ -63,11 +63,23 @@ Recall is bounded by the **page**, not by how many queries you run, and nothing 
    returned cannot be merged, corrected, or counted, so the page is the first lever.
 3. **Pass `--venue NAME`** when the target is conference work, so the venue name takes part in the
    query.
-4. **Read the `per-source hits:` line before reading the papers.** A source sitting at `=0` is a hole
-   in the survey, not a gap in the literature.
-5. **Cross-run duplicates are not folded.** One invocation is one query, so five runs can list the
-   same paper several times. Write each run with `--json` and merge on DOI or arXiv ID, or keep the
-   queries distinct enough that the overlap is small.
+4. **Read the `per-source hits:` line and the `coverage:` block before reading the papers.** A
+   source sitting at `=0` is a hole in the survey, not a gap in the literature, and `state=partial`
+   says a source did not answer while `state=zero_hits` says every source answered and there was
+   nothing. Those are different findings.
+5. **Pass those queries together with `--queries "a|b|c"` instead of running the command five
+   times.** One call merges once, folds a work that several queries found into a single record, and
+   keeps *which* queries found it (`queries:` on the record, `coverage.attempts` for the whole run).
+   Merging JSON files by hand loses both. The ceiling is 5 phrases per call; beyond that, split into
+   separate runs so each keeps its own budget, and expect cross-run duplicates to reappear — write
+   each run with `--json` and merge on DOI or arXiv ID.
+6. **`--sources` takes `all`, one source, or a comma-separated subset**, so a recheck can cover two
+   services together without silently widening to all five.
+
+**A shared title is not enough to merge two works.** Two records that agree on a title but disagree
+on real identifiers (different non-arXiv DOIs, different years) are kept apart, because merging them
+would mint a paper that does not exist. A preprint and its published version still merge — one of
+those DOIs is the arXiv DOI — and the second DOI is kept on the record rather than overwritten.
 
 ## Reporting from these results
 
