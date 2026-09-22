@@ -75,6 +75,16 @@ Timeouts apply at request/action boundaries; the task timer is not a hard global
 kill switch. Provider-reported usage is informational, not a guaranteed invoice.
 No automatic repeated paid retries, restart-resume or cross-provider failover.
 
+Zotero sync holds an API key for the length of one call and stores it nowhere:
+not in the database, not in the sync log, not in a response, not even masked. It
+is sent only to `api.zotero.org`, which is on the same host allowlist as every
+other provider, and the console reads it from the environment rather than a flag
+because a command line persists in shell history and the process list. Local
+Zotero database files are never opened. Attachments, annotations and notes are
+never requested at all — the item call carries an inclusion list of bibliographic
+types — and what that excludes is counted and reported rather than silently
+absent. Sync is read-only: the connector has no write method.
+
 Continuing a conversation does not reset any of it. Model and tool counts are
 summed across every turn of a conversation and **recomputed from the runs**
 rather than incremented, so a follow-up cannot escape a cap by being a new run;

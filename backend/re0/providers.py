@@ -22,7 +22,11 @@ from .models import Evidence, Observation, PaperInput, normalize_arxiv, normaliz
 from .scheduling import BudgetExhausted, Cancelled
 
 ALLOWED_HOSTS = {"api.github.com", "huggingface.co", "export.arxiv.org", "api.crossref.org",
-                 "api.openalex.org", "api.semanticscholar.org", "api2.openreview.net"}
+                 "api.openalex.org", "api.semanticscholar.org", "api2.openreview.net",
+                 # Read-only bibliographic sync, and only ever with the key scoped to it. Zotero
+                 # local database files are never opened: reading another program's SQLite behind
+                 # its back is not "a connector".
+                 "api.zotero.org"}
 MAX_BYTES = 2 * 1024 * 1024
 SEGMENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,150}$")
 # An HTML body where an API response was expected is an interstitial: an anti-scrape page, a
@@ -88,6 +92,7 @@ class ProviderClient:
         self.calls = 0
         self.cache_hits = 0
         self.digests: list[str] = []
+        self.last_headers: dict = {}
 
     def close(self):
         self.client.close()
@@ -152,6 +157,10 @@ class ProviderClient:
                                     timeout=min(self.read_timeout, max(0.1, self.deadline - time.monotonic()))) as response:
                 status = response.status_code
                 content_type = response.headers.get("content-type", "")
+                # Kept for callers whose protocol lives in the headers rather than the body: Zotero
+                # reports the library version and the total result count there, and a sync cursor
+                # built from the body alone would silently skip deletions.
+                self.last_headers = dict(response.headers)
                 if status != 200:
                     if status == 429 or (status == 403 and response.headers.get("x-ratelimit-remaining") == "0"):
                         raise ProviderError("提供商限流；稍后重试，不能据此认定资源未发布",

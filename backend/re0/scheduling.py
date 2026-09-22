@@ -54,10 +54,11 @@ PAGINATION_STOPS = ("complete", "empty_page", "cursor_missing", "page_budget", "
 # Only these two document their paging well enough to verify publicly: OpenAlex with an opaque
 # `cursor`, Semantic Scholar with an `offset`. The rest are declared unsupported rather than
 # paged on a guess — a guess that silently stops early is worse than an honest "one page".
-PAGINATED_SOURCES = ("openalex", "semanticscholar")
+PAGINATED_SOURCES = ("openalex", "semanticscholar", "zotero")
 PAGINATION_NOTES = {
     "openalex": "OpenAlex 文档化的 cursor 分页（cursor=* 起，读 meta.next_cursor）",
     "semanticscholar": "Semantic Scholar 文档化的 offset 分页（offset+limit，单页上限 100）",
+    "zotero": "Zotero 文档化的 start+limit 分页，配 Total-Results 与 Last-Modified-Version 响应头",
 }
 PAGINATION_UNSUPPORTED = ("{}：该来源的分页方式没有可公开核对的文档，本次只读一页。"
                           "未分页不等于已查全，也不等于没有更多结果")

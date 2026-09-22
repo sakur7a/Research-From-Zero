@@ -314,6 +314,34 @@ re0 session follow-up <run id> --goal "..." --reuse-evidence ev_xxx --dry-run
 
 > 数据库从 agent schema v1 升到 v2 是**纯增量**的：新增 `agent_conversations` 与 `agent_runs` 的五个列，每个既有任务被各自收进一个单轮会话，账本按其最近检查点填写，**没有重置任何计数、没有删除任何行**。版本号比本机新会被拒绝，而不是被降级。
 
+## 从 Zotero 只读增量同步
+
+已经用 Zotero 管文献的人不需要重新录一遍。**同步是只读的、增量的，而且默认只预览。**
+
+```bash
+export ZOTERO_API_KEY=...            # 只发往 api.zotero.org；不写库、不打印、不进日志
+re0 zotero collections --library-id 12345            # 只读集合名称与 key
+re0 zotero select --library-id 12345 --collection COLL0001
+re0 zotero preview  --library-id 12345               # 读远端，报告会发生什么，不写任何东西
+re0 zotero sync     --library-id 12345 --apply       # 预览 + 一个事务里提交
+re0 zotero status   --library-id 12345               # 映射、游标、集合选择、最近同步（不联网）
+re0 zotero disconnect --library-id 12345             # 忘记游标与选择；论文一篇都不删
+```
+
+几条不会让步的规则：
+
+- **不会去读本机 Zotero 数据库。** 只走 `api.zotero.org`，密钥只发给它，也**只存在于这次调用里**——不入库、不进同步日志、不出现在任何响应里，连打码都不打印。CLI 从环境变量读密钥而不是命令行参数，因为命令行会留在 shell 历史和进程列表里。
+- **附件、批注、笔记一律不传输。** 请求带的是 34 种文献类型的**白名单**，所以私人笔记正文不是"取回来再丢掉"，而是**根本没有被请求**。这让响应比变更列表窄，于是差额被算成 `unaccounted` 并报出来——**范围窄不能冒充范围全**。
+- 身份是 `(library_type, library_id, item_key)` + 远端版本；DOI/arXiv 只用来**关联**，不替代远端身份。所以**同一篇出现在两个库里会保留两条映射**、指向同一篇本地论文；没有 DOI 的条目照样能同步。
+- **远端删除是 tombstone，不是级联删除。** 映射标记为 `remote_deleted`，论文、笔记、资源与观察记录**全部保留**。Zotero 不再收录某条记录，只说明 Zotero 的事，不说明这里做过的工作。删掉的条目又回来时是**重新关联**，不是新建一条。
+- **游标与映射在同一个事务里写入。** 中断的同步会重读同一个窗口，不会把游标推过没人写进去的条目。分页没读完（`Total-Results` 没被满足）时**整次同步被拒绝**，理由同上。
+- 更新只覆盖书目字段。`notes`、`topics`、阅读 `status` 从库里读回来再合并，所以**远端的一次编辑不可能把你的批注重置成默认值**。
+- 把远端条目关联到**库里已有**的论文（比如先前 CSL 导入的）时**不改写那条记录**——关联不等于导入。
+- 冲突在**规划阶段**就带着原因拒绝，不是等到写入时才发现：DOI 已属于另一条记录、同一批里两条共用一个 DOI、库内两条标题相同（无法确定对应哪一条，所以**不猜**）。每一次 deliberate skip 都记进同步日志，并说明**游标仍会前进、不会自动重试**。
+- `disconnect` 只忘记游标与集合选择，论文一篇不删；加 `--remove-links` 才删映射，**同样不删任何研究记录**。
+
+> 本轮**没有做**：HTTP 接口与 Web 界面（服务层是共享的，包一层即可）、双向写回（连 dry-run 契约都还没开）、以及**任何真实账号下的运行**——那需要所有者在本机授权，凭据不进 Issue，所以现在标为 `live` 待授权。全部 24 个 Zotero 测试都是**离线 fixture**，没有联网、没有真实密钥。
+
 ## 作为 MCP 服务器接入其他 agent
 
 Re0 的只读检索工具可以脱离本仓库的 UI，作为一个 **MCP over stdio** 服务器给别的 agent 调用（Claude Code、Codex、dsh 等任何支持 MCP 的客户端）：

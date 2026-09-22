@@ -282,10 +282,37 @@ finding carried forward unchanged is not reported as one addition and one drop. 
 the next turn the parent's goal and report rather than its transcript, which reuses the existing
 compaction and `read_evidence` instead of building a second memory.
 
+## Zotero: a read-only connector with a source boundary
+
+`zotero.py` is a connector and a mapping store; `zotero_sync.py` plans and commits. The connector
+has no write method at all, so "read-only" is a property of the code rather than a promise about it.
+
+Two decisions shape it. First, the item request carries an explicit **inclusion** list of
+bibliographic types, so attachments, annotations and notes are never transferred — a private note
+body is not fetched and then discarded, it is never asked for. That makes the response narrower than
+the change list, and the difference is reported as `unaccounted` rather than absorbed, because a
+narrow request must not be able to pass for a complete one. Second, identity is
+`(library_type, library_id, item_key)` plus the remote version, and DOI/arXiv only *associate* a
+remote item with a paper already here. The same work in two libraries therefore keeps two mappings
+over one paper, and a paper with no DOI still syncs.
+
+The cursor moves inside the same transaction as the links, so an interrupted sync re-reads the same
+window instead of committing past items nobody wrote; a page read that never reaches its own
+`Total-Results` refuses the sync for the same reason. A remote deletion is a tombstone — the paper,
+its notes, its resources and their observations all survive, because Zotero no longer holding a
+record says nothing about work done here. An update overwrites bibliographic fields only: `notes`,
+`topics` and reading status are read back and merged, so a remote edit cannot reset an annotation.
+Collisions are refused while planning, with a reason, rather than discovered at write time and
+rolled back.
+
+The key is held for the length of one call and stored nowhere. The console reads it from the
+environment rather than a flag, because a command line persists in shell history and the process list.
+
 ## Deliberately not implemented
 
 Arbitrary website fetching/browser automation, vector memory, theorem graphs,
-scheduled monitoring, Zotero live sync, remote code execution, multi-agent
+scheduled monitoring, Zotero write-back or attachment/note reading, remote code
+execution, multi-agent
 specialist teams, multi-user authentication, exact dollar accounting,
 model-specific reasoning protocols and a distributed task queue.
 These should be added only against real evaluated workflows, not described as

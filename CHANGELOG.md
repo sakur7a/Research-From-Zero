@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+### Read-only incremental Zotero sync (#11)
+
+- Add `backend/re0/zotero.py` (connector + mapping store), `backend/re0/zotero_sync.py` (plan and
+  commit) and `re0 zotero status|collections|select|preview|sync|disconnect`. A user names one
+  library; the sync previews, and only `--apply` writes.
+- **It never opens a local Zotero database.** Sync goes through `api.zotero.org`, now on the shared
+  host allowlist, with a key that is sent only there and stored nowhere — not in the database, not in
+  the sync log, not in a response, not even masked. The console reads it from `ZOTERO_API_KEY` rather
+  than a flag, because a command line is visible in shell history and the process list.
+- **Attachments, annotations and notes are never transferred.** The item request carries an explicit
+  *inclusion* list of 34 bibliographic types, so a private note body is not fetched and discarded —
+  it is never asked for. Because that makes the response narrower than the change list, the
+  difference is counted as `unaccounted` and reported; a narrow request cannot pass for a complete one.
+- Identity is `(library_type, library_id, item_key)` plus the remote version. DOI and arXiv only
+  *associate* a remote item with a paper already here, so the same work in two libraries keeps two
+  mappings over one paper, and a paper with no DOI still syncs.
+- **A remote deletion is a tombstone.** The link becomes `remote_deleted`; the paper, its notes, its
+  resources and their observations all stay. Zotero no longer holding a record says something about
+  Zotero and nothing about work done here. An item that comes back is relinked, not duplicated.
+- **The cursor moves inside the same transaction as the links.** An interrupted sync re-reads the
+  same window instead of committing a cursor past items nobody wrote. An incomplete page read — a
+  `Total-Results` the pages never reached — refuses the sync outright for the same reason.
+- Updates overwrite bibliographic fields only. `notes`, `topics` and reading `status` are read back
+  from the stored row and merged, so a remote edit cannot reset an annotation to a default.
+- Linking an item to a paper that already exists (from a CSL import, say) does **not** rewrite that
+  paper. Linking is not importing.
+- Collisions are refused during planning with a reason, not discovered at write time: a DOI already
+  held by a different paper, two remote items sharing one DOI in the same window, and two library
+  records with the same title (which is ambiguous, so nothing is guessed). Each is reported, and a
+  deliberate skip is recorded in the sync log with the note that the cursor still advances, so it
+  will not retry itself.
+- `disconnect` forgets the cursor and the collection selection and keeps every paper;
+  `--remove-links` also drops the mappings, and still deletes no research record.
+- 417 Python tests (was 393), all offline against a fixture Zotero service. **Not done in this
+  increment:** the HTTP endpoints and the web surface (the service is shared and ready to wrap),
+  write-back even as a dry-run contract, and any real-account run — that needs the owner's local
+  authorization, so it stays marked `live` and unauthorized.
+
 ### Continuing a research conversation: follow-ups, changed constraints, auditable reruns (#9)
 
 - Add `backend/re0/agent/session.py`, the shared service behind `POST /api/agent/followups`,

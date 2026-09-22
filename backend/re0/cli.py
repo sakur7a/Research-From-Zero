@@ -7,8 +7,10 @@ only dispatches to them, so no retrieval logic is duplicated here. The skill wra
 Two capabilities are kept apart on purpose, and `doctor` says which is which:
 
 * **No model needed** — `paper search` (five scholarly sources), `paper text` (one open-access
-  paper), `mcp` (local stdio tools), `skill` (package or install the skill directory) and the
-  read-only half of `session` (`list`, `show`, `delta`, `scope`). These work with no key at all.
+  paper), `mcp` (local stdio tools), `skill` (package or install the skill directory), `zotero`
+  (read-only incremental sync from one library) and the read-only half of `session` (`list`, `show`,
+  `delta`, `scope`). These work with no model key at all — `zotero` needs its own `ZOTERO_API_KEY`
+  only for the commands that read the remote library.
 * **Needs a model key (BYOK)** — a standalone Re0 task that plans and calls tools, and therefore
   `session follow-up` / `session retry`, which start one. This module never starts an LLM of its
   own: those two post to the running local service, where the key already lives in memory, so
@@ -48,8 +50,9 @@ def doctor(probe_network: bool = False) -> int:
     print(f"python: {sys.version.split()[0]} (this package needs >=3.11)")
     print(f"package: {Path(__file__).resolve().parent}")
     print()
-    print("mode: `paper search`, `paper text`, `mcp`, `skill` and `session list/show/delta/scope`")
-    print("      need no model key; a standalone task does, and so do `session follow-up`/`retry`")
+    print("mode: `paper search`, `paper text`, `mcp`, `skill`, `zotero` and")
+    print("      `session list/show/delta/scope` need no model key; a standalone task does,")
+    print("      and so do `session follow-up`/`retry`")
     print("      (those two post to the running local service, where the key lives in memory)")
     print("      this CLI never starts an LLM of its own, so no command nests a second agent")
     print()
@@ -165,6 +168,9 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands.add_parser("session", add_help=False,
                            help="inspect a research conversation, and continue one (no model key "
                                 "needed to look; starting a turn goes through the local service)")
+    subcommands.add_parser("zotero", add_help=False,
+                           help="read-only incremental sync from one Zotero library; previews "
+                                "before it writes, and never reads notes or attachments")
 
     skill = subcommands.add_parser("skill",
                                    help="package or install the skill directory (no model key needed)")
@@ -203,6 +209,9 @@ def main(argv=None) -> int:
         # their own help text instead of a second, thinner copy of them here.
         from re0.session_cli import main as session_main
         return session_main(argv[1:])
+    if argv[:1] == ["zotero"]:
+        from re0.zotero_cli import main as zotero_main
+        return zotero_main(argv[1:])
     passthrough: list = []
     if argv[:2] in (["paper", "search"], ["paper", "text"]):
         argv, passthrough = argv[:2], argv[2:]
