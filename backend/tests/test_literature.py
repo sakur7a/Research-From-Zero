@@ -62,6 +62,25 @@ CROSSREF = {"message": {"items": [
 ARXIV = b'''<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>http://arxiv.org/abs/2401.00001v1</id><title>Fixture Layout Study</title><summary>Preprint of the same work.</summary><published>2024-01-01T00:00:00Z</published><author><name>Ada Lovelace</name></author></entry></feed>'''
 
 
+def skill_docs() -> str:
+    """The skill's documentation set: SKILL.md plus every reference file beside it.
+
+    Splitting the skill into an entry point and references moved prose without moving its readers,
+    so a test that reads only SKILL.md would pass while a rule sat unread in a reference — and a
+    test that reads only the references would pass while the entry point stopped linking to them.
+    This checks both: the text is returned concatenated, and an unlinked reference fails here.
+    """
+    root = Path(__file__).resolve().parents[2] / "skills" / "re0-paper-search"
+    entry = (root / "SKILL.md").read_text(encoding="utf-8")
+    parts = [entry]
+    references = sorted((root / "references").glob("*.md"))
+    assert references, "the skill has no references/ directory"
+    for path in references:
+        assert f"references/{path.name}" in entry, f"SKILL.md does not link to references/{path.name}"
+        parts.append(path.read_text(encoding="utf-8"))
+    return "\n".join(parts)
+
+
 def router(request):
     """A well-behaved world: every source answers with its own shape."""
     host, path = request.url.host, request.url.path
@@ -419,10 +438,12 @@ def test_the_standing_rules_are_written_into_the_project_guidance():
     assert "## Reporting from these results" in skill
     for phrase in ("say how many you set aside", "artifact_candidates", "nobody searched them"):
         assert phrase in skill, f"SKILL.md lost: {phrase}"
-    # What a layer can yield has to be stated next to the layer, or a name match reads as authorship.
-    assert "### What each layer can and cannot yield" in skill
+    # What a layer can yield has to be stated next to the layer, or a name match reads as
+    # authorship. It now lives in a reference, so the set is what gets checked.
+    documents = skill_docs()
+    assert "### What each layer can and cannot yield" in documents
     for phrase in ("no licence", "code but no weights", "can be a fork", "official attribution"):
-        assert phrase in skill, f"SKILL.md lost the layer limit: {phrase}"
+        assert phrase in documents, f"the skill documentation lost the layer limit: {phrase}"
 
 
 def test_the_retrieval_rules_reach_every_consumer_that_reads_them():
@@ -784,7 +805,7 @@ def test_the_documented_flag_contract_matches_the_parser():
 
     root = Path(__file__).resolve().parents[2]
     readme = (root / "README.md").read_text(encoding="utf-8")
-    skill = (root / "skills" / "re0-paper-search" / "SKILL.md").read_text(encoding="utf-8")
+    skill = skill_docs()
     for prose in (readme, skill):
         assert "前 5 篇" not in prose and "first 5 papers" not in prose
         assert "0\u20135，默认 0" not in prose

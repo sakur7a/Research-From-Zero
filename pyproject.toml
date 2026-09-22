@@ -25,6 +25,23 @@ test = ["pytest==9.0.2"]
 [tool.setuptools.packages.find]
 where = ["backend"]
 
+# The skill directory ships as data, so a wheel carries it and `re0 skill install --target` works
+# from an installed distribution instead of only from a checkout. The list is explicit because TOML
+# cannot glob; tests/test_skill_package.py fails when it drifts from the tree, so adding a file here
+# is a deliberate act rather than a silent omission from every wheel built afterwards.
+[tool.setuptools.data-files]
+"share/re0/skills/re0-paper-search" = [
+  "skills/re0-paper-search/SKILL.md",
+]
+"share/re0/skills/re0-paper-search/scripts" = [
+  "skills/re0-paper-search/scripts/paper_search.py",
+]
+"share/re0/skills/re0-paper-search/references" = [
+  "skills/re0-paper-search/references/credentials.md",
+  "skills/re0-paper-search/references/open-source-status.md",
+  "skills/re0-paper-search/references/publication-status.md",
+]
+
 [tool.pytest.ini_options]
 pythonpath = ["backend"]
 testpaths = ["backend/tests"]

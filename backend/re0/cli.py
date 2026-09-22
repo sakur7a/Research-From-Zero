@@ -6,8 +6,8 @@ only dispatches to them, so no retrieval logic is duplicated here. The skill wra
 
 Two capabilities are kept apart on purpose, and `doctor` says which is which:
 
-* **No model needed** — `paper search` (five scholarly sources) and `mcp` (local stdio tools).
-  These work with no key at all.
+* **No model needed** — `paper search` (five scholarly sources), `mcp` (local stdio tools) and
+  `skill` (package or install the skill directory). These work with no key at all.
 * **Needs a model key (BYOK)** — a standalone Re0 task that plans and calls tools. This module
   never starts an LLM of its own: calling a command here does not nest a second agent, and
   host-tool mode (an agent calls the MCP tools) stays distinct from standalone mode.
@@ -84,7 +84,62 @@ def doctor(probe_network: bool = False) -> int:
     return 0
 
 
+def skill_command(arguments) -> int:
+    """Package, install or describe the skill directory. No network, no model, no spending."""
+    from re0.skill_package import (SKILL_NAME, SkillPackageError, apply_install, locate_skill,
+                                   manifest, package_into, plan_install, render_plan)
+    try:
+        if arguments.action == "show":
+            root, origin = locate_skill()
+            document = manifest(root, origin=origin)
+            print(f"skill: {document['skill']}")
+            print(f"directory: {root}")
+            print(f"found via: {origin}")
+            print(f"re0 version: {document['re0_version']}")
+            print(f"tree sha256: {document['tree_sha256']}")
+            for entry in document["files"]:
+                print(f"  {entry['sha256'][:12]}  {entry['bytes']:>7}  {entry['path']}")
+            return 0
+        if arguments.action == "package":
+            result = package_into(arguments.output)
+            print(f"packaged from: {result['packaged_from']}")
+            print(f"found via: {result['origin']}")
+            print(f"wrote {len(result['written'])} files to {result['target']}")
+            for name in result["written"]:
+                print(f"  + {name}")
+            print(f"manifest: {result['manifest']}")
+            print("this is a copy of the skill, not an archive: install it with "
+                  "`re0 skill install --target <host skills dir>`, or copy it by hand.")
+            return 0
+        if arguments.action == "install":
+            # `--target` names the host's skills directory, not the skill's own directory: a host
+            # keeps one directory per skill, and installing SKILL.md loose into the root of it
+            # would be wrong in a way that is easy to miss afterwards.
+            plan = plan_install(Path(arguments.target) / SKILL_NAME)
+            if arguments.dry_run:
+                print(render_plan(plan))
+                print()
+                print("dry run: nothing was written.")
+                return 0
+            if plan.conflicts and not arguments.force:
+                print(render_plan(plan))
+                print()
+                print("refused: the conflicting files above were left untouched. Re-run with "
+                      "--force to replace them (each old file is renamed aside, not deleted), "
+                      "or move them yourself first.", file=sys.stderr)
+                return 3
+            applied = apply_install(plan, force=arguments.force)
+            print(render_plan(plan, applied=applied))
+            return 0
+    except SkillPackageError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print("pass one of: show, package --output DIR, install --target DIR", file=sys.stderr)
+    return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
+    from re0.skill_package import SKILL_NAME  # local, so the CLI still imports without the package
     parser = argparse.ArgumentParser(prog=PROGRAM, description="Re0 research entry points.")
     parser.add_argument("--version", action="version", version=f"{PROGRAM} {version()}")
     subcommands = parser.add_subparsers(dest="command")
@@ -98,6 +153,29 @@ def build_parser() -> argparse.ArgumentParser:
                                help="also run the network probes (spends requests; never implied)")
 
     subcommands.add_parser("mcp", help="serve the read-only tools over stdio (no model key needed)")
+
+    skill = subcommands.add_parser("skill",
+                                   help="package or install the skill directory (no model key needed)")
+    skill_actions = skill.add_subparsers(dest="action")
+    skill_actions.add_parser("show",
+                             help="report which skill directory would be shipped, and its hashes")
+    packager = skill_actions.add_parser(
+        "package", help="write a self-contained copy with a hash manifest, for hand-delivery")
+    packager.add_argument("--output", required=True, metavar="DIR",
+                          help="directory to create <skill>/ inside. It must not already hold a "
+                               "non-empty copy: nothing here overwrites.")
+    installer = skill_actions.add_parser(
+        "install", help="install into a host's skills directory, previewing first")
+    installer.add_argument("--target", required=True, metavar="DIR",
+                           help="the host skills directory to install into, e.g. ~/.claude/skills. "
+                                f"The skill is created as DIR/{SKILL_NAME}, the way a host expects "
+                                "one directory per skill.")
+    installer.add_argument("--dry-run", action="store_true",
+                           help="print the preview and write nothing")
+    installer.add_argument("--force", action="store_true",
+                           help="replace files that differ, renaming each old one aside as "
+                                ".re0-backup-<timestamp> rather than deleting it. Without this a "
+                                "conflicting file is left alone and reported.")
     return parser
 
 
@@ -130,5 +208,7 @@ def main(argv=None) -> int:
         from re0.mcp_server import main as mcp_main
         mcp_main()
         return 0
+    if arguments.command == "skill":
+        return skill_command(arguments)
     parser.print_help()
     return 2

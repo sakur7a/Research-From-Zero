@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### The skill ships as package data, and installs with a preview (#3)
+
+- Add `backend/re0/skill_package.py` and `re0 skill show | package | install`. The skill directory is
+  now declared as data in `pyproject.toml`, so a wheel carries it and `locate_skill()` finds it under
+  `<prefix>/share/re0/skills` — reporting *how* it was found, because "installed from the wheel" and
+  "picked up from a checkout next door" are different facts when a host is debugging a stale skill.
+- **An install never overwrites silently.** Every file is classified `new` / `identical` /
+  `conflict` before anything is written; `--dry-run` prints that and writes nothing; a conflict exits
+  **3** and leaves the existing file untouched; `--force` renames the old file aside as
+  `.re0-backup-<UTC timestamp>` instead of deleting it. Re-running is idempotent. `MANIFEST.json`
+  carries per-file sha256 and a tree hash, and the manifest order is sorted by posix path so it does
+  not depend on the build machine's case-sensitivity rules.
+- Refusals are refusals: installing onto the skill itself or into a directory inside it, a target
+  that is an existing file, and a `package --output` that already holds a non-empty copy all fail
+  with a reason rather than proceeding.
+- `SKILL.md` is split per the Agent Skills convention: 501 lines down to 229, with the credentials,
+  publication-status and open-source-status deep dives moved **verbatim** into `references/`. Nothing
+  was summarised away, and the doc-surface tests now read the whole set and fail if the entry point
+  stops linking to a reference — a rule that moved into a file nobody opens is a rule that was
+  deleted.
+- Verified in a clean venv from the built wheel, run from a non-repo working directory: `skill show`
+  resolves the installed data directory, `install --dry-run` writes nothing, a real install writes
+  both files plus the manifest, a second install writes zero, an edited `SKILL.md` exits 3 with the
+  edit intact, `--force` keeps it as a backup, and the installed wrapper still runs.
+
 ### Bounded pagination, one shared request budget, and a venue filter that says which it is (#5)
 
 - Add `backend/re0/scheduling.py`: a `Governor` shared by every client in a call, so a rate limit met

@@ -118,6 +118,19 @@ python skills/re0-paper-search/scripts/paper_search.py \
     --query "KV cache compression for long-context LLMs" --start-year 2024 --end-year 2026
 ```
 
+**装到宿主里用 `re0 skill install`，不要手工 `cp`。** skill 目录现在作为**包数据**随 wheel 交付，所以装好 `re0-research` 之后，任何工作目录下都能：
+
+```bash
+re0 skill show                                          # 会用哪个目录、每个文件的 sha256
+re0 skill install --target ~/.learnbuddy/skills --dry-run   # 只预览，什么都不写
+re0 skill install --target ~/.learnbuddy/skills           # 生成 <target>/re0-paper-search
+re0 skill package --output /tmp/re0-skill                 # 自包含副本 + MANIFEST.json
+```
+
+写入前每个文件先被分成 `new`／`identical`／`conflict`。**冲突（同名但内容不同）会让安装以退出码 3 停下，你那个文件一个字节都不动** —— 它可能是你自己改过的。`--force` 才替换，而且是把旧文件改名留成 `<名字>.re0-backup-<UTC 时间戳>`，不是删除。重复安装是幂等的：内容一致的文件跳过而不是重写。`MANIFEST.json` 记录每个文件的 sha256 和整棵树的哈希，之后可以核对副本有没有漂移。`re0 skill show` 还会说明 skill 是**从安装的数据目录找到的**还是**从旁边的仓库 checkout 找到的**，因为宿主里跑着旧副本时这是第一个要问的问题。
+
+`SKILL.md` 按 Agent Skills 规范拆过：入口 229 行，凭据、发表状态、开源状态三块深度内容**原文**移到 `references/`，没有做摘要删减；入口里保留索引和链接。
+
 输出形如 `per-source hits: semanticscholar=3, openalex=2, arxiv=0, … · 5 unique (1 duplicates merged)`，并在 stderr 单独列出**失败**的来源。survey／review 类论文被标 `[survey]` 并沉到列表末尾，但**不会被删掉**。
 
 每条结果给三级链接，最优在前：**arXiv → DOI → 来源记录页**。很多服务只报 arXiv 的 DOI（`10.48550/arXiv.<id>`），所以没有直接给出 arXiv ID 时会从 DOI 还原 —— 那通常才是想点开的那个链接。

@@ -691,3 +691,54 @@ UI 改动必须跑这两个浏览器脚本，所以这不是可选清理。8 处
 - `Retry-After` 的 HTTP-date 形式只有单元测试，没有真实提供商发过这种形式。
 - #5 验收里"CLI/MCP/Agent 三个入口保留相同 coverage"本轮只验证了 CLI 与工具层；MCP `structuredContent`
   走同一个 `result_model.normalize()`，`coverage` 已加入 `PAYLOAD_FIELDS`，但没有单独的 MCP 端到端断言。
+
+## 2026-09-23（Issue #3 剩余项：skill 打包分发与 references 拆分）
+
+### 本地实际执行
+
+| 层次 | 命令 | 结果 |
+|---|---|---|
+| Python 全量 | `python -m pytest` | **297 passed**（#5-B 之后 277 项，本轮 +20：新增 `tests/test_skill_package.py`） |
+| JS 单测 | `npm test` | **31 passed** |
+| 构建产物 | `python -m pip wheel --no-deps -w .data/dist .` | 成功产出 `re0_research-0.2.0-py3-none-any.whl` |
+
+### 干净环境验收（#3 要求"干净 venv 从构建产物安装、在非仓库 cwd 运行"）
+
+在 `.data/cleanenv` 新建 venv，只装上面构建出的 wheel，然后在 `.data/elsewhere`（**不是仓库目录**）执行：
+
+1. `re0 skill show` →
+   `directory: …\.data\cleanenv\share\re0\skills\re0-paper-search`，
+   `found via: installed data directory …\.data\cleanenv\share`，列出 5 个文件及 sha256：
+   `SKILL.md`(16575 B)、`references/credentials.md`(2950)、`references/open-source-status.md`(13789)、
+   `references/publication-status.md`(3366)、`scripts/paper_search.py`(2185)，
+   `tree sha256: fcf1bfe390864e84…`。**说明 wheel 确实带着 skill 数据，且不依赖仓库 checkout。**
+2. `re0 skill install --target …\.data\hostskills` → `新增 5 · 内容一致 0 · 冲突 0`，写出
+   `re0-paper-search/{SKILL.md, MANIFEST.json, references/*.md, scripts/paper_search.py}`。
+   **`--target` 是宿主的 skills 根目录，skill 落在自己的子目录里**，没有把 `SKILL.md` 散在根目录。
+3. 把 `references/credentials.md` 改成 `host edit` 后再装 → **退出码 3**，文件内容仍是 `host edit`，
+   没有生成任何 `.re0-backup-*`（拒绝就是不碰它）。
+4. 同一目录重复安装 → `已写入 0 个文件；跳过内容一致 2 个`（拆分前那次实测），幂等。
+5. `--force` → `旧文件保留为 SKILL.md.re0-backup-20260922T170331Z（原 SKILL.md）`，旧内容可读回。
+6. 装好的副本能直接跑：`python …/hostskills/re0-paper-search/scripts/paper_search.py --help`
+   打印真实参数（含本轮新增的 `--max-pages/--max-requests/--refresh`）。
+
+### 拆分 SKILL.md 的取舍
+
+`SKILL.md` 501 行 → 229 行，移出 301 行到 `references/`。**是整段原文搬运，不是摘要**：凭据、
+发表状态（含机构）、开源状态（含审计词汇、`--resource-matrix`、覆盖率分母、人工确认）三块。
+入口里留一段说明加链接，并新增 `## References` 索引表。
+
+两个原有的文档表面测试因此失败（它们只读 `SKILL.md`）。修法不是放宽断言，而是加 `skill_docs()`：
+读入口 + 所有 `references/*.md`，**并且断言入口里确实链接了每一个 reference**。理由值得记下来：
+只读入口会在"规则被搬进一个没人打开的文件"时通过，只读 references 会在"入口不再链接它"时通过，
+两种都是把规则悄悄删掉。
+
+### 未实测／仍缺
+
+- **没有在真实宿主里装过**（Claude/LearnBuddy/Codex 的 skills 目录）。#3 验收里"至少一个实际宿主按 #1
+  记录安装与调用结果"仍然**依赖 #1 的宿主确认**，本轮只证明了"从一个已安装的分发包、在非仓库目录、
+  带预览且不覆盖"这条链路可用。
+- `pyproject.toml` 的 `data-files` 必须逐文件列出（TOML 不能 glob）。已加漂移守卫测试
+  `test_the_pyproject_data_files_list_matches_the_real_tree`：新增 skill 文件而忘了登记，测试会失败，
+  而不是让之后每个 wheel 都静默少一个文件。
+- 只构建并验证了 wheel，没有验证 sdist，也没有 Docker 构建（属于 #14）。
