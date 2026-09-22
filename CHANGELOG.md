@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### An opt-in source workspace, and a protocol that validates (#4)
+
+- Add `backend/re0/workspace.py` and `re0 mcp --workspace DIR`. The default surface stays stateless
+  and opens nothing; with a directory named, each document a tool returned is stored as a snapshot
+  with a stable content-addressed id, and the id travels in `structuredContent`. Only payloads
+  marked as coming from a tool are recorded — model text is refused, because a workspace holding it
+  would look like evidence that was never gathered. An import previews by default, is idempotent,
+  never approves a paper into the library, and refuses a bundle from a different workspace rather
+  than merging two that are not the same.
+- Fix an identity bug the first real probe caught: the recording timestamp was inside the hashed
+  payload, so the same source recorded a second later minted a second id and the directory filled
+  with near-duplicates. The id now covers a source's identity only, and re-recording keeps the first
+  record's metadata.
+- Harden the stdio protocol. A tool request before `initialize` is refused (-32002) instead of being
+  answered under assumptions the client never agreed to; a requested protocol version this server
+  does not implement is answered with one it does, rather than echoed; and a request that is not an
+  object, a `params` that is not an object, and a `tools/call` without a name all get defined errors
+  instead of raising out of the loop.
+
 ### A versioned evaluation set, and a harness that caught its own overclaim (#7)
 
 - Add `evals/`: a versioned public task set with labels (`tasks.json`), a runner for the

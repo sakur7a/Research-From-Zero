@@ -20,6 +20,12 @@ playwright-report/
 backups/
 # Regenerable evaluation run records; evals/results/SUMMARY.md is the record.
 evals/runs/
+# Left behind by an interrupted atomic write, and the control probe that proved deletion is refused
+# in this environment. Neither can be removed here (the recycle bin is unavailable, so the safety
+# shim fails closed), so they are ignored to guarantee they can never be committed. The list in
+# to-delete/README.md is where they are tracked for manual removal.
+backend/tests/test_mcp.staged
+backend/tests/delete-probe.txt
 *.egg-info/
 build/
 dist/

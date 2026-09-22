@@ -20,10 +20,22 @@ EXPECTED_TOOLS = ["search_papers", "resolve_paper", "search_repositories", "sear
                   "inspect_resource", "read_repository_file", "search_release_discussions"]
 
 
-def exchange(messages, tools=None):
+HANDSHAKE = {"jsonrpc": "2.0", "id": 0, "method": "initialize",
+             "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "0"}}}
+
+
+def exchange(messages, tools=None, workspace=None):
+    """Send a real handshake first, then the caller's messages, and return only their answers.
+
+    The handshake is not decoration: the surface refuses a tool call before it, so a helper that
+    skipped it would be testing a state a client never has.
+    """
+    stream = "".join(json.dumps(message) + "\n" for message in [HANDSHAKE] + list(messages))
     out = io.StringIO()
-    mcp_server.serve(io.StringIO("".join(json.dumps(message) + "\n" for message in messages)), out, tools)
-    return [json.loads(line) for line in out.getvalue().splitlines() if line]
+    mcp_server.serve(io.StringIO(stream), out, tools, workspace=workspace)
+    answers = [json.loads(line) for line in out.getvalue().splitlines() if line]
+    return [answer for answer in answers if answer.get("id") != 0]
 
 
 def paper_search_call():
@@ -41,8 +53,10 @@ def test_handshake_echoes_the_client_version_and_exposes_only_read_only_tools(mo
     ])
     assert initialize["result"]["serverInfo"] == {"name": "re0-research", "version": mcp_server.SERVER_VERSION}
     assert initialize["result"]["capabilities"] == {"tools": {}}
-    # Echoing the requested version keeps a newer client's handshake acceptable.
-    assert initialize["result"]["protocolVersion"] == "2025-11-25"
+    # A version we do not implement is not echoed back. Agreeing to a protocol this file has not
+    # built is a promise it cannot keep, so the client is told what it actually gets.
+    assert initialize["result"]["protocolVersion"] == mcp_server.DEFAULT_PROTOCOL_VERSION
+    assert "2025-11-25" not in mcp_server.SUPPORTED_PROTOCOL_VERSIONS
     names = [tool["name"] for tool in listing["result"]["tools"]]
     assert names == EXPECTED_TOOLS
     for tool in listing["result"]["tools"]:
@@ -211,3 +225,60 @@ def test_the_cli_json_and_the_mcp_structured_content_are_the_same_shape():
     assert mcp_server.result_model is result_model
     assert "result_model.normalize(result)" in pathlib.Path(skill_search.__file__).read_text(
         encoding="utf-8")
+
+
+def test_a_supported_version_is_echoed_and_a_tool_call_before_the_handshake_is_refused():
+    (answer,) = exchange([{"jsonrpc": "2.0", "id": 5, "method": "initialize",
+                           "params": {"protocolVersion": "2025-03-26"}}])
+    assert answer["result"]["protocolVersion"] == "2025-03-26"
+
+    out = io.StringIO()
+    mcp_server.serve(io.StringIO(json.dumps(paper_search_call()) + "\n"), out)
+    (refusal,) = [json.loads(line) for line in out.getvalue().splitlines() if line]
+    assert refusal["error"]["code"] == -32002 and "initialize" in refusal["error"]["message"]
+
+
+def test_malformed_requests_get_a_defined_error_instead_of_ending_the_connection():
+    """A raise would end the loop and take the connection with it, so every shape is answered."""
+    cases = [
+        ({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": []}, -32602),
+        ({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": 7}}, -32602),
+        ({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+          "params": {"name": "search_papers", "arguments": "not an object"}}, -32602),
+        ({"jsonrpc": "2.0", "id": 4, "method": 12}, -32600),
+        ({"jsonrpc": "1.0", "id": 5, "method": "ping"}, -32600),
+    ]
+    answers = exchange([message for message, _ in cases])
+    assert [answer["error"]["code"] for answer in answers] == [code for _, code in cases]
+    # And the connection is still usable afterwards.
+    (after,) = exchange([{"jsonrpc": "2.0", "id": 9, "method": "ping"}])
+    assert after["result"] == {}
+
+
+def test_the_default_surface_still_writes_nothing_and_opens_no_workspace(tmp_path):
+    """The workspace is opt-in. Without it there is no directory, no id and no file."""
+    (answer,) = exchange(
+        [paper_search_call()],
+        ResearchTools(None, httpx.MockTransport(lambda request: httpx.Response(200, content=ATOM))),
+        workspace=None)
+    document = answer["result"]["structuredContent"]["documents"][0]
+    assert "source_id" not in document
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_named_workspace_records_each_source_and_hands_back_its_id(tmp_path):
+    from re0.workspace import Workspace
+    workspace = Workspace(tmp_path / "ws").open()
+    (answer,) = exchange(
+        [paper_search_call()],
+        ResearchTools(None, httpx.MockTransport(lambda request: httpx.Response(200, content=ATOM))),
+        workspace=workspace)
+    document = answer["result"]["structuredContent"]["documents"][0]
+    identifier = document["source_id"]
+    assert identifier.startswith("src_")
+    stored = workspace.read(identifier)
+    assert stored["tool"] == "search_papers" and stored["origin"] == "tool"
+    # Recorded once: asking again produces the same id rather than a second copy.
+    assert workspace.identifiers() == [identifier]
+    # The id lives in the structured form, not only in prose.
+    assert "source_id" not in answer["result"]["content"][0]["text"]

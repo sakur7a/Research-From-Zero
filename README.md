@@ -190,7 +190,10 @@ skill 脚本和 `re0` 命令走**同一份实现**（`backend/re0/skill_search.p
 re0 doctor                                            # 现在能跑什么；默认不联网、不花钱
 re0 paper search --query "layer decomposition" --start-year 2025
 re0 mcp                                               # 只读工具走 stdio，本机可用
+re0 mcp --workspace ./ws                              # 可选：把工具取得的来源存成稳定 ID
 ```
+
+`mcp` **默认无状态**：不打开目录、不碰文献数据库。只有显式给 `--workspace DIR` 才会把工具取得的来源存下来，每份有**稳定 ID**（按内容寻址，同一来源不会存成两份），可导出/导入。导入**默认只预览**、幂等、**不会自动把论文入文献库**，并且**拒绝来自别的工作区的包**。**模型写出的文字不允许当成来源存进去** —— 工作区里只有工具真正取回的材料。
 
 `doctor` 会分清**不需要模型**的能力（`paper search` 与 `mcp`）和**需要 BYOK** 的独立任务；网络探针**只有**传 `--probe-network` 才会跑，所以日常自检不会产生费用或触发限流。CLI 自己**不会启动第二个 LLM** —— 宿主工具模式和独立 agent 模式是两件事。`re0 paper search --help` 打印的就是 skill 自己的真实参数，不是另一份简化版。
 

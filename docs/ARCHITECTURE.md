@@ -45,6 +45,7 @@ web/agent.html + agent.js        web/index.html + app.js
 | `mcp_server.py` | MCP-over-stdio retrieval surface; reuses the same tool contracts and opens no database |
 | `skill_search.py` | The literature-search capability itself: query, merge, render, verify. Both entry points below call it, so there is no second copy of the logic |
 | `cli.py` | Thin console entry points (`re0 paper search`, `re0 doctor`, `re0 mcp`). Dispatches only; starts no LLM, and `doctor` probes the network only when asked |
+| `workspace.py` | The opt-in source store behind `--workspace`: content-addressed ids over a source's identity only, snapshots of tool results, and an import that previews, stays idempotent and refuses a bundle from another workspace |
 | `result_model.py` | The versioned result shape (`schema_version`) that every exit shares. Unknown fields ride along under `unrecognised` instead of vanishing, and a bounded body states `content_chars`/`excerpt_chars`/`truncated` so a cut body cannot look like a short one |
 | `web/agent-core.js` | Pure status/tool presentation logic, independently tested |
 | `web/agent.js` | Task composer, model settings, polling trace, report and evidence views |
@@ -209,7 +210,13 @@ All write endpoints preserve the original JSON, same-origin and
 
 ### Second surface: MCP over stdio
 
-`re0/mcp_server.py` exposes the same read-only retrieval tools to a foreign agent, and returns
+`re0/mcp_server.py` requires the handshake before any tool request, answers a requested protocol
+version with one it actually implements rather than echoing an unimplemented one, and turns every
+malformed request into a defined JSON-RPC error instead of an exception that would end the loop. Its
+default is stateless: no directory is opened, no database is touched, and `--workspace DIR` is the
+only thing that changes that.
+
+It exposes the same read-only retrieval tools to a foreign agent, and returns
 `structuredContent` beside the text summary. The summary is rendered *from* that structure, so the
 two cannot describe one call differently, and it names any field it did not print rather than
 looking complete. A failed source is listed before the documents, because a source that was not

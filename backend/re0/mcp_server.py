@@ -27,10 +27,15 @@ from pydantic import ValidationError
 from . import result_model
 from .agent.tools import TOOL_TYPES, ResearchTools
 from .providers import ProviderError
+from .workspace import Workspace, WorkspaceError
 
 SERVER_NAME = "re0-research"
 SERVER_VERSION = "0.2.0"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
+# Versions this server actually implements. A request for anything else is answered with a version
+# we do support, never echoed back: agreeing to a protocol we have not implemented is a promise the
+# rest of this file cannot keep.
+SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26")
 # The summary is tighter than the structured body: an agent's context pays for this text, while
 # a client that wants more can read `structuredContent`.
 DOCUMENT_EXCERPT_CHARS = 1500
@@ -120,18 +125,19 @@ def render(structure: dict) -> str:
     return "\n".join(lines)
 
 
-def call_tool(tools: ResearchTools, name: str, arguments: dict, *,
-              web_enabled: bool) -> tuple[str, dict | None, bool]:
+def call_tool(tools: ResearchTools, name: str, arguments: dict, *, web_enabled: bool,
+              workspace: Workspace | None = None) -> tuple[str, dict | None, bool]:
     """Return `(summary_text, structured_content, failed)`.
 
     The structured form is the same object the summary is rendered from, so a consumer reading one
-    cannot be told something the other contradicts.
+    cannot be told something the other contradicts. When a workspace is open, each document is also
+    recorded there and its stable source id travels in the structured content.
     """
     if name not in exposed_names(web_enabled=web_enabled):
         return f"Re0 does not expose this tool here: {name}", None, True
     try:
-        structure = result_model.normalize(tools.execute(name, arguments or {}),
-                                           body_chars=STRUCTURED_BODY_CHARS)
+        payload = tools.execute(name, arguments or {})
+        structure = result_model.normalize(payload, body_chars=STRUCTURED_BODY_CHARS)
     except ValidationError as exc:
         # Report which fields are wrong, not a pydantic traceback.
         fields = [".".join(map(str, error["loc"])) for error in exc.errors()][:10]
@@ -143,46 +149,103 @@ def call_tool(tools: ResearchTools, name: str, arguments: dict, *,
     except Exception:
         # Provider responses are not exception text; never relay a raw traceback.
         return "retrieval failed: check the query and arguments, then retry.", None, True
+    if workspace is not None:
+        # Best effort per document: a source that cannot be stored must not turn a successful
+        # retrieval into a failed call, and the refusal is reported rather than swallowed.
+        raw_documents = [item for item in (payload.get("documents") or []) if isinstance(item, dict)]
+        for document, normalized in zip(raw_documents, structure["documents"]):
+            try:
+                normalized["source_id"] = workspace.record(document, tool=name)
+            except WorkspaceError as exc:
+                normalized["source_id_refused"] = str(exc)
     return render(structure), structure, False
+
+
+class Session:
+    """Protocol state for one connection, plus the workspace when the caller named one."""
+
+    def __init__(self, workspace: Workspace | None = None):
+        self.initialized = False
+        self.negotiated = ""
+        self.workspace = workspace
 
 
 def _reply(identifier, result: dict) -> dict:
     return {"jsonrpc": "2.0", "id": identifier, "result": result}
 
 
-def handle(message: dict, tools: ResearchTools, *, web_enabled: bool):
-    """One JSON-RPC message in, one response out (or None for notifications)."""
+def _error(identifier, code: int, message: str) -> dict:
+    return {"jsonrpc": "2.0", "id": identifier, "error": {"code": code, "message": message}}
+
+
+def handle(message: dict, tools: ResearchTools, *, web_enabled: bool,
+           session: Session | None = None):
+    """One JSON-RPC message in, one response out (or None for notifications).
+
+    Every branch validates rather than assumes: a request that is not an object, a `params` that is
+    not an object, and a `tools/call` without a name all get a defined error instead of an
+    exception. Nothing raises out of here, because a raise would end the loop and take the
+    connection with it.
+    """
+    session = session if session is not None else Session()
+    if not isinstance(message, dict):
+        return _error(None, -32600, "a request must be an object")
     method, identifier = message.get("method"), message.get("id")
-    params = message.get("params") or {}
+    params = message.get("params")
+    params = {} if params is None else params
+    if not isinstance(params, dict):
+        return _error(identifier, -32602, "params must be an object")
+    if message.get("jsonrpc") != "2.0":
+        return _error(identifier, -32600, "jsonrpc must be \'2.0\'")
+    if not isinstance(method, str) or not method:
+        return _error(identifier, -32600, "method must be a non-empty string")
     if identifier is None:
         return None  # notification such as `notifications/initialized`: tolerated, no reply
     if method == "initialize":
-        # Echo the client's version so a newer client still gets a handshake it accepts.
-        return _reply(identifier, {"protocolVersion": params.get("protocolVersion") or DEFAULT_PROTOCOL_VERSION,
+        requested = params.get("protocolVersion")
+        # A version we implement is echoed; anything else gets ours, so the client can decide
+        # whether to continue rather than us agreeing to a protocol we have not built.
+        chosen = requested if requested in SUPPORTED_PROTOCOL_VERSIONS else DEFAULT_PROTOCOL_VERSION
+        session.initialized, session.negotiated = True, chosen
+        return _reply(identifier, {"protocolVersion": chosen,
                                    "capabilities": {"tools": {}},
                                    "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION}})
     if method == "ping":
         return _reply(identifier, {})
+    if method in ("tools/list", "tools/call") and not session.initialized:
+        # The handshake is state, not decoration: a tool request before it is refused rather than
+        # answered under assumptions the client never agreed to.
+        return _error(identifier, -32002, "initialize before using tools")
     if method == "tools/list":
         return _reply(identifier, {"tools": catalog(web_enabled=web_enabled)})
     if method == "tools/call":
-        text, structured, failed = call_tool(tools, params.get("name") or "",
-                                             params.get("arguments") or {}, web_enabled=web_enabled)
+        name, arguments = params.get("name"), params.get("arguments", {})
+        if not isinstance(name, str) or not name:
+            return _error(identifier, -32602, "tools/call needs a string name")
+        if not isinstance(arguments, dict):
+            return _error(identifier, -32602, "arguments must be an object")
+        text, structured, failed = call_tool(tools, name, arguments, web_enabled=web_enabled,
+                                             workspace=session.workspace)
         result = {"content": [{"type": "text", "text": text}], "isError": failed}
         if structured is not None:
             # The machine-readable form travels beside the summary, so no field survives only if
             # the summary happened to mention it.
             result["structuredContent"] = structured
         return _reply(identifier, result)
-    return {"jsonrpc": "2.0", "id": identifier,
-            "error": {"code": -32601, "message": f"Unsupported method: {method}"}}
+    return _error(identifier, -32601, f"Unsupported method: {method}")
 
 
-def serve(stdin=None, stdout=None, tools: ResearchTools | None = None) -> None:
-    """Loop until stdin ends. `tools` is injectable so tests can supply a transport."""
+def serve(stdin=None, stdout=None, tools: ResearchTools | None = None,
+          workspace: Workspace | None = None) -> None:
+    """Loop until stdin ends. `tools` is injectable so tests can supply a transport.
+
+    `workspace` is None by default, and that default is the point: no directory is opened, no
+    database is touched, and nothing is written unless the caller named one.
+    """
     stdin = sys.stdin if stdin is None else stdin
     stdout = sys.stdout if stdout is None else stdout
     tools = ResearchTools(None) if tools is None else tools
+    session = Session(workspace)
     for line in stdin:
         line = line.strip()
         if not line or len(line) > JSON_OBJECT_LIMIT:
@@ -193,14 +256,24 @@ def serve(stdin=None, stdout=None, tools: ResearchTools | None = None) -> None:
             continue
         if not isinstance(message, dict):
             continue
-        answer = handle(message, tools, web_enabled=tools.web_enabled)
+        answer = handle(message, tools, web_enabled=tools.web_enabled, session=session)
         if answer is not None:
             stdout.write(json.dumps(answer, ensure_ascii=False) + "\n")
             stdout.flush()
 
 
-def main() -> None:
-    serve()
+def main(argv=None) -> None:
+    import argparse
+    parser = argparse.ArgumentParser(description="Re0's read-only tools over stdio.")
+    parser.add_argument("--workspace", default=None, metavar="DIR",
+                        help="record retrieved sources in this directory and give them stable ids. "
+                             "Omitted by default: the surface stays stateless and opens nothing")
+    options = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    workspace = None
+    if options.workspace:
+        workspace = Workspace(options.workspace).open()
+        print(f"workspace {workspace.workspace_id} at {workspace.root}", file=sys.stderr)
+    serve(workspace=workspace)
 
 
 if __name__ == "__main__":

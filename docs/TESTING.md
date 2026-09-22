@@ -413,6 +413,44 @@ provider-reported usage: {'prompt_tokens': 11, 'completion_tokens': 3, 'total_to
 **未实测**：`--find-artifacts` 在 10 篇满额时对 GitHub 搜索限流（10 次/分钟）的实际影响；
 `描述与论文标题相符` 这个标记的误判率没有统计（只用样例验证过正向命中）。
 
+## 2026-09-22（Issue #4 第二部分：显式 workspace 与协议加固）
+
+**真实子进程实测**（`python -m re0.mcp_server --workspace <tmp>` + 真实 openalex）：
+
+```
+stderr: workspace ws_64d7eac7fd0840a4 at ...\re0-ws-probe-...
+[2] documents=2 source_ids=['src_9f585846b027950a', 'src_414891ecb8df4e09']
+[3] documents=2 source_ids=['src_9f585846b027950a', 'src_414891ecb8df4e09']
+stored files: 2
+second call repeats the first: True
+files equal one per distinct source: True
+sample origin/tool: tool / search_papers
+```
+
+**探针抓到的真 bug**：第一次运行是 **4 个文件对应 2 个来源** —— `retrieved_at` 时间戳进了哈希，
+**同一来源晚一秒记录就会得到第二个 ID**，"内容寻址"只在同一秒内成立。已修：ID 只覆盖来源的
+**身份字段**（source_url / locator / kind / content / paper / publication / institutions /
+artifact_candidates / artifact_search），记录元数据（时间、工具）不进身份；重复记录保留**首次**的元数据。
+**新增回归测试固定。**
+
+**协议加固（#4 明确要求）**：
+
+- **握手状态**：`initialize` 之前调 `tools/call` → `-32002`，不再按客户端从未同意的假设作答。
+- **支持版本集合**：请求 `2025-11-25`（未实现）**不再回显**，改回我们实现的版本。旧测试曾断言
+  "回显未来版本"，那条断言编码的正是 #4 要求移除的行为，已改写并注明理由。
+- **类型校验**：请求不是对象 / `params` 不是对象 / `tools/call` 缺 name / `jsonrpc != "2.0"` /
+  `method` 不是字符串 → 一律给**定义好的 JSON-RPC 错误**，而不是抛异常结束循环。
+
+**默认无状态的证据**：`test_the_default_surface_still_writes_nothing_and_opens_no_workspace`
+断言不给 `--workspace` 时结构化结果里**没有** `source_id`、目录里**没有**任何文件；既有的
+"不打开文献数据库"测试继续通过。
+
+**未实测**：官方 MCP 客户端对本轮握手 / 错误码 / `structuredContent` 的表现。
+
+**本机环境注意**：本轮沙箱一度拒绝 Python 进程写 `.data/`、`docs/` 与 0 字节的临时文件，
+导致 `pytest` 报 `attempt to write a readonly database`；用 `RE0_DB=<临时路径>` 运行即可正常
+（**182→183 Python 测试全过**），这是环境限制而非代码缺陷。
+
 ## 2026-09-22（Issue #7 首批：评测集与三条通道）
 ### #7 首批：`evals/` 与三条通道（refs #7）
 
