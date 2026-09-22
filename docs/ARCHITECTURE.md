@@ -45,6 +45,7 @@ web/agent.html + agent.js        web/index.html + app.js
 | `mcp_server.py` | MCP-over-stdio retrieval surface; reuses the same tool contracts and opens no database |
 | `skill_search.py` | The literature-search capability itself: query, merge, render, verify. Both entry points below call it, so there is no second copy of the logic |
 | `cli.py` | Thin console entry points (`re0 paper search`, `re0 doctor`, `re0 mcp`). Dispatches only; starts no LLM, and `doctor` probes the network only when asked |
+| `result_model.py` | The versioned result shape (`schema_version`) that every exit shares. Unknown fields ride along under `unrecognised` instead of vanishing, and a bounded body states `content_chars`/`excerpt_chars`/`truncated` so a cut body cannot look like a short one |
 | `web/agent-core.js` | Pure status/tool presentation logic, independently tested |
 | `web/agent.js` | Task composer, model settings, polling trace, report and evidence views |
 | `web/theme.css` + `web/theme.js` | Shared Emilia light/dark palette (every colour a variable) and the persisted theme toggle used by both pages; no hardcoded colours remain in page CSS |
@@ -208,7 +209,11 @@ All write endpoints preserve the original JSON, same-origin and
 
 ### Second surface: MCP over stdio
 
-`re0/mcp_server.py` exposes the same read-only retrieval tools to a foreign agent
+`re0/mcp_server.py` exposes the same read-only retrieval tools to a foreign agent, and returns
+`structuredContent` beside the text summary. The summary is rendered *from* that structure, so the
+two cannot describe one call differently, and it names any field it did not print rather than
+looking complete. A failed source is listed before the documents, because a source that was not
+searched is not an empty result
 without going through HTTP. It is deliberately narrow:
 
 - Tool descriptors are generated from the same `TOOL_TYPES` contracts used inside a

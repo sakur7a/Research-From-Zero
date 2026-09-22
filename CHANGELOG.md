@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### One versioned result, two machine-readable exits (#4)
+
+- Add `backend/re0/result_model.py`: the result shape every exit shares, carrying `schema_version`
+  and a `coverage` block (sources queried, per-source counts, failures, duplicates merged, records
+  dropped by the year window). Fields a version does not describe ride along under `unrecognised`
+  instead of being discarded, and a bounded body states `content_chars`, `excerpt_chars` and
+  `truncated`, so a cut body cannot be mistaken for a short one. This surfaced two real coverage
+  fields, `duplicates_merged` and `dropped_out_of_range`, that had been travelling as unknowns.
+- The MCP surface now returns `structuredContent` beside its text summary, and renders the summary
+  *from* that structure. Before, `render()` printed only the first 1500 characters of each body plus
+  a 1200-character tail of everything else — so `artifact_candidates` and `artifact_search`, which
+  live on the document, were never printed at all, and a failure list could be cut mid-JSON. The
+  summary now names any field it did not print, and lists a failed source before the documents
+  because a source that was not searched is not an empty result.
+- `--json` writes the same versioned structure, so the two machine-readable exits cannot describe
+  one call differently. Documents keep `paper`/`publication`/`artifact_candidates`; the body moves
+  under `documents[].body.excerpt` with its true length recorded.
+
 ### One search implementation, two entry points (#3)
 
 - Add `backend/re0/cli.py` with `re0 paper search`, `re0 doctor` and `re0 mcp`, and move the

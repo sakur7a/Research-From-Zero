@@ -24,6 +24,7 @@ from pathlib import Path
 from re0.agent.tools import ResearchTools
 from re0.env_file import load
 from re0.literature import PUBLICATION_CAVEAT, PUBLICATION_LABELS, artifact_urls
+from re0 import result_model
 from re0.providers import ProviderError, check_resource
 
 # `./.env` is the caller's own working directory and `~/.re0/.env` is this product's, so both
@@ -341,7 +342,8 @@ def build_parser() -> argparse.ArgumentParser:
                              "openreview, crossref. One source per call, so a recheck cannot "
                              "silently widen the query.")
     parser.add_argument("--json", dest="json_path", default=None,
-                        help="write the complete result set here; stdout stays readable")
+                        help="write the versioned result structure here (the same shape the MCP "
+                             "surface returns, with schema_version); stdout stays readable")
     parser.add_argument("--raw", action="store_true", help="print every field instead of a table")
     parser.add_argument("--find-artifacts", type=int, default=10, metavar="N",
                         help="search GitHub and the Hugging Face Hub by each paper's project name for "
@@ -414,8 +416,14 @@ def main(argv=None) -> int:
               f"（共 {len(documents)} 篇；只有标题形如「Name: ...」的论文有项目名可检索）。"
               "候选是名称匹配而非作者身份证明。")
     if args.json_path:
-        Path(args.json_path).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"完整结果已写入 {args.json_path}（含每篇的 artifact_candidates 字段）")
+        # The same versioned structure the MCP surface returns, so the two machine-readable exits
+        # cannot describe the same call differently.
+        structure = result_model.normalize(result)
+        Path(args.json_path).write_text(json.dumps(structure, ensure_ascii=False, indent=2),
+                                        encoding="utf-8")
+        print(f"完整结果已写入 {args.json_path}"
+              f"（schema_version {structure['schema_version']}；文档正文在 documents[].body.excerpt，"
+              "每篇的 artifact_candidates 与 artifact_search 都在）")
     if any((document.get("publication") or {}).get("state") == "preprint" for document in documents):
         print("\n关于发表状态：" + PUBLICATION_CAVEAT)
     print("\nThese are bibliographic records, not full text. Confirm anything load-bearing "

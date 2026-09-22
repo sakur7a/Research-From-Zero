@@ -413,6 +413,38 @@ provider-reported usage: {'prompt_tokens': 11, 'completion_tokens': 3, 'total_to
 **未实测**：`--find-artifacts` 在 10 篇满额时对 GitHub 搜索限流（10 次/分钟）的实际影响；
 `描述与论文标题相符` 这个标记的误判率没有统计（只用样例验证过正向命中）。
 
+## 2026-09-22（Issue #4 第一部分：统一结果模型）
+### #4 第一部分：统一结果模型与 MCP 结构化返回（refs #4）
+
+实测（本机，真实子进程 + 真实 openalex 源）：
+
+```
+[1] initialize  -> protocolVersion=2025-06-18 server=re0-research
+[2] tools/list  -> 7 tools
+[3] tools/call  -> isError=False
+    structuredContent: schema_version=1
+    top-level keys: coverage, documents, query, schema_version, scope, truncation, unrecognised
+    coverage: {"documents": 2, "sources_queried": ["openalex"], "source_counts": {"openalex": 2},
+               "source_failures": [], "incomplete_results": false,
+               "duplicates_merged": 0, "dropped_out_of_range": 0}
+    每篇文档: body.excerpt_chars / content_chars / truncated，pub 带 label
+```
+
+改前 `render()` **只打印 `content` 的前 1500 字和一段 1200 字的 `rest`**，而
+`artifact_candidates` / `artifact_search` 是 document 的独立字段 —— **根本不打印**，
+其余顶层字段还可能被 `rest` 截断在半个 JSON 上。这正是"三个入口三套结果"的根源。
+
+现在：`result_model.normalize()` 产出**版本化结构**（`schema_version=1`），CLI 的 `--json` 与
+MCP 的 `structuredContent` **都写到这一份**；摘要**从结构渲染**，因此不可能与数据不一致。
+两条不变量：**未知字段进 `unrecognised` 而不是被丢弃**（实测真实 payload 的 unrecognised 为
+空，说明字段清单是完整的；先发现 `duplicates_merged`/`dropped_out_of_range` 被当未知，已收进
+`coverage`）；**截断必须写明**（`content_chars` / `excerpt_chars` / `truncated`，短正文与截断
+正文不可混淆）。
+
+**未实测**：官方 `mcp` 客户端对该 `structuredContent` 的渲染（本环境的官方客户端手测记录仍是
+旧版）。默认 stateless、不打开文献数据库的约束保持不变（既有测试继续通过）。**#4 的第二个 PR
+（显式 workspace / 导入）未开始。**
+
 ## 2026-09-22（Issue #3 首个增量）
 
 ### #3 首个增量：统一入口与凭据优先级（未完工的项列在最后）

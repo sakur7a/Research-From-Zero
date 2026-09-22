@@ -7,6 +7,7 @@ would pull a large dependency tree into the test extra.
 """
 import io
 import json
+import pathlib
 
 import httpx
 
@@ -115,3 +116,98 @@ def test_empty_results_are_reported_as_empty_not_as_absence():
     text = answer["result"]["content"][0]["text"]
     assert answer["result"]["isError"] is False and "documents: 0" in text
     assert "not evidence that the work does not exist" in text
+
+class StubTools:
+    """Returns a fixed payload, so the mapping to the versioned structure is what is under test."""
+
+    web_enabled = False
+
+    def __init__(self, payload):
+        self.payload = payload
+
+    def execute(self, name, arguments):
+        return self.payload
+
+
+REVEAL = {
+    "sources_queried": ["openalex"],
+    "source_counts": {"openalex": 1},
+    "source_failures": [{"source": "arxiv", "error": "提供商返回 HTTP 406，本次未完成验证"}],
+    "documents": [{
+        "source_url": "https://arxiv.org/abs/2605.11818",
+        "kind": "paper",
+        "locator": "metadata from openalex",
+        "content": "x" * 9000,
+        "paper": {"title": "RevealLayer", "authors": ["A"], "year": 2026},
+        "publication": {"state": "preprint", "label": "仅见预印本版本", "venue": "arXiv",
+                        "source": "openalex"},
+        "institutions": ["清华大学"],
+        "artifact_candidates": [{"url": "https://github.com/360CVGroup/RevealLayer",
+                                 "origin": "GitHub 名称检索·标识名与项目名一致"}],
+        "artifact_search": "searched",
+        "some_future_field": {"kept": True},
+    }],
+}
+
+
+def test_candidates_and_a_failed_source_survive_the_mcp_output():
+    """The acceptance case for #4: a document carrying `artifact_candidates` and a name-search or
+    source failure must still carry both after a trip through the tool surface. Losing them made a
+    working capability look absent, and a silently dropped failure reads as an empty result."""
+    (answer,) = exchange([paper_search_call()], StubTools(REVEAL))
+    result = answer["result"]
+    text = result["content"][0]["text"]
+    structure = result["structuredContent"]
+    document = structure["documents"][0]
+
+    assert document["artifact_candidates"][0]["url"] == "https://github.com/360CVGroup/RevealLayer"
+    assert document["artifact_search"] == "searched"
+    assert structure["coverage"]["source_failures"][0]["source"] == "arxiv"
+    # And the summary a reader actually sees must not omit them either.
+    assert "github.com/360CVGroup/RevealLayer" in text
+    assert "source failed: arxiv" in text and "not 'not found'" in text
+
+
+def test_a_field_this_version_does_not_describe_is_carried_not_dropped():
+    """A schema may evolve; a consumer must never be made to see less than the tool returned."""
+    from re0 import result_model
+    structure = result_model.normalize(REVEAL)
+    assert structure["documents"][0]["unrecognised"] == {"some_future_field": {"kept": True}}
+    assert result_model.unknown_field_names(structure) == ["some_future_field"]
+    assert "some_future_field" in mcp_server.render(structure)
+
+
+def test_truncation_is_stated_rather_than_implied():
+    """A short body and a cut body must not look alike, in either direction."""
+    from re0 import result_model
+    long_body = result_model.normalize(REVEAL)
+    body = long_body["documents"][0]["body"]
+    assert body["content_chars"] == 9000 and body["truncated"] is True
+    assert long_body["truncation"]["bodies_excerpted"] == 1
+
+    short = result_model.normalize({"documents": [{"content": "short body"}]})
+    assert short["documents"][0]["body"]["truncated"] is False
+    assert short["truncation"]["bodies_excerpted"] == 0
+    assert "not a cut one" not in short["truncation"]["note"]
+
+
+def test_the_summary_is_rendered_from_the_structured_result():
+    """One structure, two adapters: the text cannot contradict the data behind it."""
+    from re0 import result_model
+    structure = result_model.normalize(REVEAL)
+    text = mcp_server.render(structure)
+    assert structure["schema_version"] == result_model.SCHEMA_VERSION
+    assert set(structure) >= {"schema_version", "coverage", "documents", "truncation"}
+    assert "仅见预印本版本" in text
+    assert "institutions: 清华大学" in text
+    # The summary stays bounded even though the structure carries more.
+    assert len(text) < 4000 and mcp_server.STRUCTURED_BODY_CHARS > mcp_server.DOCUMENT_EXCERPT_CHARS
+
+
+def test_the_cli_json_and_the_mcp_structured_content_are_the_same_shape():
+    """Both machine-readable exits call this one function, so neither can describe the same call
+    differently."""
+    from re0 import result_model, skill_search
+    assert mcp_server.result_model is result_model
+    assert "result_model.normalize(result)" in pathlib.Path(skill_search.__file__).read_text(
+        encoding="utf-8")
