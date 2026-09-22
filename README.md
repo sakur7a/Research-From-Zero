@@ -226,13 +226,15 @@ re0 mcp --workspace ./ws                              # 可选：把工具取得
 
 > 当前产品顺序：**先把 skill 做成可用的科研能力，Web 平台复用同一核心**。赛事材料是单独分支。
 
-**会议论文（CVPR／NeurIPS／ACL 这类只发在会议上的）已经被覆盖** —— Crossref、Semantic Scholar、OpenAlex 都索引 proceedings，venue 会报出来。`--venue NAME` 把会议名前置到查询里：
+**会议论文（CVPR／NeurIPS／ACL 这类只发在会议上的）已经被覆盖** —— Crossref、Semantic Scholar、OpenAlex 都索引 proceedings，venue 会报出来。`--venue NAME` 在**能验证的地方是真过滤，不能验证的地方只是查询提示**，并且每次都打印自己属于哪一种：
 
 ```bash
 python skills/re0-paper-search/scripts/paper_search.py --query "diffusion watermarking" --venue CVPR --start-year 2024
 ```
 
-这是**查询提示，不是 API 侧的会议过滤**，原因记在 `SKILL.md` 里：DBLP（最直接的会议索引）现在对非浏览器客户端返回反爬挑战页而不是 JSON；OpenAlex 明确拒绝按 source 名过滤（HTTP 400 "is not a valid field"）；Semantic Scholar 的 `venue=` 参数有文档但一直没验证成功（无 key 时被限流），所以没用。**多接一个源并不能解决这个问题** —— 五个源已经包含数亿条会议记录，缺的是查询形态，不是源的数量。
+OpenAlex 这条路 **2026-09-22 已联网验证**：先用 `/sources?filter=display_name.search:NAME` 把名字解析成稳定的 source ID，再按 `primary_location.source.id` 过滤（`mode=strict`）。**但严格过滤只覆盖解析到的那些 source**，而 OpenAlex 把一个会议系列拆成按届的多条记录 —— 实测搜 `CVPR` 只返回一条 `2022 IEEE/CVF …(CVPR)`。所以解析到的名字一定会打印出来，让读者看见范围被收窄到了哪一届；解析不到就退回查询提示并标 `resolve_failed`，此时结果**更宽而不是更窄**，也没有静默丢记录。Semantic Scholar 的 `venue=` 参数有文档但至今没验证成功（2026-09-22 再次被 HTTP 429 限流），所以仍然只作提示（`mode=hint`）；DBLP 对非浏览器客户端返回反爬挑战页而不是 JSON，不可用；arXiv／Crossref／OpenReview 这里没有 venue 参数。**多接一个源并不能解决剩下的缺口** —— 五个源已经包含数亿条会议记录，缺的是"某一届到底收了哪些"这种问法。
+
+**召回上限现在是"每页条数 × 页数"**：`--max-papers` 是**每页**上限（默认 20、工具上限 25），`--max-pages`（默认 1，最大 10）继续往后翻页。只有 OpenAlex 和 Semantic Scholar 的游标有公开文档，其余三个源只读一页，并在 `coverage.pagination` 里写 `stop_reason=not_supported`，**不假装查全**。`--max-requests`（默认 40）是整次调用跨所有源和查询的总请求上限；预算用完会如实报出来，**不会变成"没有结果"**。`--refresh` 强制重新取而不复用 TTL 内的缓存；缓存按**已配置的凭据种类**分作用域，匿名调用取到的结果绝不会给带凭据的调用复用，反之亦然，作用域里只有凭据的种类名，没有凭据本身。
 
 设计取舍写在 `skills/re0-paper-search/SKILL.md` 里，其中三条值得单独说明：
 

@@ -17,9 +17,9 @@ from __future__ import annotations
 SCHEMA_VERSION = "1"
 BODY_EXCERPT_CHARS = 4000
 
-PAYLOAD_FIELDS = ("scope", "query", "note", "sources_queried", "source_counts", "source_failures",
-                  "incomplete_results", "duplicates_merged", "dropped_out_of_range", "documents",
-                  "audit")
+PAYLOAD_FIELDS = ("scope", "query", "queries", "note", "sources_queried", "source_counts",
+                  "source_failures", "incomplete_results", "duplicates_merged",
+                  "dropped_out_of_range", "coverage", "documents", "audit")
 DOCUMENT_FIELDS = ("source_url", "kind", "locator", "content", "paper", "publication",
                    "preprint_also", "institutions", "artifact_candidates", "artifact_search",
                    "artifact_search_detail", "artifact_outcome", "resource_audits",

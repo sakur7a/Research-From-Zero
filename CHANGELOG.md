@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+### Bounded pagination, one shared request budget, and a venue filter that says which it is (#5)
+
+- Add `backend/re0/scheduling.py`: a `Governor` shared by every client in a call, so a rate limit met
+  by the third request is honoured by the fourth and one ceiling bounds the whole session. It reads
+  the provider's own `Retry-After` (seconds *or* an HTTP date) and GitHub's `x-ratelimit-reset`,
+  clamps both, and falls back to a bounded backoff when neither parses — never to an immediate retry.
+  Retries are capped at three attempts, so they cannot nest. `requests_used`, per-provider counts,
+  seconds deferred and cache statistics are reported in `coverage.scheduling`.
+- `paginate()` owns the stopping rules and gives every ending its own name: `complete`, `empty_page`,
+  `page_budget`, `request_budget`, `cancelled`, `cursor_repeated`, `cursor_rejected`, `rate_limited`,
+  `provider_failed`, `not_supported`. Only `complete` means the source ran out of pages; everything
+  else sets `truncated` and keeps the cursor. A page that fails after earlier pages keeps them.
+- **Only OpenAlex and Semantic Scholar document their cursors, so only they page.** arXiv, Crossref
+  and OpenReview are read once and their coverage row says `not_supported` rather than looking
+  complete. Paging a source whose cursor semantics are undocumented would produce a result set
+  nobody can reproduce.
+- `--max-pages` (default 1, max 10), `--max-requests` (default 40, shared across the whole call) and
+  `--refresh`. `limit` is the *per-page* ceiling, so a paged run's recall ceiling is `limit × max_pages`.
+- **Two bugs found by writing this down.** A page used to cost two budget slots because the paginator
+  and the client each reserved from the same counter — with `--max-requests 1` nothing could be
+  fetched at all. And a source that failed lost its coverage row, so "we asked and it refused" was
+  indistinguishable from "we never asked". Both have regression tests.
+- Responses are cached per session with an explicit TTL, a `stored_at` timestamp and a forced-refresh
+  path. **The credential scope is part of the key**, so an anonymous answer is never served to a
+  credentialed call or vice versa; the scope names which credentials are configured and never their
+  values. The cache lives on the tools instance rather than the module, because a global one would
+  carry answers across users.
+- `--venue NAME` is now a real filter where one can be verified. OpenAlex resolves the name to stable
+  source IDs via `/sources?filter=display_name.search:` and filters on
+  `primary_location.source.id`, and **the resolved source names are always printed** — a conference
+  family is split into per-edition records, so a strict filter on "CVPR" has been observed to cover
+  only the 2022 edition. Elsewhere the name stays a query hint and is labelled `hint`. An HTML body
+  where an API response was expected is now named as an interstitial instead of "could not parse".
+
 ### A resource audit with states that describe the check, not the resource (#6)
 
 - Add `backend/re0/resource_audit.py` and `ResourceAudit` in `models.py`. Discovery, verification and

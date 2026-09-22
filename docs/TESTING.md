@@ -639,3 +639,55 @@ UI 改动必须跑这两个浏览器脚本，所以这不是可选清理。8 处
   checkpoint"）同样**只能由人工确认写入**，自动路径不会产生它。
 - 官方归属在自动路径下永远是 `unconfirmed`，**包括 `microsoft/LoRA` 这种一眼可见的官方仓库**；
   晋升为 `official` 需要人工确认并附可定位交叉证据，本轮没有做过一次真实晋升。
+
+## 2026-09-23（Issue #5-B：有界分页与网络调度）
+
+### 本地实际执行
+
+| 层次 | 命令 | 结果 |
+|---|---|---|
+| Python 全量 | `python -m pytest` | **277 passed**（#6 之后是 226 项，本轮 +51：新增 `tests/test_scheduling.py` 34 项，`test_literature.py` +17） |
+| JS 单测 | `npm test` | **31 passed** |
+| JS 语法 | `npm run check` | 退出码 0 |
+
+### 真实网络实测（无模型 Key、无 `GITHUB_TOKEN`，2026-09-22/23）
+
+1. **OpenAlex 游标分页**：`/works?search=image layer decomposition&per-page=5&cursor=*` 返回 5 条加
+   `meta.next_cursor`；带该游标的第二页返回另外 5 条并继续给游标。分页链路是**实测通的**，不只靠 fixture。
+2. **OpenAlex 会议过滤（strict 路径）**：`/sources?filter=display_name.search:CVPR&per-page=25` 返回
+   `count: 1`，唯一一条是 `S4363607701 / 2022 IEEE/CVF Conference on Computer Vision and Pattern
+   Recognition (CVPR)`。**这是一个必须写下来的坑**：OpenAlex 把会议系列拆成按届的多个 source，只取第一个
+   命中就会把"CVPR"静默收窄成"CVPR 2022"，而输出看起来完全像一个正常工作的过滤器。因此解析到的 source
+   名称一律打印，`coverage.venue_filter.per_source[].resolved_names` 也带着它们。用
+   `primary_location.source.id:S4363607701` 过滤 `image layer decomposition` 返回 `count: 23`，
+   前 5 条全部标 `2022 IEEE/CVF CVPR`，过滤本身确实生效。
+3. **端到端 CLI**：`--query "image layer decomposition" --sources openalex --max-papers 5 --max-pages 2
+   --venue CVPR --find-artifacts 0` 的实际输出：
+   `per-source hits: openalex=10 · 10 unique (0 duplicates merged) · coverage: state=ok attempts=1
+   succeeded=1 failed=0 · requests=3/40 cache_hits=0`，随后三行分别是严格过滤命中的 source 名、
+   `分页未读完（openalex…）：stop=page_budget pages=2`、`请求预算：3/40；缓存命中 0 次（TTL 900.0s，
+   作用域 anonymous）`。**3 次请求 = 1 次 source 解析 + 2 页**，与预算计数一致。
+4. **Semantic Scholar `venue=` 参数仍未验证**：本次探测 `/graph/v1/paper/search` 直接返回 **HTTP 429**
+   （无 Key）。按 #5 的"未完成验证时保留 `venue_hint`"，该源仍走查询提示并标 `mode=hint`，不对外称为
+   过滤。这条 429 同时是 `Retry-After`／退避路径的真实触发样本。
+
+### 本轮由测试暴露并修掉的两个真 bug
+
+- **一页消耗两个预算名额**：分页器 `take()` 与客户端 `_attempt()` 各向同一个计数器申请一次，于是
+  `--max-requests 1` 时任何请求都发不出去（openalex 自己就被判超预算）。改为只有真正发请求的客户端
+  `acquire()`，分页器只做不占名额的 `ensure_available()` 预检。回归测试
+  `test_a_page_costs_exactly_one_request_not_one_per_layer`。
+- **失败的源丢掉 coverage 行**：`except` 分支只在 `plan.outcomes` 为空时补行，而连接器抛错前已经写过一行，
+  于是"问了但被拒"与"根本没问"在 coverage 里长得一样。改为成功与失败走同一条路径。回归测试
+  `test_an_exhausting_rate_limit_is_a_failure_of_the_source_not_an_empty_result`。
+
+### 未实测／仍缺
+
+- Semantic Scholar 的 offset 分页只有 fixture 覆盖，**没有联网验证过**（本次探测被 429 挡住）；
+  `offset+limit ≤ 1000` 的上限同样只是按文档实现。
+- 没有 `GITHUB_TOKEN`，`x-ratelimit-reset` 路径只有单元测试，没有真实 GitHub 限流样本。
+- 缓存不跨进程：作用域是 `ResearchTools` 实例（一次会话），进程停止即失效。这是有意的——全局缓存会把
+  一个用户带凭据的答案端给另一个用户的匿名调用（见 #13）。
+- `Retry-After` 的 HTTP-date 形式只有单元测试，没有真实提供商发过这种形式。
+- #5 验收里"CLI/MCP/Agent 三个入口保留相同 coverage"本轮只验证了 CLI 与工具层；MCP `structuredContent`
+  走同一个 `result_model.normalize()`，`coverage` 已加入 `PAYLOAD_FIELDS`，但没有单独的 MCP 端到端断言。

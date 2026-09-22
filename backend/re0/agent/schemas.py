@@ -110,6 +110,20 @@ class PaperSearchArgs(SearchArgs):
     query: str | None = Field(default=None, min_length=1, max_length=300)
     start_year: int | None = Field(default=None, ge=1800, le=2100)
     end_year: int | None = Field(default=None, ge=1800, le=2100)
+    # Paging is offered only where the cursor semantics are documented (OpenAlex, Semantic
+    # Scholar). Every other source is read once and says so, rather than being paged on a guess
+    # that silently stops early. `limit` is the per-page ceiling, so a paged run's recall
+    # ceiling is limit * max_pages.
+    max_pages: int = Field(default=1, ge=1, le=10)
+    # Shared across every source in the call, so a session cannot spend more than it was given
+    # no matter how many (query, source) pairs it walks.
+    max_requests: int = Field(default=40, ge=1, le=200)
+    # A venue constraint. Where a service can filter on a resolved stable source ID it does, and
+    # the coverage block names the sources it resolved to; everywhere else the name stays a query
+    # hint, because an unverified filter must never be presented as one.
+    venue: str = Field(default="", max_length=200)
+    # Force a re-fetch instead of serving a cached response inside its TTL.
+    refresh: bool = False
 
     @model_validator(mode="after")
     def ordered_years(self):

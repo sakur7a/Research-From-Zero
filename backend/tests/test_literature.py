@@ -207,11 +207,33 @@ def test_every_source_failing_is_an_error_not_an_empty_result():
 def test_a_source_returning_junk_is_reported_rather_than_crashing():
     def junk(request):
         if request.url.host == "api.openalex.org":
-            return httpx.Response(200, content=b"<html>not json</html>")
+            return httpx.Response(200, content=b'{"results": [truncated mid-array',
+                                 headers={"content-type": "application/json"})
         return router(request)
 
     result = run(junk)
     assert result["source_failures"] == [{"source": "openalex", "error": "提供商返回了无法解析的数据"}]
+    assert len(result["documents"]) == 2
+
+
+def test_an_html_interstitial_is_named_as_one_not_as_unparseable_data():
+    """A 200 carrying an HTML page is an anti-scrape wall or a moved endpoint.
+
+    Reporting it as "could not parse" would be technically true and practically useless: the
+    reader needs to know the request was intercepted, not that the service sent odd JSON.
+    """
+    def wall(request):
+        if request.url.host == "api.openalex.org":
+            return httpx.Response(200, content=b"<!DOCTYPE html><html><body>Are you a robot?</body>",
+                                  headers={"content-type": "text/html; charset=utf-8"})
+        return router(request)
+
+    result = run(wall)
+    error = result["source_failures"][0]["error"]
+    assert "HTML 页面" in error and "反爬" in error
+    assert "无法解析的数据" not in error
+    # The body is a remote-controlled string; it must not be echoed back to the caller.
+    assert "Are you a robot" not in error
     assert len(result["documents"]) == 2
 
 
@@ -465,12 +487,24 @@ def test_the_skill_declares_another_apps_directory_off_limits():
 
 
 def test_a_venue_hint_is_prepended_and_stays_optional():
-    module = load_skill_module()
-    # A query hint, because DBLP answers non-browsers with an anti-bot page and OpenAlex
-    # rejects a source-name filter — there is no API-side venue filter to call.
-    assert module.effective_query("diffusion watermarking", "CVPR") == "CVPR diffusion watermarking"
-    assert module.effective_query("diffusion watermarking", None) == "diffusion watermarking"
-    assert module.effective_query("diffusion watermarking", "") == "diffusion watermarking"
+    """The hint is applied per source, by the tool, and stays optional.
+
+    It used to be applied by the CLI before the request was built, which could not work once a
+    real filter existed: whether a source can filter on a stable venue ID is only known after
+    asking it. So the CLI passes the name through unchanged and the tool decides per source.
+    """
+    result = run(router, payload={"query": "diffusion watermarking", "limit": 5,
+                                  "sources": ["arxiv"], "venue": "CVPR"})
+    attempt = result["coverage"]["attempts"][0]
+    assert attempt["query"] == "diffusion watermarking", "the caller's query is not rewritten"
+    assert attempt["effective_query"] == "CVPR diffusion watermarking"
+    row = result["coverage"]["venue_filter"]["per_source"][0]
+    assert row["mode"] == "hint" and "不是严格过滤" in row["label"]
+
+    plain = run(router, payload={"query": "diffusion watermarking", "limit": 5, "sources": ["arxiv"]})
+    assert plain["coverage"]["attempts"][0]["effective_query"] == "diffusion watermarking"
+    assert plain["coverage"]["venue_filter"]["requested"] == ""
+    assert plain["coverage"]["venue_filter"]["per_source"] == []
 
 
 def test_the_verification_budget_is_global_and_unchecked_links_are_still_listed(monkeypatch, capsys):
@@ -946,3 +980,259 @@ def test_merge_records_accumulates_the_queries_that_found_a_work():
     merged, duplicates = merge_records([first, second])
     assert duplicates == 1
     assert merged[0]["queries"] == ["layer decomposition", "layered image generation"]
+
+
+# --- #5-B: bounded pagination, shared budgets, provider deferrals, venue filters ------------
+
+import re0.agent.tools as tools_module  # noqa: E402  (after the fixtures it patches)
+
+OPENALEX_PAGE1 = {"results": OPENALEX["results"], "meta": {"count": 2, "next_cursor": "cursor-2"}}
+OPENALEX_PAGE2 = {"results": [{"id": "https://openalex.org/W2", "title": "A Second Page Record",
+                               "publication_year": 2023,
+                               "primary_location": {"source": {"display_name": "FixtureConf"}}}],
+                  "meta": {"count": 2, "next_cursor": None}}
+OPENALEX_SOURCES = {"results": [
+    {"id": "https://openalex.org/S4363607701", "type": "conference",
+     "display_name": "2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)"}]}
+
+
+def paged_openalex(request):
+    if request.url.host == "api.openalex.org" and request.url.path == "/works":
+        cursor = request.url.params.get("cursor")
+        return httpx.Response(200, json=OPENALEX_PAGE1 if cursor in (None, "*") else OPENALEX_PAGE2)
+    return router(request)
+
+
+@pytest.fixture
+def slept(monkeypatch):
+    """Replace the governor's sleep so a Retry-After window is recorded without being waited."""
+    waits = []
+    real = tools_module.Governor
+
+    def factory(**kwargs):
+        kwargs["sleep"] = waits.append
+        return real(**kwargs)
+
+    monkeypatch.setattr(tools_module, "Governor", factory)
+    return waits
+
+
+def pages_of(result, source):
+    return [row for row in result["coverage"]["pagination"] if row["source"] == source]
+
+
+def test_a_documented_source_walks_pages_until_the_cursor_runs_out():
+    result = run(paged_openalex, payload={"query": "layout", "limit": 5,
+                                          "sources": ["openalex"], "max_pages": 4})
+    row = pages_of(result, "openalex")[0]
+    assert (row["pages_fetched"], row["stop_reason"], row["truncated"]) == (2, "complete", False)
+    assert row["pagination_documented"] is True and row["records"] == 2
+    assert "A Second Page Record" in [document["paper"]["title"] for document in result["documents"]]
+
+
+def test_the_page_ceiling_stops_the_walk_and_keeps_the_cursor_visible():
+    result = run(paged_openalex, payload={"query": "layout", "limit": 5,
+                                          "sources": ["openalex"], "max_pages": 1})
+    row = pages_of(result, "openalex")[0]
+    assert (row["pages_fetched"], row["stop_reason"], row["truncated"]) == (1, "page_budget", True)
+    assert row["next_cursor"] == "cursor-2", "where the walk stopped has to be resumable"
+    assert "A Second Page Record" not in [d["paper"]["title"] for d in result["documents"]]
+
+
+def test_a_source_without_documented_paging_says_so_in_the_coverage():
+    result = run(router, payload={"query": "layout", "limit": 5,
+                                  "sources": ["arxiv", "crossref"], "max_pages": 5})
+    for source in ("arxiv", "crossref"):
+        row = pages_of(result, source)[0]
+        assert row["stop_reason"] == "not_supported" and row["pagination_documented"] is False
+        assert row["truncated"] is True and row["pages_fetched"] == 1
+        assert "未分页不等于已查全" in row["detail"]
+
+
+def test_the_shared_request_ceiling_is_never_exceeded_and_the_stop_is_reported():
+    result = run(router, payload={"query": "layout", "limit": 5,
+                                  "sources": ["openalex", "crossref", "openreview"],
+                                  "max_requests": 1})
+    scheduling = result["coverage"]["scheduling"]
+    assert scheduling["requests_used"] == 1 == scheduling["max_requests"]
+    assert result["coverage"]["state"] == "partial"
+    assert [failure["source"] for failure in result["source_failures"]] == ["crossref", "openreview"]
+    assert "共享请求预算" in result["source_failures"][0]["error"]
+    # The page that was never requested is recorded as a budget stop, not as a provider failure:
+    # one is this run's own limit, the other is the service's answer, and they are not the same.
+    assert pages_of(result, "crossref")[0]["stop_reason"] == "request_budget"
+    assert pages_of(result, "openreview")[0]["stop_reason"] == "request_budget"
+
+
+def test_a_rate_limit_is_waited_out_using_the_providers_own_retry_after(slept):
+    seen = {"n": 0}
+
+    def flaky(request):
+        if request.url.host == "api.openalex.org":
+            seen["n"] += 1
+            if seen["n"] == 1:
+                return httpx.Response(429, headers={"Retry-After": "3"}, content=b"slow down")
+            return httpx.Response(200, json=OPENALEX)
+        return router(request)
+
+    result = run(flaky, payload={"query": "layout", "limit": 5, "sources": ["openalex"]})
+    assert slept == [3.0], "the provider's own instruction sets the wait"
+    assert result["coverage"]["scheduling"]["deferred_seconds"] == {"api.openalex.org": 3.0}
+    assert result["coverage"]["scheduling"]["retries"] == {}, "a success clears the retry count"
+    assert len(result["documents"]) == 1, "the retry recovered the page rather than losing it"
+
+
+def test_an_exhausting_rate_limit_is_a_failure_of_the_source_not_an_empty_result(slept):
+    def blocked(request):
+        if request.url.host == "api.openalex.org":
+            return httpx.Response(429, headers={"Retry-After": "1"}, content=b"slow down")
+        return router(request)
+
+    # Two sources, so the run survives and its coverage can be read: when every source fails the
+    # tool raises instead of returning an empty list, which its own test pins separately.
+    result = run(blocked, payload={"query": "layout", "limit": 5,
+                                   "sources": ["openalex", "crossref"]})
+    assert len(slept) == 2, "bounded: one retry, not an unbounded loop"
+    assert result["coverage"]["state"] == "partial"
+    assert pages_of(result, "openalex")[0]["stop_reason"] == "rate_limited"
+    assert "限流" in result["source_failures"][0]["error"]
+    assert result["coverage"]["scheduling"]["deferred_seconds"] == {"api.openalex.org": 2.0}
+    assert pages_of(result, "crossref")[0]["stop_reason"] == "not_supported"
+
+
+def test_a_repeat_inside_one_session_is_served_from_the_cache_and_refresh_is_not():
+    calls = {"n": 0}
+
+    def counting(request):
+        if request.url.host == "api.openalex.org":
+            calls["n"] += 1
+        return router(request)
+
+    tools = ResearchTools(None, httpx.MockTransport(counting))
+    payload = {"query": "layout", "limit": 5, "sources": ["openalex"]}
+    first = tools.execute("search_papers", dict(payload))
+    assert first["coverage"]["scheduling"]["cache"]["hits"] == 0
+    second = tools.execute("search_papers", dict(payload))
+    assert calls["n"] == 1, "the same question in one session is not asked twice"
+    assert second["coverage"]["scheduling"]["cache"]["hits"] == 1
+    third = tools.execute("search_papers", dict(payload, refresh=True))
+    assert calls["n"] == 2, "refresh re-fetches instead of trusting the TTL"
+    cache = third["coverage"]["scheduling"]["cache"]
+    assert cache["refreshed"] == 1 and cache["hits"] == 1, "a forced refresh is not counted as a hit"
+    assert "会话累计" in cache["note"], "the counters outlive the call and must say so"
+
+
+def test_a_cache_built_anonymously_is_not_reused_once_a_key_is_configured(monkeypatch):
+    """The entitlement is part of the cache key, in both directions.
+
+    Serving an anonymous answer to a credentialed call would under-report; serving a credentialed
+    answer to an anonymous one would disclose records the caller is not entitled to see.
+    """
+    calls = {"n": 0}
+
+    def counting(request):
+        if request.url.host == "api.openalex.org":
+            calls["n"] += 1
+        return router(request)
+
+    monkeypatch.delenv("OPENALEX_API_KEY", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    tools = ResearchTools(None, httpx.MockTransport(counting))
+    payload = {"query": "layout", "limit": 5, "sources": ["openalex"]}
+    tools.execute("search_papers", dict(payload))
+    tools.execute("search_papers", dict(payload))
+    assert calls["n"] == 1
+    monkeypatch.setenv("OPENALEX_API_KEY", "openalex-secret-value")
+    result = tools.execute("search_papers", dict(payload))
+    assert calls["n"] == 2, "a changed entitlement invalidates the entry"
+    assert result["coverage"]["scheduling"]["cache_scope"] == "openalex"
+    # The counters are the session's, so the earlier anonymous hit is still in them; what proves
+    # the point is that the credentialed call was a miss and had to go back to the network.
+    assert result["coverage"]["scheduling"]["cache"]["hits"] == 1
+    assert result["coverage"]["scheduling"]["cache"]["stores"] == 2
+
+
+def test_a_venue_resolves_to_a_stable_source_id_and_the_names_it_matched_are_shown():
+    seen = []
+
+    def venue_router(request):
+        if request.url.host == "api.openalex.org" and request.url.path == "/sources":
+            seen.append(("sources", request.url.params.get("filter")))
+            return httpx.Response(200, json=OPENALEX_SOURCES)
+        if request.url.host == "api.openalex.org" and request.url.path == "/works":
+            seen.append(("works", request.url.params.get("filter"), request.url.params.get("search")))
+            return httpx.Response(200, json=OPENALEX)
+        return router(request)
+
+    result = run(venue_router, payload={"query": "layer decomposition", "limit": 5,
+                                        "sources": ["openalex"], "venue": "CVPR"})
+    assert seen[0] == ("sources", "display_name.search:CVPR")
+    assert "primary_location.source.id:S4363607701" in seen[1][1]
+    assert seen[1][2] == "layer decomposition", "a strict filter does not also pollute the query"
+    row = result["coverage"]["venue_filter"]["per_source"][0]
+    assert row["mode"] == "strict" and row["resolved_id"] == "S4363607701"
+    assert row["resolved_names"] == [OPENALEX_SOURCES["results"][0]["display_name"]]
+    assert "只覆盖" in row["detail"], "a family split into editions must not look fully covered"
+
+
+def test_a_venue_that_does_not_resolve_falls_back_to_a_hint_and_says_it_is_one():
+    def venue_router(request):
+        if request.url.host == "api.openalex.org" and request.url.path == "/sources":
+            return httpx.Response(200, json={"results": []})
+        if request.url.host == "api.openalex.org" and request.url.path == "/works":
+            seen.append(request.url.params.get("filter", ""))
+            searches.append(request.url.params.get("search"))
+            return httpx.Response(200, json=OPENALEX)
+        return router(request)
+
+    seen, searches = [], []
+    result = run(venue_router, payload={"query": "layer decomposition", "limit": 5,
+                                        "sources": ["openalex"], "venue": "NoSuchVenue"})
+    assert "primary_location.source.id" not in seen[0]
+    assert searches[0] == "NoSuchVenue layer decomposition"
+    row = result["coverage"]["venue_filter"]["per_source"][0]
+    assert row["mode"] == "resolve_failed" and "更宽而不是更窄" in row["detail"]
+
+
+def test_a_source_without_a_verified_venue_filter_gets_a_hint_and_is_labelled_a_hint():
+    result = run(router, payload={"query": "layer decomposition", "limit": 5,
+                                  "sources": ["semanticscholar", "arxiv"], "venue": "CVPR"})
+    modes = {row["source"]: row["mode"] for row in result["coverage"]["venue_filter"]["per_source"]}
+    assert modes == {"semanticscholar": "hint", "arxiv": "hint"}
+    assert "不是严格过滤" in result["coverage"]["venue_filter"]["per_source"][0]["label"]
+    attempts = {row["source"]: row for row in result["coverage"]["attempts"]}
+    assert attempts["arxiv"]["effective_query"] == "CVPR layer decomposition"
+    assert attempts["arxiv"]["query"] == "layer decomposition", "the original query stays visible"
+
+
+def test_a_venue_name_that_matches_an_unrelated_source_is_not_used_as_a_filter():
+    """`display_name.search` is a relevance search, so a hit has to be checked, not trusted."""
+    def venue_router(request):
+        if request.url.host == "api.openalex.org" and request.url.path == "/sources":
+            return httpx.Response(200, json={"results": [
+                {"id": "https://openalex.org/S1", "display_name": "Some Unrelated Journal"}]})
+        return paged_openalex(request)
+
+    result = run(venue_router, payload={"query": "layout", "limit": 5,
+                                        "sources": ["openalex"], "venue": "CVPR"})
+    row = result["coverage"]["venue_filter"]["per_source"][0]
+    assert row["mode"] == "resolve_failed" and row["resolved_id"] == ""
+
+
+def test_every_attempt_keeps_its_own_pagination_row_across_queries_and_sources():
+    result = run(paged_openalex, payload={"queries": ["layer", "decomposition"], "limit": 5,
+                                          "sources": ["openalex", "arxiv"], "max_pages": 2})
+    rows = result["coverage"]["pagination"]
+    assert {(row["query"], row["source"]) for row in rows} == {
+        ("layer", "openalex"), ("layer", "arxiv"),
+        ("decomposition", "openalex"), ("decomposition", "arxiv")}
+    assert all(row["query"] in row["effective_query"] for row in rows)
+
+
+def test_the_scheduling_block_names_the_entitlement_without_naming_a_secret(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("OPENALEX_API_KEY", "openalex-secret-value")
+    result = run(router, payload={"query": "layout", "limit": 5, "sources": ["openalex"]})
+    scheduling = result["coverage"]["scheduling"]
+    assert scheduling["cache_scope"] == "openalex"
+    assert "openalex-secret-value" not in json.dumps(result, ensure_ascii=False, default=str)

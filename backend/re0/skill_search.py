@@ -37,22 +37,6 @@ SURVEY_WORDS = ("survey", "review", "overview", "systematic", "综述")
 EXCERPT_CHARS = 1200
 
 
-def effective_query(query: str, venue: str | None) -> str:
-    """Prepend a venue name to the query.
-
-    This is a **query hint, not an API-side venue filter**, because the two filter routes
-    are closed: DBLP — the obvious conference index — now answers non-browser clients with an
-    anti-bot challenge page instead of JSON, and OpenAlex rejects a source-name filter
-    outright (`primary_location.source.display_name.search is not a valid field`). S2 does
-    document a `venue` parameter but it could not be verified while rate-limited, so it is
-    not used. Putting the venue in the query is verified: "CVPR diffusion model watermarking"
-    returns the CVPR paper with its venue named.
-    """
-    if not venue:
-        return query
-    return f"{venue} {query}".strip()
-
-
 def load_credentials() -> str:
     """Fill unset variables from a credential file. Reports the file and how many names were set,
     never a value.
@@ -111,6 +95,11 @@ def heading(result: dict, args) -> str:
                  f"attempts={len(coverage.get('attempts') or [])} "
                  f"succeeded={len(coverage.get('succeeded') or [])} "
                  f"failed={len(coverage.get('failed') or [])}")
+        scheduling = coverage.get("scheduling") or {}
+        if scheduling:
+            cache = scheduling.get("cache") or {}
+            line += (f" · requests={scheduling.get('requests_used')}/{scheduling.get('max_requests')}"
+                     f" cache_hits={cache.get('hits', 0)}")
         queries = result.get("queries") or []
         if len(queries) > 1:
             line += f" · {len(queries)} queries merged, each record keeps the ones that found it"
@@ -237,6 +226,40 @@ def print_audit(document: dict) -> None:
         print(f"     ↑ 另有 {unchecked} 条未核验；提高 --verify 可继续核验")
 
 
+def print_coverage_detail(result: dict) -> None:
+    """What was actually asked, how far it got, and what was left unread.
+
+    Printed rather than left in the JSON only: a page ceiling, a spent request budget or an
+    unapplied venue filter each change what the result set means, and a reader who sees only the
+    list cannot recover that from it.
+    """
+    coverage = result.get("coverage") or {}
+    rows = coverage.get("pagination") or []
+    venue = coverage.get("venue_filter") or {}
+    for row in venue.get("per_source") or []:
+        names = "；".join(row.get("resolved_names") or [])
+        print(f"会议/期刊条件（{row['source']}）：{row.get('label', row['mode'])}"
+              + (f" — 实际匹配到的 source：{names}" if names else ""))
+        if row.get("detail"):
+            print(f"  {row['detail']}")
+    if venue.get("requested") and venue.get("not_applied"):
+        print(f"会议/期刊条件未生效于：{'、'.join(venue['not_applied'])}（结果没有按会议收窄）")
+    for row in [item for item in rows
+                if item.get("truncated") and item.get("stop_reason") != "not_supported"][:6]:
+        print(f"分页未读完（{row['source']}, query={row.get('query')}）：stop={row['stop_reason']} "
+              f"pages={row['pages_fetched']} — {row['detail']}")
+    unsupported = sorted({row["source"] for row in rows if row.get("stop_reason") == "not_supported"})
+    if unsupported:
+        print(f"未分页来源（只读一页，不代表已查全）：{'、'.join(unsupported)}")
+    scheduling = coverage.get("scheduling") or {}
+    if scheduling:
+        cache, deferred = scheduling.get("cache") or {}, scheduling.get("deferred_seconds") or {}
+        print(f"请求预算：{scheduling.get('requests_used')}/{scheduling.get('max_requests')}"
+              f"；缓存命中 {cache.get('hits', 0)} 次（TTL {cache.get('ttl_seconds')}s，"
+              f"作用域 {scheduling.get('cache_scope')}）"
+              + (f"；按提供商 Retry-After 等待 {deferred}" if deferred else ""))
+
+
 def print_audit_coverage(coverage: dict) -> None:
     """The run's own denominators.
 
@@ -304,10 +327,28 @@ def build_parser() -> argparse.ArgumentParser:
                              "the coverage block lists every (query, source) attempt. Use this "
                              "rather than running the command repeatedly and merging by hand.")
     parser.add_argument("--venue", default=None, metavar="NAME",
-                        help="prepend a venue name (CVPR, NeurIPS, ACL…) to each query. A query hint, "
-                             "not an API-side venue filter — see effective_query() for why.")
+                        help="constrain to a venue (CVPR, NeurIPS, ACL…). Where a stable source ID "
+                             "resolves (OpenAlex) the service filters on it and the resolved source "
+                             "names are printed, because a conference family is split into per-edition "
+                             "records and the filter only covers what resolved. Everywhere else the "
+                             "name is prepended to the query as a hint and is labelled as one; it is "
+                             "never reported as a strict filter.")
     parser.add_argument("--start-year", type=int, default=None)
     parser.add_argument("--end-year", type=int, default=None)
+    parser.add_argument("--max-pages", type=int, default=1, metavar="N",
+                        help="walk up to N pages per (query, source), default 1. limit is the "
+                             "PER-PAGE ceiling, so the recall ceiling becomes limit*N. Only OpenAlex "
+                             "and Semantic Scholar document their cursors; every other source is read "
+                             "once and its coverage row says stop_reason=not_supported instead of "
+                             "pretending to be complete.")
+    parser.add_argument("--max-requests", type=int, default=40, metavar="N",
+                        help="ceiling on HTTP requests for the whole call, shared by every source and "
+                             "query, default 40. A spent budget is reported as request_budget in the "
+                             "coverage; it is never turned into 'no results'.")
+    parser.add_argument("--refresh", action="store_true",
+                        help="re-fetch instead of serving a cached response inside its TTL. Cached "
+                             "responses are scoped by which credentials are configured, so an "
+                             "anonymous answer is never reused for a credentialed call.")
     parser.add_argument("--max-papers", type=int, default=20,
                         help="per source (default 20, tool maximum 25). This is the recall ceiling: "
                              "raise it before adding more queries.")
@@ -361,10 +402,6 @@ def main(argv=None) -> int:
     if len(queries) > 5:
         parser.error("--queries takes at most 5 phrases; more than that is better split into "
                      "separate runs so each stays inside its own budget")
-    queries = [effective_query(item, args.venue) for item in queries]
-    if args.venue:
-        print(f"query hint: venue '{args.venue}' prepended to {len(queries)} query(ies) "
-              "(not an API-side filter)")
     if args.sources == "all":
         chosen_sources = None
     else:
@@ -372,7 +409,11 @@ def main(argv=None) -> int:
         if not chosen_sources or len(chosen_sources) > 5:
             parser.error("--sources takes 'all', one source, or a comma-separated subset of at most 5")
     payload = {"limit": min(25, max(1, args.max_papers)),
-               "start_year": args.start_year, "end_year": args.end_year}
+               "start_year": args.start_year, "end_year": args.end_year,
+               "max_pages": min(10, max(1, args.max_pages)),
+               "max_requests": min(200, max(1, args.max_requests)), "refresh": args.refresh}
+    if args.venue:
+        payload["venue"] = args.venue
     if len(queries) == 1:
         payload["query"] = queries[0]
     else:
@@ -390,6 +431,7 @@ def main(argv=None) -> int:
         return 2
 
     print(heading(result, args))
+    print_coverage_detail(result)
     if result.get("source_failures"):
         print("source failures (these sources were not searched; this is not 'not found'):", file=sys.stderr)
         for failure in result["source_failures"]:

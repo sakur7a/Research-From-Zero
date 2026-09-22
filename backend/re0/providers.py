@@ -19,20 +19,46 @@ from urllib.parse import quote, urlsplit
 import httpx
 
 from .models import Evidence, Observation, PaperInput, normalize_arxiv, normalize_doi
+from .scheduling import BudgetExhausted, Cancelled
 
 ALLOWED_HOSTS = {"api.github.com", "huggingface.co", "export.arxiv.org", "api.crossref.org",
                  "api.openalex.org", "api.semanticscholar.org", "api2.openreview.net"}
 MAX_BYTES = 2 * 1024 * 1024
 SEGMENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,150}$")
+# An HTML body where an API response was expected is an interstitial: an anti-scrape page, a
+# captive portal or a moved endpoint. Read as data it becomes "no results", which turns a
+# blocked request into a negative finding about the world.
+HTML_MARKERS = (b"<!doctype html", b"<html", b"<head", b"<body")
 _arxiv_lock = threading.Lock()
 _arxiv_last = 0.0
 
 
 class ProviderError(Exception):
-    def __init__(self, message: str, status: str = "indeterminate", http_status: int | None = None):
+    """`retryable` marks the failures that are about timing rather than about the resource: a
+    429, a 5xx, a dropped connection. Retrying those is safe; retrying a 404 is not, and
+    treating the two alike is how a missing record gets reported as a flaky one.
+
+    `headers` is kept so the scheduler can read the provider's own Retry-After. It never
+    travels into a message, an observation or a log.
+    """
+
+    def __init__(self, message: str, status: str = "indeterminate", http_status: int | None = None,
+                 *, retryable: bool = False, headers: dict | None = None, kind: str = ""):
         super().__init__(message)
         self.status = status
         self.http_status = http_status
+        self.retryable = retryable
+        self.headers = headers or {}
+        # "" for anything the provider did, "budget"/"cancelled" for what this run did to itself.
+        # The distinction survives the translation into a ProviderError so that coverage can say
+        # which happened; `status` stays inside the observation vocabulary and is not reused for it.
+        self.kind = kind
+
+
+def looks_like_html(raw: bytes, content_type: str = "") -> bool:
+    if "text/html" in (content_type or "").lower():
+        return True
+    return raw[:512].lstrip().lower().startswith(HTML_MARKERS)
 
 
 class ProviderClient:
@@ -45,25 +71,43 @@ class ProviderClient:
     """
 
     def __init__(self, transport: httpx.BaseTransport | None = None, *,
-                 max_calls: int = 8, seconds: float = 35, read_timeout: float = 8):
+                 max_calls: int = 8, seconds: float = 35, read_timeout: float = 8,
+                 governor=None, cache_scope: str = "", refresh: bool = False):
+        """`governor` is optional so that a single bounded check keeps working on its own.
+
+        When one is supplied it becomes the authority on how many requests this session may
+        make in total, when a rate-limited provider may be approached again, and whether a
+        response is still fresh enough to reuse. `cache_scope` identifies the credential
+        context; it is part of the cache key, so a credentialed answer is never served to a
+        call that has no credential, or the other way round.
+        """
         self.client = httpx.Client(transport=transport, timeout=read_timeout, follow_redirects=False, trust_env=False)
         self.max_calls, self.deadline = max_calls, time.monotonic() + seconds
         self.read_timeout = read_timeout
+        self.governor, self.cache_scope, self.refresh = governor, cache_scope, refresh
         self.calls = 0
+        self.cache_hits = 0
         self.digests: list[str] = []
 
     def close(self):
         self.client.close()
 
-    def read(self, url: str, params: dict | None = None, headers: dict | None = None) -> bytes:
+    def read(self, url: str, params: dict | None = None, headers: dict | None = None,
+             *, expect: str = "json") -> bytes:
         parsed = urlsplit(url)
         if (parsed.scheme != "https" or parsed.hostname not in ALLOWED_HOSTS
                 or parsed.port not in (None, 443) or parsed.username or parsed.password):
             raise ProviderError("请求目标不在允许的提供商列表内", "unsupported")
-        if self.calls >= self.max_calls or time.monotonic() >= self.deadline:
-            raise ProviderError("本次检查已达到请求预算；没有据此判断资源不存在")
-        self.calls += 1
-        request_headers = {"User-Agent": "re0/0.1.0 (local research resource checker)", "Accept": "application/json"}
+        provider = parsed.hostname
+        if self.governor is not None:
+            cached = self.governor.cache.get(url, params, self.cache_scope, refresh=self.refresh)
+            if cached is not None:
+                # A cache hit is still recorded in `digests`: the content hash describes what
+                # the conclusion rests on, and a reused response is part of that.
+                self.digests.append(cached.content_sha256)
+                self.cache_hits += 1
+                return cached.raw
+        request_headers = {"User-Agent": "re0/0.2.0 (local research resource checker)", "Accept": "application/json"}
         if parsed.hostname == "api.github.com":
             request_headers["X-GitHub-Api-Version"] = "2022-11-28"
             token = os.getenv("GITHUB_TOKEN", "")
@@ -72,20 +116,57 @@ class ProviderClient:
         if headers:
             # Caller-supplied per-provider credentials. The caller owns the scoping.
             request_headers.update(headers)
+        while True:
+            try:
+                raw, content_type = self._attempt(url, params, request_headers, expect, provider)
+            except ProviderError as exc:
+                # Retries are bounded by the governor, so a flapping provider cannot be asked
+                # forever and a nested retry loop cannot form.
+                if not (exc.retryable and self.governor is not None
+                        and self.governor.note_retry(provider)):
+                    raise
+                self.governor.defer(provider, exc.headers)
+                continue
+            if self.governor is not None:
+                self.governor.note_success(provider)
+                self.governor.cache.put(url, params, self.cache_scope, raw, content_type)
+            self.digests.append(hashlib.sha256(raw).hexdigest())
+            return raw
+
+    def _attempt(self, url: str, params: dict | None, request_headers: dict, expect: str,
+                 provider: str) -> tuple[bytes, str]:
+        if self.calls >= self.max_calls or time.monotonic() >= self.deadline:
+            raise ProviderError("本次检查已达到请求预算；没有据此判断资源不存在")
+        if self.governor is not None:
+            try:
+                self.governor.acquire(provider)
+            except BudgetExhausted as exc:
+                # Translated rather than propagated: a caller that only understands provider
+                # failures must still see a spent budget as "this run stopped", not crash.
+                raise ProviderError(str(exc), "indeterminate", kind="budget") from exc
+            except Cancelled as exc:
+                raise ProviderError(str(exc), "indeterminate", kind="cancelled") from exc
+        self.calls += 1
         try:
             with self.client.stream("GET", url, params=params, headers=request_headers,
                                     timeout=min(self.read_timeout, max(0.1, self.deadline - time.monotonic()))) as response:
                 status = response.status_code
+                content_type = response.headers.get("content-type", "")
                 if status != 200:
                     if status == 429 or (status == 403 and response.headers.get("x-ratelimit-remaining") == "0"):
-                        raise ProviderError("提供商限流；稍后重试，不能据此认定资源未发布", http_status=status)
+                        raise ProviderError("提供商限流；稍后重试，不能据此认定资源未发布",
+                                            http_status=status, retryable=True,
+                                            headers=dict(response.headers))
                     if status in (401, 403):
-                        raise ProviderError("访问被拒绝；可能需要授权，尚不能确定资源状态", "access_failed", status)
+                        raise ProviderError("访问被拒绝；可能需要授权，尚不能确定资源状态", "access_failed", status,
+                                            headers=dict(response.headers))
                     if status == 404:
                         raise ProviderError("接口返回 404：可能不存在、已移动或无访问权限", "indeterminate", status)
                     if 300 <= status < 400:
                         raise ProviderError("链接发生重定向；为避免越权请求，本次未跟随", http_status=status)
-                    raise ProviderError(f"提供商返回 HTTP {status}，本次未完成验证", http_status=status)
+                    raise ProviderError(f"提供商返回 HTTP {status}，本次未完成验证", http_status=status,
+                                        retryable=500 <= status < 600,
+                                        headers=dict(response.headers))
                 data = bytearray()
                 for chunk in response.iter_bytes():
                     data.extend(chunk)
@@ -95,10 +176,12 @@ class ProviderClient:
                         raise ProviderError("检查超时；未扫描完整内容")
         except httpx.HTTPError as exc:
             # Never echo exceptions containing credentials or remote-controlled text.
-            raise ProviderError("网络连接或读取失败，本次未完成验证") from exc
+            raise ProviderError("网络连接或读取失败，本次未完成验证", retryable=True) from exc
         raw = bytes(data)
-        self.digests.append(hashlib.sha256(raw).hexdigest())
-        return raw
+        if expect == "json" and looks_like_html(raw, content_type):
+            raise ProviderError("来源返回了 HTML 页面而不是接口数据；可能是反爬拦截或接口地址已变更，"
+                                "本次没有取得可用结果", "unsupported")
+        return raw, content_type
 
     def json(self, url: str, params: dict | None = None, headers: dict | None = None):
         try:
@@ -327,7 +410,8 @@ def resolve_metadata(identifier: str, transport: httpx.BaseTransport | None = No
                 if delay > 0:
                     time.sleep(delay)
                 _arxiv_last = time.monotonic()
-                raw = client.read("https://export.arxiv.org/api/query", {"id_list": arxiv_id, "max_results": "1"})
+                raw = client.read("https://export.arxiv.org/api/query", {"id_list": arxiv_id, "max_results": "1"},
+                                  expect="xml")
             if b"<!DOCTYPE" in raw.upper() or b"<!ENTITY" in raw.upper():
                 raise ProviderError("拒绝包含外部实体声明的 XML")
             root = ET.fromstring(raw)

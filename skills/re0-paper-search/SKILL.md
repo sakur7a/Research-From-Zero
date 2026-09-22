@@ -61,19 +61,29 @@ Recall is bounded by the **page**, not by how many queries you run, and nothing 
    puts mathematics and finance papers first, because each service ranks by its own relevance.
 2. **Raise `--max-papers` (default 20, tool maximum 25) before adding queries.** A work no source
    returned cannot be merged, corrected, or counted, so the page is the first lever.
-3. **Pass `--venue NAME`** when the target is conference work, so the venue name takes part in the
-   query.
-4. **Read the `per-source hits:` line and the `coverage:` block before reading the papers.** A
+3. **Then raise `--max-pages` (default 1, max 10) rather than the page size again.** `--max-papers`
+   is the *per-page* ceiling, so paging widens recall without making the top of every page noisier.
+   Only OpenAlex and Semantic Scholar document their cursors; the other three sources are read once
+   and their coverage row says `stop_reason=not_supported` instead of looking complete. Read
+   `stop_reason=complete` as "the source ran out of pages" and `page_budget` / `request_budget` /
+   `cancelled` as "this run stopped first" — the second group always sets `truncated` and keeps the
+   cursor. `--max-requests` (default 40) caps the whole call across every source and query; a spent
+   budget is reported, never turned into an empty result.
+4. **Pass `--venue NAME`** when the target is conference work. Where a stable source ID resolves
+   (OpenAlex) the service filters on it and the resolved source names are printed, because a
+   conference family is split into per-edition records; everywhere else the name is a query hint and
+   is labelled as one. See *Conference papers* below before trusting a strict filter.
+5. **Read the `per-source hits:` line and the `coverage:` block before reading the papers.** A
    source sitting at `=0` is a hole in the survey, not a gap in the literature, and `state=partial`
    says a source did not answer while `state=zero_hits` says every source answered and there was
    nothing. Those are different findings.
-5. **Pass those queries together with `--queries "a|b|c"` instead of running the command five
+6. **Pass those queries together with `--queries "a|b|c"` instead of running the command five
    times.** One call merges once, folds a work that several queries found into a single record, and
    keeps *which* queries found it (`queries:` on the record, `coverage.attempts` for the whole run).
    Merging JSON files by hand loses both. The ceiling is 5 phrases per call; beyond that, split into
    separate runs so each keeps its own budget, and expect cross-run duplicates to reappear — write
    each run with `--json` and merge on DOI or arXiv ID.
-6. **`--sources` takes `all`, one source, or a comma-separated subset**, so a recheck can cover two
+7. **`--sources` takes `all`, one source, or a comma-separated subset**, so a recheck can cover two
    services together without silently widening to all five.
 
 **A shared title is not enough to merge two works.** Two records that agree on a title but disagree
@@ -110,28 +120,38 @@ Semantic Scholar and OpenAlex all index proceedings, and the venue is reported. 
 `CVPR diffusion model watermarking` returned the CVPR paper labelled
 `已收录于会议或期刊 · 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)`.
 
-`--venue NAME` prepends a venue name to the query:
+`--venue NAME` applies a real filter where one can be verified, and a query hint everywhere else:
 
 ```bash
 python scripts/paper_search.py --query "diffusion watermarking" --venue CVPR --start-year 2024
 ```
 
-**That is a query hint, not an API-side venue filter.** The reason is worth recording so nobody
-retries these blindly:
+Which happened is printed, per source, and is also in `coverage.venue_filter`:
 
 | Route | Status |
 |---|---|
+| OpenAlex `primary_location.source.id` | **Verified live 2026-09-22.** The name is resolved through `/sources?filter=display_name.search:NAME`, a hit that does not actually carry the name is discarded, and the surviving IDs are OR-ed into the filter. Reported as `mode=strict`. |
 | DBLP — the obvious conference index | **Unusable.** It answers a non-browser client with a `<title>Making sure you're not a bot!</title>` challenge page instead of JSON. |
-| OpenAlex source-name filter | **Rejected by the API.** `primary_location.source.display_name.search` returns HTTP 400 — *"is not a valid field"*. Filtering by source needs a source ID from a separate lookup. |
-| Semantic Scholar `venue=` | Documented, but **unverified**: every attempt was rate-limited without an API key, so it is not used. |
+| OpenAlex source-*name* filter | **Rejected by the API.** `primary_location.source.display_name.search` returns HTTP 400 — *"is not a valid field"*. Filtering by source needs the ID lookup above. |
+| Semantic Scholar `venue=` | Documented, but **still unverified**: every attempt was rate-limited without an API key, most recently HTTP 429 on 2026-09-22. So the name is prepended to the query and reported as `mode=hint`, never as a filter. |
+| arXiv, Crossref, OpenReview | No venue parameter here. `mode=hint` — the name joins the query and the result is **not** narrowed by venue. |
 
-An API-side venue filter would be genuinely better for "what did CVPR 2024 accept", because a
-keyword query only surfaces papers whose *text* matches. It is not shipped until one of those
-routes can be verified end to end.
+**A strict filter is only as wide as what resolved, and that is why the names are printed.** OpenAlex
+indexes a conference family as one source per edition, and a live search for `CVPR` returned exactly
+one: `2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)`. Filtering on it is
+genuinely strict and genuinely narrower than "CVPR" means — so the run prints
 
-**More sources would not fix this.** The five sources already hold hundreds of millions of records
-including conference proceedings; the remaining gap is query shape, not source count. A keyword
-search cannot ask "everything this venue accepted", and a sixth index would not change that.
+```
+会议/期刊条件（openalex）：来源按解析出的稳定 source ID 严格过滤 — 实际匹配到的 source：2022 IEEE/CVF …(CVPR)
+```
+
+and the coverage row carries `resolved_names`. If nothing resolves, the name falls back to a query
+hint and the row says `resolve_failed`: the result set got *wider*, not narrower, and nothing was
+silently dropped.
+
+**More sources would not fix the remaining gap.** The five sources already hold hundreds of millions
+of records including conference proceedings. What a keyword search still cannot ask is "everything
+this venue accepted in a year it has no source record for", and a sixth index would not change that.
 
 ## Credentials
 
@@ -193,8 +213,15 @@ wider read scope.
   such. Never write "no such work exists" because a source was unreachable.
 - **An empty list is not evidence of absence.** Widen the query, change the year window,
   or recheck one source alone before concluding anything.
-- **The page size is the recall ceiling** (`--max-papers` defaults to 20, tool maximum 25). How to
-  use it for a survey, and why a bigger page is also a noisier one, is in *Surveying a topic* above.
+- **The page size is the recall ceiling for one page** (`--max-papers` defaults to 20, tool maximum
+  25); `--max-pages` walks further, and `--max-requests` bounds the whole call. How to use them for a
+  survey, and why a bigger page is also a noisier one, is in *Surveying a topic* above.
+- **A run that stopped is not a run that found nothing.** `coverage.pagination` gives every
+  `(query, source)` pair its own `stop_reason`; only `complete` means the source ran out of pages.
+  `coverage.scheduling` reports `requests_used` against the ceiling, seconds deferred to a provider's
+  own `Retry-After`, and cache hits. Cached answers are scoped by *which* credentials are configured,
+  so an anonymous result is never reused for a credentialed call; the scope names the entitlement and
+  never the key.
 
 ## Accepted, submitted, or preprint
 

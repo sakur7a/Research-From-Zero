@@ -12,22 +12,28 @@ from urllib.parse import quote, urlsplit
 import httpx
 from pydantic import ValidationError
 
-from ..literature import (CONNECTORS, PUBLICATION_LABELS, arxiv_id_from_doi, classify_venue,
-                          in_year_range, merge_records, paper_record)
+from ..literature import (CONNECTORS, PUBLICATION_LABELS, PagePlan, arxiv_id_from_doi,
+                          classify_venue, credential_scope, in_year_range, merge_records,
+                          paper_record)
 from ..models import PaperInput, normalize_arxiv
 from ..providers import (ProviderClient, ProviderError, check_resource, resolve_metadata,
                          repository_identity, _arxiv_lock)
 from ..resource_audit import audit_from_observation
+from ..scheduling import (PAGINATED_SOURCES, PAGINATION_UNSUPPORTED, VENUE_MODE_LABELS,
+                          VENUE_STRICT_SOURCES, Governor, ResponseCache)
 from .schemas import (PAPER_SOURCES, SearchArgs, PaperSearchArgs, ResolveArgs, ResourceArgs,
                       HubSearchArgs, FileArgs, EvidenceReadArgs, PlanArgs, Report)
 
 # Transient statuses worth one retry when one call queries several services.
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 RETRY_DELAY_SECONDS = 1.5
+# A stop this run caused is not a stop the provider caused, and the coverage block keeps them
+# apart: "we did not ask" must never be readable as "the service failed to answer".
+STOP_FROM_KIND = {"budget": "request_budget", "cancelled": "cancelled"}
 
 TOOL_TYPES = {
     "update_plan": (PlanArgs, "Publish or revise a short user-visible research plan. Do not include private chain-of-thought."),
-    "search_papers": (PaperSearchArgs, "Search scholarly metadata and abstracts. source='all' queries Semantic Scholar, OpenAlex, arXiv, OpenReview and Crossref and merges duplicates by every identifier a record carries (DOI, arXiv ID, normalised title), so one work reported by several services collapses into one entry that keeps all of them; pass one source name, or a sources list, to recheck a subset. Two works that share a title but carry different non-arXiv DOIs and different years are kept apart rather than merged, because a shared title must not be able to fabricate a paper. start_year/end_year filter the publication year. limit is the recall ceiling (default 5, max 25) and is worth raising for a survey, because a work no source returned cannot be merged, corrected or counted. Pass queries (up to 5) to run several short queries in one budgeted call and get a single merged list instead of hand-merging files: each record keeps which queries and which services found it, and the coverage block lists every (query, source) attempt with its own outcome, so zero hits, a partial run and a total failure stay distinguishable. Nothing here re-ranks, so recall comes from limit while precision comes from the words the target literature actually uses: several short queries recall more than one long phrase, since these services match space-separated terms restrictively. These are bibliographic records, never full text. A source that fails is reported rather than read as 'not found'. Publication status and affiliations are per-service claims, not verified facts. To find released code, search the project name with search_repositories and search_hub: papers often carry no link in any metadata field, and a name match is a candidate rather than proof of authorship."),
+    "search_papers": (PaperSearchArgs, "Search scholarly metadata and abstracts. source='all' queries Semantic Scholar, OpenAlex, arXiv, OpenReview and Crossref and merges duplicates by every identifier a record carries (DOI, arXiv ID, normalised title), so one work reported by several services collapses into one entry that keeps all of them; pass one source name, or a sources list, to recheck a subset. Two works that share a title but carry different non-arXiv DOIs and different years are kept apart rather than merged, because a shared title must not be able to fabricate a paper. start_year/end_year filter the publication year. limit is the recall ceiling (default 5, max 25) and is worth raising for a survey, because a work no source returned cannot be merged, corrected or counted. Pass queries (up to 5) to run several short queries in one budgeted call and get a single merged list instead of hand-merging files: each record keeps which queries and which services found it, and the coverage block lists every (query, source) attempt with its own outcome, so zero hits, a partial run and a total failure stay distinguishable. Nothing here re-ranks, so recall comes from limit while precision comes from the words the target literature actually uses: several short queries recall more than one long phrase, since these services match space-separated terms restrictively. limit is the PER-PAGE ceiling; max_pages (default 1, max 10) walks further and only OpenAlex and Semantic Scholar document their cursors, so every other source is read once and its coverage row says stop_reason=not_supported rather than pretending to be complete - read stop_reason=complete as 'the source ran out of pages' and page_budget/request_budget/cancelled as 'this run stopped first'. max_requests is the ceiling for the WHOLE call, shared by every source and every query, and the scheduling block reports requests_used, per-provider counts, seconds deferred to a provider's own Retry-After, and cache hits; a spent budget is reported, never turned into an empty result. venue applies a real filter only where a stable source ID resolves (OpenAlex), and the resolved source names are listed because a conference family is split into per-edition records and a strict filter therefore covers only what was resolved; elsewhere the name becomes a query hint and is labelled hint, never a filter. refresh=true re-fetches instead of serving a cached response inside its TTL; cached responses are scoped by which credentials are configured, never by their values. These are bibliographic records, never full text. A source that fails is reported rather than read as 'not found'. Publication status and affiliations are per-service claims, not verified facts. To find released code, search the project name with search_repositories and search_hub: papers often carry no link in any metadata field, and a name match is a candidate rather than proof of authorship."),
     "resolve_paper": (ResolveArgs, "Resolve a DOI/arXiv identifier to source-derived paper metadata."),
     "search_repositories": (SearchArgs, "Search public GitHub repositories. Name matches do NOT establish official authorship."),
     "search_hub": (HubSearchArgs, "Search Hugging Face models/datasets. Returns candidates, NOT verified paper-resource relationships."),
@@ -100,6 +106,9 @@ def paper_document(record: dict) -> dict:
 class ResearchTools:
     def __init__(self, library, transport=None):
         self.library, self.transport = library, transport
+        # Scoped to this instance, which is one session: long enough that repeating a question
+        # does not re-spend the budget, short enough that it cannot carry an answer across users.
+        self.cache = ResponseCache()
 
     @property
     def web_enabled(self):
@@ -128,29 +137,69 @@ class ResearchTools:
         sources = args.sources_effective()
         records, failures, counts = [], [], {}
         attempts, succeeded = [], set()
+        page_rows, venue_rows = [], []
+        venue_name = args.venue.strip()
+        # One scheduler for the whole call. A rate limit met by the third request has to be
+        # honoured by the fourth, and a per-client budget cannot express that; nor can it keep a
+        # total request ceiling across five sources and several queries.
+        governor = Governor(max_requests=args.max_requests, seconds=60 * max(1, len(queries)),
+                            cache=self.cache)
         # Scholarly APIs are slower than the metadata endpoints the default 8s was tuned for:
         # arXiv alone measures >5s for a plain query. The budget scales with the number of
         # (query, source) pairs and is shared by all of them, so the ceiling still bounds the call.
         client = ProviderClient(self.transport, max_calls=max(12, 4 * len(queries) * len(sources)),
-                                seconds=60 * max(1, len(queries)), read_timeout=20)
+                                seconds=60 * max(1, len(queries)), read_timeout=20,
+                                governor=governor, cache_scope=credential_scope(),
+                                refresh=args.refresh)
         try:
             for query in queries:
-                query_args = args.model_copy(update={"query": query})
                 for name in sources:
+                    plan = PagePlan(pages=args.max_pages, governor=governor, venue=venue_name)
+                    # A source with no verified venue filter gets the name in the query instead.
+                    # That is a hint: it changes what is searched, not what is filtered, and it is
+                    # reported as a hint so nobody reads the result as narrowed by venue.
+                    effective = (f"{venue_name} {query}".strip()
+                                 if venue_name and name not in VENUE_STRICT_SOURCES else query)
+                    query_args = args.model_copy(update={"query": effective})
+                    before = governor.requests_used
+                    found, error, kind = None, "", ""
                     try:
-                        found = self._records_with_retry(client, name, query_args)
+                        found = self._records_with_retry(client, name, query_args, plan)
                     except ProviderError as exc:
-                        failures.append({"source": name, "error": str(exc)})
-                        attempts.append({"query": query, "source": name, "ok": False,
-                                         "error": str(exc)})
-                        counts.setdefault(name, 0)
-                        continue
+                        error, kind = str(exc), exc.kind
                     except (ValueError, KeyError, TypeError, ET.ParseError, UnicodeError):
-                        failures.append({"source": name, "error": "该来源返回了无法解析的数据"})
+                        error = "该来源返回了无法解析的数据"
+                    spent = governor.requests_used - before
+                    if found is None:
+                        failures.append({"source": name, "error": error})
                         attempts.append({"query": query, "source": name, "ok": False,
-                                         "error": "该来源返回了无法解析的数据"})
+                                         "effective_query": effective, "error": error})
                         counts.setdefault(name, 0)
+                    # Every attempt gets a pagination row, including the ones that failed. A
+                    # source that was asked and refused is a different fact from one that was
+                    # never asked, and dropping the row would make them look the same.
+                    for row in plan.outcomes:
+                        page_rows.append({**row, "query": query, "effective_query": effective})
+                    if not plan.outcomes:
+                        # arXiv and Crossref have no paginated connector here, so their row is
+                        # built by the caller instead of by a connector.
+                        page_rows.append(self._page_row(
+                            name, query, effective, spent,
+                            STOP_FROM_KIND.get(kind) or ("not_supported" if found is not None
+                                                         else "provider_failed"),
+                            PAGINATION_UNSUPPORTED.format(name) if found is not None else error,
+                            pages=1 if found is not None else 0,
+                            records=len(found or [])))
+                    if found is None:
                         continue
+                    venue_rows.extend(plan.venues)
+                    if venue_name and name not in VENUE_STRICT_SOURCES and \
+                            not any(row["source"] == name for row in plan.venues):
+                        venue_rows.append({"source": name, "requested": venue_name, "mode": "hint",
+                                           "resolved_id": "", "resolved_names": [],
+                                           "label": VENUE_MODE_LABELS["hint"],
+                                           "detail": "该来源没有已验证的会议过滤参数；"
+                                                     "会议名并入检索词，不是严格过滤"})
                     for record in found:
                         # Which query found it travels with it, so a later round adds provenance
                         # instead of overwriting the earlier round's.
@@ -158,7 +207,7 @@ class ResearchTools:
                     counts[name] = counts.get(name, 0) + len(found)
                     succeeded.add(name)
                     attempts.append({"query": query, "source": name, "ok": True,
-                                     "records": len(found)})
+                                     "effective_query": effective, "records": len(found)})
                     records.extend(found)
             if failures and not records:
                 # Nothing was actually searched. Returning an empty list here would be
@@ -167,6 +216,22 @@ class ResearchTools:
                 raise ProviderError(f"所有来源都未返回结果（{detail}）；这不代表论文不存在", "indeterminate")
         finally:
             client.close()
+        scheduling = governor.summary()
+        scheduling["cache_scope"] = credential_scope()
+        # Naming the entitlement rather than its value: the scope has to be visible for a reader
+        # to judge whether two runs are comparable, and a key must never be.
+        scheduling["cache_scope_note"] = ("缓存作用域按已配置的凭据种类区分，不含凭据本身；"
+                                          "作用域不同不互相复用")
+        venue_filter = {
+            "requested": venue_name,
+            "per_source": venue_rows,
+            "not_applied": [name for name in sources
+                            if venue_name and name not in {row["source"] for row in venue_rows}],
+            "modes": VENUE_MODE_LABELS,
+            "note": ("strict 表示来源按解析出的稳定 source ID 过滤，并列出实际匹配到的 source 名称；"
+                     "hint 表示会议名只并入了检索词；unsupported/resolve_failed 表示条件没有生效。"
+                     "只有 strict 可以被称为按会议过滤，其余都不能。"),
+        }
         merged, duplicates = merge_records(records)
         kept = [record for record in merged if in_year_range(record["paper"].year, args.start_year, args.end_year)]
         # Zero hits, a partial run and a wholly failed one are different states, and a caller
@@ -199,8 +264,13 @@ class ResearchTools:
                          "dropped_out_of_range": len(merged) - len(kept),
                          "unknown_year": sum(1 for record in merged if record["paper"].year is None)},
                 "state": state,
+                "pagination": page_rows,
+                "venue_filter": venue_filter,
+                "scheduling": scheduling,
                 "note": "每次 (query, source) 尝试都列在 attempts 里；state=partial 表示有来源未完成，"
-                        "不等于论文不存在；未命中的查询与失败的查询是两件事。",
+                        "不等于论文不存在；未命中的查询与失败的查询是两件事。pagination 逐条说明每个"
+                        "(query, source) 读了几页、为什么停；stop_reason=complete 才是来源读完了，"
+                        "page_budget/request_budget/cancelled/not_supported 都表示本次先停了。",
             },
         }
         if failures:
@@ -215,7 +285,20 @@ class ResearchTools:
                               "不代表论文不存在。未知年份的结果不会被年份区间过滤掉。")
         return result
 
-    def _source_records(self, client, name, args) -> list:
+    @staticmethod
+    def _page_row(source: str, query: str, effective: str, requests: int, stop_reason: str,
+                  detail: str, *, pages: int = 0, records: int = 0) -> dict:
+        """A coverage row for a source that has no paginated connector, or that failed outright."""
+        return {"source": source, "query": query, "effective_query": effective,
+                "pagination_documented": source in PAGINATED_SOURCES, "pages_fetched": pages,
+                "requests_used": requests, "records": records, "next_cursor": "",
+                "truncated": stop_reason != "complete", "stop_reason": stop_reason,
+                "detail": detail}
+
+    # `STOP_FROM_KIND.get(kind)` above is deliberately not `.get(kind, default)`: an empty kind
+    # must fall through to the success/failure decision rather than be mapped to a stop reason.
+
+    def _source_records(self, client, name, args, plan=None) -> list:
         if name == "arxiv":
             return self._arxiv_records(client, args)
         if name == "crossref":
@@ -224,21 +307,25 @@ class ResearchTools:
         if connector is None:
             raise ProviderError("未知的文献来源", "unsupported")
         return connector(client, args.query, args.limit,
-                         start_year=args.start_year, end_year=args.end_year)
+                         start_year=args.start_year, end_year=args.end_year, plan=plan)
 
-    def _records_with_retry(self, client, name, args) -> list:
+    def _records_with_retry(self, client, name, args, plan=None) -> list:
         """One extra attempt for a transient status.
 
-        A 429 or a 503 means the service declined to answer; it is not a negative
-        result, and scholarly APIs rate-limit aggressively. Anything else propagates.
+        A 429 or a 503 means the service declined to answer; it is not a negative result, and
+        scholarly APIs rate-limit aggressively. Anything else propagates.
+
+        With a governor attached the client already retries inside a bounded window that honours
+        the provider's own Retry-After, so a second retry here would multiply attempts rather than
+        bound them — which is exactly the nested unbounded retry the budget exists to prevent.
         """
         try:
-            return self._source_records(client, name, args)
+            return self._source_records(client, name, args, plan)
         except ProviderError as exc:
-            if exc.http_status not in RETRY_STATUSES:
+            if client.governor is not None or exc.http_status not in RETRY_STATUSES:
                 raise
         time.sleep(RETRY_DELAY_SECONDS)
-        return self._source_records(client, name, args)
+        return self._source_records(client, name, args, plan)
 
     def _crossref_records(self, client, args) -> list:
         params = {"query.bibliographic": args.query, "rows": args.limit}

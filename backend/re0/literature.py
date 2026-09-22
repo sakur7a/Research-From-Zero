@@ -19,10 +19,14 @@ from __future__ import annotations
 import datetime
 import os
 import re
+from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from .models import PaperInput, normalize_arxiv
-from .providers import ProviderClient
+from .providers import ProviderClient, ProviderError
+from .scheduling import (PAGINATED_SOURCES, PAGINATION_NOTES, VENUE_MAX_SOURCES,
+                         VENUE_MODE_LABELS, BudgetExhausted, Cancelled, PageOutcome,
+                         ProviderFailure, RateLimited, VenueFilter, paginate)
 
 # Signal order, strongest first, as reported by the reference implementation this
 # follows. `arxiv` and `crossref` live in `agent/tools.py`; the rest are here.
@@ -31,6 +35,93 @@ REMOTE_SOURCES = ("semanticscholar", "openalex", "openreview")
 MAX_AUTHORS = 30
 MAX_ABSTRACT = 8000
 MIN_YEAR, MAX_YEAR = 1800, 2100
+# Documented per-request ceilings. Going past them gets an error from the service rather than
+# a page, so the walk stops here and the coverage block says which ceiling was hit.
+OPENALEX_MAX_PAGE = 200
+S2_MAX_PAGE = 100
+S2_OFFSET_CAP = 1000
+# Source name -> the host its requests go to. The governor budgets by destination, because that
+# is what a rate limit attaches to; the source name only decides whether paging is offered.
+SOURCE_HOSTS = {"openalex": "api.openalex.org", "semanticscholar": "api.semanticscholar.org",
+                "openreview": "api2.openreview.net", "arxiv": "export.arxiv.org",
+                "crossref": "api.crossref.org"}
+
+
+@dataclass
+class PagePlan:
+    """What one retrieval call may spend, and where it reports what it spent.
+
+    A connector writes into `outcomes` and `venues` rather than returning them, so a caller
+    that runs several queries in one budgeted session collects one coverage record per
+    (query, source) attempt instead of only the last one.
+    """
+    pages: int = 1
+    governor: object | None = None
+    venue: str = ""
+    outcomes: list = field(default_factory=list)
+    venues: list = field(default_factory=list)
+
+
+def _guard(call, *args, **kwargs):
+    """Run a provider call, translating its error into the two stops `paginate` distinguishes.
+
+    A 429 is about the provider's timing, everything else is about its answer. The difference
+    matters because the paginator keeps pages already read for the second kind and reports the
+    first as a deferral, and because only one of them is worth retrying.
+    """
+    try:
+        return call(*args, **kwargs)
+    except ProviderError as exc:
+        # A limit this run imposed is translated back into its own exception type, so the
+        # paginator reports request_budget rather than blaming the provider for our ceiling.
+        if exc.kind == "budget":
+            raise BudgetExhausted(str(exc)) from exc
+        if exc.kind == "cancelled":
+            raise Cancelled(str(exc)) from exc
+        if exc.http_status == 429:
+            raise RateLimited(str(exc)) from exc
+        raise ProviderFailure(str(exc)) from exc
+
+
+def _page_or_raise(outcome: PageOutcome, *, provider: str) -> list:
+    """Keep every page that was read; treat a run that never reached the network as a failure.
+
+    Returning [] for a failed first page would be indistinguishable from "the source answered
+    and found nothing" — precisely the confusion the coverage model exists to prevent.
+    """
+    if outcome.pages_fetched:
+        return outcome.items
+    if outcome.stop_reason == "rate_limited":
+        raise ProviderError(outcome.detail or "提供商限流；稍后重试", http_status=429)
+    if outcome.stop_reason in ("provider_failed", "request_budget", "cancelled", "page_budget"):
+        raise ProviderError(outcome.detail or f"{provider} 本次没有发起请求")
+    return outcome.items
+
+
+def _record_page(plan: PagePlan, source: str, outcome: PageOutcome) -> None:
+    plan.outcomes.append({"source": source, "pagination_documented": source in PAGINATED_SOURCES,
+                          "note": PAGINATION_NOTES.get(source, ""), **outcome.as_dict()})
+
+
+def _record_venue(plan: PagePlan, source: str, venue: VenueFilter) -> None:
+    if venue.requested:
+        plan.venues.append({"source": source, "label": VENUE_MODE_LABELS[venue.mode],
+                            **venue.as_dict()})
+
+
+# Which credentials are configured, never what they are. A cache entry has to be invalidated
+# when the entitlement changes, or an anonymous answer is served to a credentialed call and
+# vice versa. Naming the configured providers is enough for that, and keeps every secret out
+# of the cache key, the digest, the logs and the exports.
+SCOPED_CREDENTIALS = (("openalex", "OPENALEX_API_KEY"),
+                      ("semanticscholar", "SEMANTIC_SCHOLAR_API_KEY"),
+                      ("semanticscholar", "SEMANTICSCHOLAR_API_KEY"),
+                      ("openreview", "OPENREVIEW_TOKEN"),
+                      ("github", "GITHUB_TOKEN"))
+
+
+def credential_scope() -> str:
+    return "+".join(sorted({label for label, name in SCOPED_CREDENTIALS if _env(name)})) or "anonymous"
 
 
 def _env(*names: str) -> str:
@@ -181,12 +272,62 @@ def _openalex_abstract(index) -> str:
     return _text(" ".join(word for _, word in positions), MAX_ABSTRACT)
 
 
-def search_openalex(client: ProviderClient, query: str, limit: int, *, start_year=None, end_year=None) -> list[dict]:
-    params: dict = {"search": query, "per-page": limit}
+def _openalex_source_ids(client: ProviderClient, name: str) -> tuple[list[str], list[str]]:
+    """Resolve a venue name to OpenAlex's stable source IDs, plus the names they carry.
+
+    Filtering on the ID is what makes a venue filter strict. Matching on the display string
+    instead would silently drop every record whose venue is spelled differently, and the caller
+    would be told they had filtered when they had only been given fewer results.
+
+    The resolved names come back too, and are reported: OpenAlex indexes a conference family as
+    several per-edition sources, and a search for "CVPR" has been observed to return only the
+    2022 edition. A strict filter on that is genuinely strict — and genuinely narrower than the
+    reader meant — so the names are the only thing that makes the narrowing visible.
+    """
+    data = _guard(client.json, "https://api.openalex.org/sources",
+                  {"filter": "display_name.search:" + name, "per-page": str(VENUE_MAX_SOURCES)})
+    if not isinstance(data, dict):
+        raise ProviderFailure("OpenAlex sources 接口返回了无法解析的数据")
+    wanted = name.strip().lower()
+    ids, names = [], []
+    for item in (data.get("results") or [])[:VENUE_MAX_SOURCES]:
+        marker = str((item or {}).get("id") or "").rstrip("/").rsplit("/", 1)[-1]
+        display = _text((item or {}).get("display_name"), 200)
+        # `display_name.search` is a relevance search, not an equality test: a result that does
+        # not actually carry the requested name would filter on a venue nobody asked for.
+        if not re.fullmatch(r"S\d{1,12}", marker) or wanted not in display.lower():
+            continue
+        if marker not in ids:
+            ids.append(marker)
+            names.append(display)
+    return ids, names
+
+
+def search_openalex(client: ProviderClient, query: str, limit: int, *, start_year=None, end_year=None,
+                    plan: PagePlan | None = None) -> list[dict]:
+    plan = plan or PagePlan()
+    per_page = min(max(1, limit), OPENALEX_MAX_PAGE)
     filters = []
     if start_year or end_year:
         filters.append("from_publication_date:%d-01-01" % (start_year or MIN_YEAR))
         filters.append("to_publication_date:%d-12-31" % (end_year or MAX_YEAR))
+    venue = VenueFilter(requested=plan.venue.strip())
+    if venue.requested:
+        ids, names = _openalex_source_ids(client, venue.requested)
+        if ids:
+            filters.append("primary_location.source.id:" + "|".join(ids))
+            venue.mode, venue.resolved_id, venue.resolved_names = "strict", "|".join(ids), names
+            venue.detail = (f"已解析为 {len(ids)} 个 OpenAlex 稳定 source ID 并由来源按其过滤，"
+                            "这是严格过滤。OpenAlex 把一个会议系列拆成按届的多个 source，"
+                            "因此本次只覆盖：" + "；".join(names))
+        else:
+            venue.mode = "resolve_failed"
+            # Falling back to the hint keeps the venue in play instead of dropping it. It is a
+            # wider query, never a narrower one, and the mode says which happened.
+            query = f"{venue.requested} {query}".strip()
+            venue.detail = ("没有解析到名称相符的稳定 source ID，本次没有按会议/期刊过滤；"
+                            "改为把会议名并入检索词（venue_hint）。结果范围更宽而不是更窄")
+    params: dict = {"search": query, "per-page": per_page}
     if filters:
         params["filter"] = ",".join(filters)
     mailto = _env("OPENALEX_MAILTO")
@@ -195,9 +336,22 @@ def search_openalex(client: ProviderClient, query: str, limit: int, *, start_yea
     api_key = _env("OPENALEX_API_KEY")
     if api_key:
         params["api_key"] = api_key
-    data = client.json("https://api.openalex.org/works", params)
+    url = "https://api.openalex.org/works"
+
+    def fetch(cursor: str):
+        page = dict(params, cursor=cursor or "*")
+        data = _guard(client.json, url, page)
+        if not isinstance(data, dict):
+            raise ProviderFailure("OpenAlex 返回了无法解析的数据")
+        return list(data.get("results") or []), str((data.get("meta") or {}).get("next_cursor") or "")
+
+    outcome = paginate(fetch, governor=plan.governor, provider="openalex",
+                       host=SOURCE_HOSTS["openalex"],
+                       max_pages=plan.pages, label="OpenAlex")
+    _record_page(plan, "openalex", outcome)
+    _record_venue(plan, "openalex", venue)
     records = []
-    for item in (data.get("results") or [])[:limit]:
+    for item in _page_or_raise(outcome, provider="openalex"):
         title = _text(item.get("title"), 600)
         if not title:
             continue
@@ -229,8 +383,11 @@ def search_openalex(client: ProviderClient, query: str, limit: int, *, start_yea
     return records
 
 
-def search_semanticscholar(client: ProviderClient, query: str, limit: int, *, start_year=None, end_year=None) -> list[dict]:
-    params: dict = {"query": query, "limit": limit,
+def search_semanticscholar(client: ProviderClient, query: str, limit: int, *, start_year=None,
+                           end_year=None, plan: PagePlan | None = None) -> list[dict]:
+    plan = plan or PagePlan()
+    per_page = min(max(1, limit), S2_MAX_PAGE)
+    params: dict = {"query": query, "limit": per_page,
                     "fields": "title,abstract,year,authors.name,authors.affiliations,externalIds,"
                               "venue,publicationVenue,citationCount,url"}
     if start_year and end_year:
@@ -239,12 +396,46 @@ def search_semanticscholar(client: ProviderClient, query: str, limit: int, *, st
         params["year"] = f"{start_year}-"
     elif end_year:
         params["year"] = f"-{end_year}"
+    venue = VenueFilter(requested=plan.venue.strip())
+    if venue.requested:
+        params["venue"] = venue.requested
+        venue.mode = "hint"
+        venue.detail = ("已把名称作为 venue 参数交给来源，但该参数按名称字符串匹配而不是稳定 ID；"
+                        "同一会议的不同写法可能漏掉，因此不作为严格过滤呈现")
     # The canonical name is SEMANTIC_SCHOLAR_API_KEY; the alias matches existing tools.
     key = _env("SEMANTIC_SCHOLAR_API_KEY", "SEMANTICSCHOLAR_API_KEY")
-    data = client.json("https://api.semanticscholar.org/graph/v1/paper/search", params,
-                       {"x-api-key": key} if key else None)
+    headers = {"x-api-key": key} if key else None
+    url = "https://api.semanticscholar.org/graph/v1/paper/search"
+    ceiling = {"reached": False}
+
+    def fetch(cursor: str):
+        offset = int(cursor) if cursor.isdigit() else 0
+        data = _guard(client.json, url, dict(params, offset=offset), headers)
+        if not isinstance(data, dict):
+            raise ProviderFailure("Semantic Scholar 返回了无法解析的数据")
+        rows = list(data.get("data") or [])
+        total = data.get("total")
+        total = total if isinstance(total, int) and 0 <= total <= 10**9 else None
+        following = offset + len(rows)
+        if not rows or (total is not None and following >= total):
+            return rows, ""
+        if following + per_page > S2_OFFSET_CAP:
+            ceiling["reached"] = True
+            return rows, ""
+        return rows, str(following)
+
+    outcome = paginate(fetch, governor=plan.governor, provider="semanticscholar",
+                       host=SOURCE_HOSTS["semanticscholar"],
+                       max_pages=plan.pages, label="Semantic Scholar")
+    if ceiling["reached"] and outcome.stop_reason == "complete":
+        # The pages that were read are complete, but the match list is not: the service refuses
+        # to walk past its documented offset ceiling, so the rest is unreachable, not absent.
+        outcome.truncated = True
+        outcome.detail += f"；已达到该来源 offset+limit ≤ {S2_OFFSET_CAP} 的文档上限，更靠后的匹配读不到"
+    _record_page(plan, "semanticscholar", outcome)
+    _record_venue(plan, "semanticscholar", venue)
     records = []
-    for item in (data.get("data") or [])[:limit]:
+    for item in _page_or_raise(outcome, provider="semanticscholar"):
         title = _text(item.get("title"), 600)
         if not title:
             continue
@@ -252,40 +443,58 @@ def search_semanticscholar(client: ProviderClient, query: str, limit: int, *, st
         doi = _text(external.get("DOI"), 300)
         # `publicationVenue` is the structured venue; `venue` is the free-text one. A
         # venue of "arXiv.org" means the record is a preprint, not a publication.
-        venue = _text((item.get("publicationVenue") or {}).get("name"), 200) or _text(item.get("venue"), 200)
+        name = _text((item.get("publicationVenue") or {}).get("name"), 200) or _text(item.get("venue"), 200)
         paper = PaperInput(
             title=title,
             authors=_authors((entry.get("name") for entry in item.get("authors") or [])),
             year=_year(item.get("year")),
-            venue=venue,
+            venue=name,
             abstract=_text(item.get("abstract"), MAX_ABSTRACT),
             doi=doi,
             arxiv_id=_text(external.get("ArXiv"), 100) or arxiv_id_from_doi(doi),
             paper_url=_text(item.get("url"), 2000))
         records.append(paper_record("semanticscholar", paper, citations=item.get("citationCount"),
-                               venue=venue, publication_state=classify_venue(venue), publication_venue=venue,
+                               venue=name, publication_state=classify_venue(name), publication_venue=name,
                                institutions=((entry.get("affiliations") or [None])[0]
                                              for entry in item.get("authors") or [])))
     return records
 
 
-def search_openreview(client: ProviderClient, query: str, limit: int, *, start_year=None, end_year=None) -> list[dict]:
+def search_openreview(client: ProviderClient, query: str, limit: int, *, start_year=None,
+                      end_year=None, plan: PagePlan | None = None) -> list[dict]:
     """Public note search, which needs no account. A bearer token widens what is readable.
 
     Credentialed access uses `OPENREVIEW_TOKEN` rather than a username/password pair:
     posting a password from inside a retrieval path would add a credential-handling
     surface for no gain while public search already answers a terms query.
     """
+    plan = plan or PagePlan()
     token = _env("OPENREVIEW_TOKEN")
-    data = client.json("https://api2.openreview.net/notes/search",
-                       {"term": query, "limit": limit, "source": "all"},
-                       {"Authorization": "Bearer " + token} if token else None)
+    url = "https://api2.openreview.net/notes/search"
+    params = {"term": query, "limit": min(max(1, limit), 100), "source": "all"}
+    venue = VenueFilter(requested=plan.venue.strip())
+    if venue.requested:
+        venue.mode = "unsupported"
+        venue.detail = "OpenReview 检索接口这里没有可用的会议过滤参数；条件未生效，结果没有按会议收窄"
+    headers = {"Authorization": "Bearer " + token} if token else None
+
+    def fetch(cursor: str):
+        data = _guard(client.json, url, params, headers)
+        if not isinstance(data, dict):
+            raise ProviderFailure("OpenReview 返回了无法解析的数据")
+        return list(data.get("notes") or []), ""
+
+    outcome = paginate(fetch, governor=plan.governor, provider="openreview",
+                       host=SOURCE_HOSTS["openreview"],
+                       max_pages=plan.pages, label="OpenReview")
+    _record_page(plan, "openreview", outcome)
+    _record_venue(plan, "openreview", venue)
     records = []
-    for note in (data.get("notes") or [])[:limit]:
+    for note in _page_or_raise(outcome, provider="openreview"):
         content = note.get("content") or {}
 
-        def value(field, default=""):
-            raw = content.get(field)
+        def value(field_name, default=""):
+            raw = content.get(field_name)
             return raw.get("value", default) if isinstance(raw, dict) else (raw or default)
 
         title = _text(value("title"), 600)
@@ -295,16 +504,16 @@ def search_openreview(client: ProviderClient, query: str, limit: int, *, start_y
         # OpenReview is where submissions and their decisions live, so its venue string is
         # the strongest acceptance signal available here: a decision reads "ICLR 2025 Oral",
         # an undecided paper reads "ICLR 2025 Conference Submission".
-        venue = _text(value("venue"), 200)
+        name = _text(value("venue"), 200)
         paper = PaperInput(
             title=title,
             authors=_authors(value("authors", [])),
             year=_year(_epoch_year(note.get("cdate"))) or _year(_epoch_year(note.get("tcdate"))),
-            venue=venue,
+            venue=name,
             abstract=_text(value("abstract"), MAX_ABSTRACT),
             paper_url=f"https://openreview.net/forum?id={note_id}" if note_id else "https://openreview.net")
-        records.append(paper_record("openreview", paper, venue=venue,
-                               publication_state=classify_venue(venue), publication_venue=venue))
+        records.append(paper_record("openreview", paper, venue=name,
+                               publication_state=classify_venue(name), publication_venue=name))
     return records
 
 
