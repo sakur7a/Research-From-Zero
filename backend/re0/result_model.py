@@ -29,9 +29,9 @@ FULLTEXT_FIELDS = ("identifier", "source", "version", "state", "detail", "conten
                    "parse_quality",
                    "chunks", "chunk_count", "slice", "stored", "limitations", "untrusted_note")
 DOCUMENT_FIELDS = ("source_url", "kind", "locator", "content", "paper", "publication",
-                   "preprint_also", "institutions", "artifact_candidates", "artifact_search",
-                   "artifact_search_detail", "artifact_outcome", "resource_audits",
-                   "sources", "retrieved_at", "tool", "evidence_ids")
+                   "preprint_also", "institutions", "sources", "citations", "artifact_candidates",
+                   "artifact_search", "artifact_search_detail", "artifact_outcome",
+                   "resource_audits", "retrieved_at", "tool", "evidence_ids")
 
 
 def bounded_body(value, limit: int = BODY_EXCERPT_CHARS) -> dict:
@@ -58,7 +58,7 @@ def normalize(payload: dict, *, body_chars: int = BODY_EXCERPT_CHARS) -> dict:
     payload = payload if isinstance(payload, dict) else {}
     documents = [item for item in (payload.get("documents") or []) if isinstance(item, dict)]
     result: dict = {"schema_version": SCHEMA_VERSION}
-    for key in ("scope", "query", "note"):
+    for key in ("scope", "query", "queries", "note"):
         if payload.get(key) is not None:
             result[key] = payload[key]
     result["coverage"] = {
@@ -75,6 +75,13 @@ def normalize(payload: dict, *, body_chars: int = BODY_EXCERPT_CHARS) -> dict:
         "duplicates_merged": payload.get("duplicates_merged"),
         "dropped_out_of_range": payload.get("dropped_out_of_range"),
     }
+    # The tool's own coverage block says more than this summary does: the window and limit that were
+    # requested, one row per (query, source) attempt, the pagination, the run state. Replacing it
+    # outright left the file and the MCP surface describing less than the terminal had just printed,
+    # which is the disagreement this module exists to prevent. Merged, with the keys above staying
+    # authoritative where the two overlap.
+    for key, value in (payload.get("coverage") or {}).items():
+        result["coverage"].setdefault(key, value)
     if payload.get("audit"):
         # Resource-audit coverage sits beside retrieval coverage rather than inside it: one says
         # which services answered, the other says which papers were searched and which candidates

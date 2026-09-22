@@ -54,6 +54,8 @@ web/agent.html + agent.js        web/index.html + app.js
 | `service.py` | The library: papers, resources and an append-only observation history. Each record is labelled `observation` or `confirmation`, so a check and a human revision of it stay separately retrievable |
 | `result_model.py` | The versioned result shape (`schema_version`) that every exit shares. Unknown fields ride along under `unrecognised` instead of vanishing, and a bounded body states `content_chars`/`excerpt_chars`/`truncated` so a cut body cannot look like a short one |
 | `web/agent-core.js` | Pure status/tool presentation logic, independently tested |
+| `web/search-core.js` | Pure views over the versioned result file: coverage facts with their denominators, candidate rows, matrix rows carrying the same blockers `resource_matrix` computes, BibTeX and CSV. Mirrors `models.py`'s label vocabulary, pinned by a test so the two cannot drift |
+| `web/search.js` + `web/search.html` | The local retrieval workbench at `/static/search.html`, served by the static mount with no new route. It reads a `--json` result in the browser and renders coverage, candidates, the audit matrix and export/import; it performs no retrieval of its own, so there is no second search implementation to drift |
 | `web/agent.js` | Task composer, model settings, polling trace, report and evidence views |
 | `web/theme.css` + `web/theme.js` | Shared Emilia light/dark palette (every colour a variable) and the persisted theme toggle used by both pages; no hardcoded colours remain in page CSS |
 

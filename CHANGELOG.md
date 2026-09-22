@@ -78,6 +78,39 @@
   deployment — none of this has run behind a real TLS terminator with a real second user. **Hosted
   mode is not yet a deliverable.** Local mode is unchanged in behaviour and remains the default.
 
+### A local workbench that reads a search result instead of running one (#14)
+
+- Add `web/search.html`, `web/search.js`, `web/search-core.js` and `web/search.css`, reachable at
+  `/static/search.html` from the static mount that already existed. **No route, no endpoint and no
+  second retrieval implementation were added**: the page reads the versioned file that
+  `re0 paper search --json` writes and renders four views — retrieval coverage (the window and limit
+  the run requested, per-source counts, failed sources shown as failures rather than as zeros), the
+  candidate list with filters that only narrow the view and state how much they hid, the
+  resource-audit matrix (one row per audited candidate plus a row for every paper with none, saying
+  which kind of absence it is), and export: copyable BibTeX, CSV/JSON download, and the existing
+  `POST /api/import/resource-audits` with a preview first and a separate confirmation second.
+- **The page keeps no vocabulary of its own where the backend already has one.** Publication labels
+  come from the payload — `paper_document` puts them there precisely so no UI keeps a second copy —
+  and the audit/component label tables in `search-core.js` are pinned to `models.py` by a test that
+  fails if either side changes alone.
+- Two silent drops in `result_model.normalize` are fixed, because otherwise the page would have had
+  to parse prose to learn what the terminal prints: `queries` is carried through, and the tool's own
+  `coverage` block (requested window, per-(query, source) attempts, pagination, run state) is merged
+  into the normalized coverage instead of being replaced by the narrower summary. `paper_document`
+  also exposes `sources` and `citations` as fields; both were previously only inside the text body.
+- Every URL the page puts in an `href` goes through the existing `link()` sanitizer, so a hand-edited
+  result file cannot smuggle a `javascript:` URL into the matrix. A Node test and a browser smoke
+  both pin it.
+- `tests/fixtures/search-result.json` is generated through the real code path by
+  `scripts/gen_search_fixture.py`, and a Python test regenerates and compares it, so the Node tests
+  cannot quietly pass against a shape the product no longer produces. Its four papers are fictional,
+  and the file's own `note` field says so.
+- 29 new Node tests (`tests/search-core.test.js`, 66 in total) and a third browser smoke
+  (`scripts/search_browser_smoke.py`) that drives the page end to end offline, including the
+  preview-then-write round trip through the existing import endpoint; 465 Python tests pass.
+- **Not done, by design:** the page does not search. There is still no HTTP surface that runs a
+  query, which is what an online demo would need — that is the remaining half of #14.
+
 ### Read-only incremental Zotero sync (#11)
 
 - Add `backend/re0/zotero.py` (connector + mapping store), `backend/re0/zotero_sync.py` (plan and

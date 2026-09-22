@@ -99,9 +99,13 @@ def paper_document(record: dict) -> dict:
         lines.append("abstract: " + paper.abstract)
     document = doc(paper.paper_url, "\n".join(lines), kind="paper",
                    locator="metadata from " + ", ".join(sources) + "; not full text", paper=paper)
-    # Also exposed as fields, so a caller does not have to parse them back out of the text.
+    # Also exposed as fields, so a caller does not have to parse them back out of the text. Which
+    # services reported a work, and how often it is cited, are both claims a reader wants to check
+    # rather than dig out of a sentence — and a caller that parses prose gets a second, drift-prone
+    # copy of what this function already knows.
     document.update({"publication": publication, "preprint_also": bool(record.get("preprint_also")),
-                     "institutions": institutions})
+                     "institutions": institutions, "sources": list(sources),
+                     "citations": record.get("citations")})
     return document
 
 

@@ -198,6 +198,35 @@ def test_a_field_this_version_does_not_describe_is_carried_not_dropped():
     assert "some_future_field" in mcp_server.render(structure)
 
 
+def test_the_structured_exits_carry_the_coverage_the_terminal_printed():
+    """The CLI reads the raw payload; `--json` and MCP read this structure.
+
+    A summary that dropped the requested window, the per-(query, source) attempts or the run state
+    would leave both machine-readable exits describing less than the terminal had just printed — the
+    same disagreement `unrecognised` exists to prevent, only for fields this version *does* name.
+    """
+    from re0 import result_model
+
+    payload = {"documents": [{"content": "body", "paper": {"title": "T"}}],
+               "query": "layout", "queries": ["layout", "layered generation"],
+               "sources_queried": ["arxiv", "openalex"],
+               "source_counts": {"arxiv": 2, "openalex": 1},
+               "coverage": {"requested": {"queries": ["layout", "layered generation"],
+                                          "sources": ["arxiv", "openalex"], "limit": 10,
+                                          "start_year": 2024, "end_year": None},
+                            "attempts": [{"query": "layout", "source": "arxiv", "records": 2}],
+                            "state": "ok", "pagination": [{"source": "arxiv", "pages": 1}]}}
+    structure = result_model.normalize(payload)
+    assert structure["queries"] == ["layout", "layered generation"]
+    coverage = structure["coverage"]
+    assert coverage["requested"]["start_year"] == 2024 and coverage["requested"]["limit"] == 10
+    assert coverage["attempts"][0]["source"] == "arxiv"
+    assert coverage["state"] == "ok" and coverage["pagination"]
+    # Where both describe the same fact, the summary's own keys stay authoritative.
+    assert coverage["documents"] == 1 and coverage["sources_queried"] == ["arxiv", "openalex"]
+    assert result_model.unknown_field_names(structure) == []
+
+
 def test_truncation_is_stated_rather_than_implied():
     """A short body and a cut body must not look alike, in either direction."""
     from re0 import result_model

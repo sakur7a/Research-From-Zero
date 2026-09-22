@@ -130,6 +130,11 @@ This tool returns candidates and does not rank them. A report is where the judge
   a large survey most records have no candidate *because nobody searched them*. The run prints that
   coverage and `--json` carries it as `audit`, **with the denominator each count is out of**; repeat
   both, rather than letting silence read as "no code was released".
+- **Or read it in the workbench instead of transcribing it.** `http://127.0.0.1:8000/static/search.html`
+  renders the same `--json` file: coverage with its denominators and its failed sources, the candidate
+  list, the audit matrix with each row's blockers and sources, and copyable BibTeX. It performs no
+  retrieval of its own — the file *is* the run — and it reads `coverage.requested`, `coverage.attempts`
+  and `documents[].sources`, which the versioned structure now carries through instead of dropping.
 
 ## Conference papers
 

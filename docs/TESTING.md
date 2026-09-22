@@ -65,6 +65,7 @@ python -m pip install playwright
 python -m playwright install chromium
 python scripts/agent_browser_smoke.py
 python scripts/browser_smoke.py
+python scripts/search_browser_smoke.py
 ```
 
 已有 Chromium 时可设置 `CHROMIUM_PATH`，本轮使用 `/usr/bin/chromium`。
@@ -1112,3 +1113,74 @@ UI 改动必须跑这两个浏览器脚本，所以这不是可选清理。8 处
 - **没有真实部署。** 没有真实 TLS 终端、没有真实第二个用户、没有真实公网入口。而且**本机的解析器会把 `api.openai.com` 答成 `198.18.1.118`**（透明代理地址段），托管模式的公网解析检查在这台机器上会拒掉它；测试里用固定的公网地址替换了解析器，所以这条检查**没有对真实 DNS 验证过**。
 - **保留策略与审计脱敏没有做**：账户行、会话行和任务记录都是明文长期保留，没有清理规则。
 - 上一节的所有既有限制（没有真实 LLM Key、浏览器里跑的是 fixture 主机、真实账号的 Zotero 只读同步未获授权）**依然成立**，本次没有改变它们。
+
+## 2026-09-22 #14 第一步：检索工作台（读结果，不跑检索）
+
+这一轮的验证对象是一个**不发检索请求**的页面，所以它要证明的不是"能搜到"，而是"读到的就是跑出来的那一份"。
+465 项 Python 测试、66 项 Node 测试、三个浏览器冒烟全部通过。
+
+### 夹具由真实代码路径生成，并且被钉住
+
+`tests/fixtures/search-result.json` 不是手写的：`scripts/gen_search_fixture.py` 走
+`paper_document` → `ResourceAudit` → `run_coverage` → `result_model.normalize`，和
+`re0 paper search --json` 是同一条路。`backend/tests/test_search_workbench.py` 里有一条测试
+**重新生成并与入库的夹具逐字节比较**——如果哪天产品改了形状而夹具没跟着改，Node 测试会开始
+"通过"一个不存在的结构，那比没有测试更糟。夹具里的四篇论文、DOI、仓库与许可证全部虚构，
+结果文件自己的 `note` 字段写着这句话，页面也会把它渲染出来。
+
+### 新增覆盖
+
+**Node（`tests/search-core.test.js`，29 个）**
+
+- `parseResult` 拒绝非 JSON、拒绝没有 `schema_version` 的对象；把 `--resource-matrix` 的矩阵文件
+  当成结果载入时**点名说明**而不是渲染成一张空表；更新的 schema 带警告继续渲染。
+- 覆盖视图的分母：来源失败是失败（带错误文本），不是 0；`coverage.requested` 的年份窗口与上限、
+  `attempts` 条数、`audit` 的分母都从文件里读出来。
+- 候选视图：筛选只收窄视图、不改结果（断言原数组未被修改）；被引排序把未知计数排到最后；
+  facet 只提供真实出现过的取值。
+- 矩阵：4 行 = 2 个已审计候选 + 2 篇"没有候选"的论文，后者的行写清是"检索过未命中"还是"检索失败"；
+  官方且版本对应已确认的行**没有**阻塞项，未确认的行有 5 条，且每条都是行上某个字段的重述。
+- 安全：手改文件里的 `javascript:` URL 在矩阵里变成空串，组件来源里只保留真 http(s) 链接；
+  BibTeX 的 LaTeX 转义与文献库导出同一张表；CSV 对 `= + - @` 开头的单元格加引号前缀。
+- `commandFor` 用文件记录的参数复现命令；旧文件缺 `coverage.requested` 时给占位符并**列出缺了什么**，
+  而不是猜一个看起来能跑的值。
+
+**Python（`backend/tests/test_search_workbench.py`，9 个）**
+
+- 夹具与真实代码路径的输出一致；夹具自述虚构。
+- `search-core.js` 里的 `AUDIT_LABELS`、`COMPONENT_LABELS` 与 `models.py` 逐键相等；页面**没有**
+  第二份发表状态标签表（`paper_document` 把标签放进 payload 就是为了这个）。
+- `paper_document` 把 `sources` 与 `citations` 作为字段暴露，且 `normalize` 保留它们；没人报过的
+  被引数保持 `None` 而不是变成 0。
+- 页面由**已存在的静态挂载**提供（没有新增路由），两个旧页面都链向它。
+- 页面唯一的 API 调用是 `POST /api/import/resource-audits`——既有接口，没有新后端。
+
+**浏览器冒烟（`scripts/search_browser_smoke.py`，8 步）**
+
+与另外两个冒烟同一套桥接：进程内 TestClient，`window.fetch` 指到它，任何外部网络请求直接断言失败。
+步骤：空状态给出产生文件的命令 → 误选矩阵文件被点名 → 载入夹具后覆盖视图显示窗口、来源与失败 →
+候选筛选（计数行写明挡住了几篇）→ 矩阵行带阻塞项与来源、展开行带许可证与依据链接、页面 HTML 里没有
+`javascript:` → BibTeX 进剪贴板（4 条 `@misc`、作者用 ` and ` 连接、仅预印本带 note）→
+**先预览（库仍为空）再确认写入（2 篇论文、2 个资源），再走一次预览+确认时"同一次检查已导入过"** →
+窄屏下矩阵在容器内滚动而不撑破页面。
+
+### 本轮真实修掉的缺陷
+
+1. **`normalize()` 静默丢掉两样东西。** `queries` 在 `PAYLOAD_FIELDS` 里却从不被复制；payload 自己的
+   `coverage`（请求的窗口、每次（检索式 × 来源）尝试、分页、运行状态）被更窄的摘要**整块替换**——
+   于是终端打印得到的信息，JSON 与 MCP 都拿不到。现在合并进去，摘要的键在重叠处保持权威。
+2. **`sources` 与 `citations` 只在正文句子里。** 每个消费者都得解析一句话才能拿到"哪几个源报的、被引多少"，
+   而注释本来就写着"也作为字段暴露，免得调用方从文本里解析回去"。补上字段，并让 `DOCUMENT_FIELDS` 描述它们。
+3. **示例密钥检查是死代码、托管拒绝信息推销用不上的开关、`re0 doctor` 对起不来的部署返回 0** ——
+   这三条属于同一次提交里的 #13 收尾，见上一节。
+
+### 本次尚未验证
+
+- **页面不检索，也没有任何 HTTP 检索入口。** 这是设计，不是遗漏：在线 demo 需要的那一半（#14 的剩余部分）
+  仍然不存在，也没有被测试。
+- **剪贴板只验证到"复制动作成功并给出提示"**；BibTeX 的文本由页面自己的函数在浏览器里算出来断言，
+  没有依赖剪贴板读取权限（无头环境里它不一定给）。
+- **CSV 下载只验证了内容，没有验证浏览器保存行为**；下载走 Blob + `<a download>`，是浏览器行为，测不了。
+- 夹具里的 GitHub/HuggingFace 链接指向不存在的仓库；页面上的链接**可点但打不开**，这是夹具的性质，
+  不是页面的缺陷。
+- 上一节的所有既有限制（无真实 LLM Key、真实账号 Zotero 同步未授权、托管模式不可交付）**依然成立**。

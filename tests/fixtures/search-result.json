@@ -1,0 +1,527 @@
+{
+  "schema_version": "1",
+  "scope": "跨源书目匹配；同源与跨源重复项已合并；未阅读全文",
+  "query": "layer decomposition",
+  "queries": [
+    "layer decomposition",
+    "layered generation"
+  ],
+  "note": "测试夹具：论文、作者、DOI、arXiv 编号、仓库与许可证全部是虚构的，仅用于页面与协议测试。不要引用、不要当成真实检索结果，也不要导入文献库。",
+  "coverage": {
+    "documents": 4,
+    "sources_queried": [
+      "arxiv",
+      "crossref",
+      "openalex",
+      "semanticscholar"
+    ],
+    "source_counts": {
+      "arxiv": 2,
+      "crossref": 2,
+      "openalex": 2,
+      "semanticscholar": 0
+    },
+    "source_failures": [
+      {
+        "source": "semanticscholar",
+        "error": "HTTP 429: 请求过于频繁（匿名调用被硬限流）"
+      }
+    ],
+    "incomplete_results": true,
+    "duplicates_merged": 2,
+    "dropped_out_of_range": 5,
+    "requested": {
+      "queries": [
+        "layer decomposition",
+        "layered generation"
+      ],
+      "sources": [
+        "arxiv",
+        "crossref",
+        "openalex",
+        "semanticscholar"
+      ],
+      "limit": 10,
+      "start_year": 2023,
+      "end_year": null,
+      "max_pages": 2
+    },
+    "attempts": [
+      {
+        "query": "layer decomposition",
+        "source": "crossref",
+        "ok": true,
+        "effective_query": "layer decomposition",
+        "records": 2
+      },
+      {
+        "query": "layered generation",
+        "source": "arxiv",
+        "ok": true,
+        "effective_query": "layered generation",
+        "records": 2
+      },
+      {
+        "query": "layer decomposition",
+        "source": "semanticscholar",
+        "ok": false,
+        "effective_query": "layer decomposition",
+        "error": "HTTP 429: 请求过于频繁（匿名调用被硬限流）"
+      }
+    ],
+    "succeeded": [
+      "arxiv",
+      "crossref",
+      "openalex"
+    ],
+    "failed": [
+      {
+        "source": "semanticscholar",
+        "error": "HTTP 429: 请求过于频繁（匿名调用被硬限流）"
+      }
+    ],
+    "hits": {
+      "records": 6,
+      "unique": 4,
+      "duplicates_merged": 2,
+      "dropped_out_of_range": 5,
+      "unknown_year": 1
+    },
+    "state": "partial",
+    "pagination": [
+      {
+        "source": "openalex",
+        "query": "layer decomposition",
+        "effective_query": "layer decomposition",
+        "pagination_documented": true,
+        "pages_fetched": 1,
+        "requests_used": 2,
+        "records": 2,
+        "next_cursor": "",
+        "truncated": false,
+        "stop_reason": "complete",
+        "detail": ""
+      },
+      {
+        "source": "semanticscholar",
+        "query": "layer decomposition",
+        "effective_query": "layer decomposition",
+        "pagination_documented": true,
+        "pages_fetched": 0,
+        "requests_used": 1,
+        "records": 0,
+        "next_cursor": "",
+        "truncated": true,
+        "stop_reason": "provider_failed",
+        "detail": "HTTP 429"
+      }
+    ]
+  },
+  "audit": {
+    "papers": 4,
+    "name_search": {
+      "budget": 6,
+      "spent": 3,
+      "remaining": 3,
+      "states": {
+        "searched": 3,
+        "partial": 0,
+        "failed": 1,
+        "skipped": 0,
+        "not-run": 0
+      },
+      "denominator": 4,
+      "note": "states 的分母是本次结果里的论文数；skipped 表示标题没有可检索的项目名，not-run 表示未开启或预算已尽，二者都不是「检索过且没有结果」。"
+    },
+    "candidates": {
+      "found": 2,
+      "declared": 1,
+      "name_matched": 1,
+      "verified": 2,
+      "unchecked": 0,
+      "budget": 4,
+      "remaining": 2
+    },
+    "audits": {
+      "not_checked": 0,
+      "candidate_located": 0,
+      "metadata_readable": 1,
+      "access_required": 1,
+      "partially_available": 0,
+      "access_failed": 0,
+      "not_found_in_scope": 0,
+      "unsupported": 0
+    },
+    "failures": [
+      "[Depth-Aware Layer Compositing] GitHub 搜索返回 403（限流）"
+    ]
+  },
+  "documents": [
+    {
+      "source_url": "https://doi.org/10.99999/fixture-layerkit",
+      "kind": "paper",
+      "locator": "metadata from crossref, openalex; not full text",
+      "paper": {
+        "title": "LayerKit: Layered Scene Generation with Decomposed Diffusion",
+        "authors": [
+          "Wei Chen",
+          "Amara Osei",
+          "Liu Yang"
+        ],
+        "year": 2025,
+        "venue": "虚构演示会议",
+        "abstract": "We present LayerKit, a layered scene generation model. Code and checkpoints are available at https://github.com/example-lab/layerkit.",
+        "doi": "10.99999/fixture-layerkit",
+        "arxiv_id": "2412.99991",
+        "paper_url": "https://doi.org/10.99999/fixture-layerkit",
+        "topics": [],
+        "status": "inbox",
+        "notes": "",
+        "version_label": "",
+        "zotero_item_key": "",
+        "zotero_library_id": "",
+        "zotero_library_type": ""
+      },
+      "publication": {
+        "state": "venue",
+        "venue": "虚构演示会议 · 非真实论文集",
+        "source": "crossref",
+        "label": "有会议或期刊版本"
+      },
+      "preprint_also": false,
+      "institutions": [
+        "Shenzhen University",
+        "Example Lab"
+      ],
+      "sources": [
+        "crossref",
+        "openalex"
+      ],
+      "citations": 128,
+      "artifact_search": "searched",
+      "artifact_search_detail": {
+        "project_name": "layerkit"
+      },
+      "artifact_outcome": "found",
+      "resource_audits": [
+        {
+          "paper_title": "LayerKit: Layered Scene Generation with Decomposed Diffusion",
+          "work_identifier": "10.99999/fixture-layerkit",
+          "work_version": "v2",
+          "resource_url": "https://github.com/example-lab/layerkit",
+          "resource_type": "code",
+          "candidate_origin": "摘要中自述",
+          "attribution": "official",
+          "attribution_evidence": [
+            {
+              "source_url": "https://doi.org/10.99999/fixture-layerkit",
+              "locator": "",
+              "excerpt": "Code and checkpoints are available at https://github.com/example-lab/layerkit",
+              "category": "provider_metadata"
+            }
+          ],
+          "author_declaration": "released",
+          "author_declaration_evidence": [
+            {
+              "source_url": "https://arxiv.org/abs/2412.99991",
+              "locator": "",
+              "excerpt": "Code and checkpoints are available at https://github.com/example-lab/layerkit",
+              "category": "provider_metadata"
+            }
+          ],
+          "status": "metadata_readable",
+          "provider_status": "200",
+          "provider": "github",
+          "summary": "仓库存在，README 描述了训练与推理入口",
+          "access": "open",
+          "scope": "仓库根目录与 README",
+          "revision": "9f3c1ab",
+          "checked_at": "2026-09-22T09:14:00Z",
+          "verification_depth": "file_listing",
+          "coverage": {
+            "code_training": {
+              "state": "present",
+              "paths": [
+                "train/layerkit.py"
+              ],
+              "sources": [
+                "https://github.com/example-lab/layerkit/tree/main/train"
+              ]
+            },
+            "code_inference": {
+              "state": "present",
+              "paths": [
+                "demo.py"
+              ],
+              "sources": [
+                "https://github.com/example-lab/layerkit/tree/main/demo"
+              ]
+            },
+            "checkpoint": {
+              "state": "requires_access",
+              "paths": [],
+              "sources": [
+                "https://huggingface.co/example-lab/layerkit"
+              ]
+            },
+            "dataset": {
+              "state": "absent_in_scope",
+              "paths": [],
+              "sources": [
+                "https://github.com/example-lab/layerkit/tree/main"
+              ]
+            },
+            "environment": {
+              "state": "present",
+              "paths": [
+                "environment.yml"
+              ],
+              "sources": [
+                "https://github.com/example-lab/layerkit/blob/main/environment.yml"
+              ]
+            }
+          },
+          "evidence": [
+            {
+              "source_url": "https://api.github.com/repos/example-lab/layerkit/contents",
+              "locator": "listing",
+              "excerpt": "train/ demo/ environment.yml README.md",
+              "category": "provider_metadata"
+            }
+          ],
+          "licences": {
+            "code": "MIT",
+            "checkpoint": "cc-by-nc-4.0"
+          },
+          "version_match": "matched",
+          "version_evidence": "README 的 v2 说明与论文 arXiv v2 对应",
+          "limitations": [
+            "checkpoint 需要单独申请，仓库内只有下载脚本"
+          ]
+        }
+      ],
+      "body": {
+        "excerpt": "LayerKit: Layered Scene Generation with Decomposed Diffusion\nauthors: Wei Chen, Amara Osei, Liu Yang\nyear: 2025\ndoi: 10.99999/fixture-layerkit\narxiv: 2412.99991\ncitations: 128\nqueries: layer decomposition, layered generation\npublication: 有会议或期刊版本 — 虚构演示会议 · 非真实论文集 (via crossref)\ninstitutions: Shenzhen University, Example Lab\nsources: crossref, openalex\nabstract: We present LayerKit, a layered scene generation model. Code and checkpoints are available at https://github.com/example-lab/layerkit.",
+        "content_chars": 498,
+        "excerpt_chars": 498,
+        "truncated": false
+      }
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2401.99992",
+      "kind": "paper",
+      "locator": "metadata from arxiv, semanticscholar; not full text",
+      "paper": {
+        "title": "LayoutDiff: Controllable Layout Generation",
+        "authors": [
+          "M. Rossi"
+        ],
+        "year": 2024,
+        "venue": "arXiv.org",
+        "abstract": "A layout generation model. We plan to release code.",
+        "doi": "",
+        "arxiv_id": "2401.99992",
+        "paper_url": "https://arxiv.org/abs/2401.99992",
+        "topics": [],
+        "status": "inbox",
+        "notes": "",
+        "version_label": "",
+        "zotero_item_key": "",
+        "zotero_library_id": "",
+        "zotero_library_type": ""
+      },
+      "publication": {
+        "state": "preprint",
+        "venue": "arXiv.org",
+        "source": "arxiv",
+        "label": "仅见预印本版本"
+      },
+      "preprint_also": false,
+      "institutions": [],
+      "sources": [
+        "arxiv",
+        "semanticscholar"
+      ],
+      "citations": 41,
+      "artifact_search": "searched",
+      "artifact_search_detail": {
+        "project_name": "layoutdiff"
+      },
+      "artifact_outcome": "found",
+      "resource_audits": [
+        {
+          "paper_title": "LayoutDiff: Controllable Layout Generation",
+          "work_identifier": "arXiv:2401.99992",
+          "work_version": "",
+          "resource_url": "https://huggingface.co/papers/2401.99992",
+          "resource_type": "checkpoint",
+          "candidate_origin": "名称匹配",
+          "attribution": "unconfirmed",
+          "attribution_evidence": [],
+          "author_declaration": "promised",
+          "author_declaration_evidence": [
+            {
+              "source_url": "https://arxiv.org/abs/2401.99992",
+              "locator": "",
+              "excerpt": "We plan to release code.",
+              "category": "provider_metadata"
+            }
+          ],
+          "status": "access_required",
+          "provider_status": "401",
+          "provider": "huggingface",
+          "summary": "页面存在，权重需要同意条款后下载",
+          "access": "requires_application",
+          "scope": "模型卡片",
+          "revision": "",
+          "checked_at": "2026-09-22T09:15:00Z",
+          "verification_depth": "metadata_only",
+          "coverage": {
+            "checkpoint": {
+              "state": "requires_access",
+              "paths": [],
+              "sources": [
+                "https://huggingface.co/papers/2401.99992"
+              ]
+            },
+            "code_training": {
+              "state": "unknown",
+              "paths": [],
+              "sources": []
+            }
+          },
+          "evidence": [
+            {
+              "source_url": "https://huggingface.co/api/models/papers-2401.99992",
+              "locator": "model card",
+              "excerpt": "gated: true",
+              "category": "provider_metadata"
+            }
+          ],
+          "licences": {},
+          "version_match": "unknown",
+          "version_evidence": "",
+          "limitations": [
+            "疑似 adapter 权重，需要对应基础模型",
+            "名称匹配未经作者确认"
+          ]
+        }
+      ],
+      "body": {
+        "excerpt": "LayoutDiff: Controllable Layout Generation\nauthors: M. Rossi\nyear: 2024\narxiv: 2401.99992\ncitations: 41\nqueries: layered generation\npublication: 仅见预印本版本 — arXiv.org (via arxiv)\ninstitutions: not stated by any source\nsources: arxiv, semanticscholar\nabstract: A layout generation model. We plan to release code.",
+        "content_chars": 309,
+        "excerpt_chars": 309,
+        "truncated": false
+      },
+      "unrecognised": {
+        "future_provider_field": "carried, not understood"
+      }
+    },
+    {
+      "source_url": "https://doi.org/10.99999/fixture-survey",
+      "kind": "paper",
+      "locator": "metadata from crossref, openalex; not full text",
+      "paper": {
+        "title": "A Survey of Layered Image Synthesis",
+        "authors": [
+          "K. Nakamura",
+          "P. Silva"
+        ],
+        "year": 2023,
+        "venue": "虚构演示期刊 · 非真实论文",
+        "abstract": "We survey layered image synthesis methods.",
+        "doi": "10.99999/fixture-survey",
+        "arxiv_id": "",
+        "paper_url": "https://doi.org/10.99999/fixture-survey",
+        "topics": [],
+        "status": "inbox",
+        "notes": "",
+        "version_label": "",
+        "zotero_item_key": "",
+        "zotero_library_id": "",
+        "zotero_library_type": ""
+      },
+      "publication": {
+        "state": "venue",
+        "venue": "虚构演示期刊 · 非真实论文",
+        "source": "openalex",
+        "label": "有会议或期刊版本"
+      },
+      "preprint_also": false,
+      "institutions": [
+        "Some University"
+      ],
+      "sources": [
+        "crossref",
+        "openalex"
+      ],
+      "citations": 302,
+      "artifact_search": "searched",
+      "artifact_search_detail": {
+        "project_name": ""
+      },
+      "artifact_outcome": "not_found_in_scope",
+      "body": {
+        "excerpt": "A Survey of Layered Image Synthesis\nauthors: K. Nakamura, P. Silva\nyear: 2023\ndoi: 10.99999/fixture-survey\ncitations: 302\nqueries: layer decomposition\npublication: 有会议或期刊版本 — 虚构演示期刊 · 非真实论文 (via openalex)\ninstitutions: Some University\nsources: crossref, openalex\nabstract: We survey layered image synthesis methods.",
+        "content_chars": 315,
+        "excerpt_chars": 315,
+        "truncated": false
+      }
+    },
+    {
+      "source_url": "https://arxiv.org/abs/2602.99993",
+      "kind": "paper",
+      "locator": "metadata from arxiv; not full text",
+      "paper": {
+        "title": "Depth-Aware Layer Compositing",
+        "authors": [
+          "A. Haddad"
+        ],
+        "year": 2026,
+        "venue": "",
+        "abstract": "Compositing with depth ordering.",
+        "doi": "",
+        "arxiv_id": "2602.99993",
+        "paper_url": "https://arxiv.org/abs/2602.99993",
+        "topics": [],
+        "status": "inbox",
+        "notes": "",
+        "version_label": "",
+        "zotero_item_key": "",
+        "zotero_library_id": "",
+        "zotero_library_type": ""
+      },
+      "publication": {
+        "state": "unknown",
+        "venue": "",
+        "source": "",
+        "label": "来源未给出发表信息"
+      },
+      "preprint_also": false,
+      "institutions": [],
+      "sources": [
+        "arxiv"
+      ],
+      "citations": null,
+      "artifact_search": "failed",
+      "artifact_search_detail": {
+        "project_name": "depth-aware-layer-compositing",
+        "failures": [
+          "GitHub 搜索返回 403（限流）"
+        ]
+      },
+      "artifact_outcome": "access_failed",
+      "body": {
+        "excerpt": "Depth-Aware Layer Compositing\nauthors: A. Haddad\nyear: 2026\narxiv: 2602.99993\nqueries: layered generation\npublication: 来源未给出发表信息\ninstitutions: not stated by any source\nsources: arxiv\nabstract: Compositing with depth ordering.",
+        "content_chars": 225,
+        "excerpt_chars": 225,
+        "truncated": false
+      }
+    }
+  ],
+  "truncation": {
+    "bodies_excerpted": 0,
+    "excerpt_chars": 4000,
+    "note": "no document body was cut"
+  }
+}
