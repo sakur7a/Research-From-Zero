@@ -16,7 +16,88 @@ from re0.models import PaperInput
 from re0.service import Store
 from re0.zotero import (BIBLIOGRAPHIC_ITEM_TYPES, Connection, ZoteroError, ZoteroStore,
                         library_prefix, remote_item)
-from re0.zotero_sync import commit, plan, sync
+from re0.deployment import LOCAL_OWNER as OWNER
+from re0.zotero_sync import commit as _commit, plan as _plan, sync as _sync
+
+
+class LocalStore(Store):
+    """The library as its only owner sees it. An explicit owner always wins over the default."""
+
+    def list_papers(self, *, owner=OWNER, **kw):
+        return super().list_papers(owner=owner, **kw)
+
+    def create_paper(self, data, *, owner=OWNER, **kw):
+        return super().create_paper(data, owner=owner, **kw)
+
+    def get_paper(self, paper_id, *, owner=OWNER, **kw):
+        return super().get_paper(paper_id, owner=owner, **kw)
+
+    def create_resource(self, paper_id, data, *, owner=OWNER, **kw):
+        return super().create_resource(paper_id, data, owner=owner, **kw)
+
+    def save_observation(self, resource_id, observation, *, owner=OWNER, **kw):
+        return super().save_observation(resource_id, observation, owner=owner, **kw)
+
+    def history(self, resource_id, *, owner=OWNER, **kw):
+        return super().history(resource_id, owner=owner, **kw)
+
+    def topics(self, *, owner=OWNER, **kw):
+        return super().topics(owner=owner, **kw)
+
+    def update_paper(self, paper_id, data, *, owner=OWNER, **kw):
+        return super().update_paper(paper_id, data, owner=owner, **kw)
+
+    def delete_paper(self, paper_id, *, owner=OWNER, **kw):
+        return super().delete_paper(paper_id, owner=owner, **kw)
+
+    def delete_resource(self, resource_id, *, owner=OWNER, **kw):
+        return super().delete_resource(resource_id, owner=owner, **kw)
+
+    def confirm_resource(self, resource_id, revision, *, owner=OWNER, **kw):
+        return super().confirm_resource(resource_id, revision, owner=owner, **kw)
+
+    def get_resource(self, resource_id, *, owner=OWNER, **kw):
+        return super().get_resource(resource_id, owner=owner, **kw)
+
+    def export(self, *, owner=OWNER, **kw):
+        return super().export(owner=owner, **kw)
+
+
+class LocalZoteroStore(ZoteroStore):
+    """The mapping store as its only owner sees it."""
+
+    def cursor(self, connection, *, owner=OWNER, **kw):
+        return super().cursor(connection, owner=owner, **kw)
+
+    def links(self, *, owner=OWNER, **kw):
+        return super().links(owner=owner, **kw)
+
+    def link(self, connection, key, *, owner=OWNER, **kw):
+        return super().link(connection, key, owner=owner, **kw)
+
+    def status(self, connection, *, owner=OWNER, **kw):
+        return super().status(connection, owner=owner, **kw)
+
+    def save_collections(self, connection, rows, *, owner=OWNER, **kw):
+        return super().save_collections(connection, rows, owner=owner, **kw)
+
+    def select_collections(self, connection, keys, *, owner=OWNER, **kw):
+        return super().select_collections(connection, keys, owner=owner, **kw)
+
+    def disconnect(self, connection, *, owner=OWNER, **kw):
+        return super().disconnect(connection, owner=owner, **kw)
+
+
+def plan(store, papers, connection, **kw):
+    return _plan(store, papers, connection, owner=OWNER, **kw)
+
+
+def commit(store, planned, connection, **kw):
+    return _commit(store, planned, connection, owner=OWNER, **kw)
+
+
+def sync(store, papers, connection, **kw):
+    return _sync(store, papers, connection, owner=OWNER, **kw)
 
 KEY = "zotero-fixture-key-not-a-secret-but-not-real"
 PREFIX = "/users/12345"
@@ -84,7 +165,7 @@ def connection(**extra) -> Connection:
 
 def stores(tmp_path):
     database = Database(str(tmp_path / "zotero.sqlite3"))
-    return Store(database), ZoteroStore(database)
+    return LocalStore(database), LocalZoteroStore(database)
 
 
 def _client(service, conn=None):

@@ -44,13 +44,48 @@ def version() -> str:
         return "unknown (not installed as a distribution)"
 
 
+def print_deployment() -> bool:
+    """Say which mode this process would run in, and whether it could start at all.
+
+    Everything else doctor reports is about capability; this is about exposure, so it comes first.
+    The session secret is named as present or absent and never read out. Returns False when the
+    declared mode could not start, so a script checking the exit status is not told "all clear".
+    """
+    from re0.deployment import DeploymentError, from_env
+
+    deployment = from_env()
+    declared = bool(os.getenv("RE0_MODE", "").strip())
+    print(f"deployment: {deployment.mode}"
+          + ("" if declared else "（RE0_MODE 未声明，按本地单人模式运行）"))
+    try:
+        deployment.require_startable()
+    except DeploymentError as exc:
+        for line in str(exc).splitlines():
+            print(f"            {line}")
+        return False
+    if deployment.hosted:
+        print(f"            对外入口 {deployment.public_entry}；"
+              f"允许的来源 {len(deployment.allowed_origins)} 个")
+        print("            每个 /api/* 接口都需要登录会话；账户用 `python -m re0 auth create-user` 开")
+    else:
+        print("            单人本地模式：没有账户也没有登录这一步，只应绑回环地址；")
+        print("            run.py 会拒绝非回环的 RE0_HOST，远程访问请用 SSH 隧道")
+    return True
+
+
 def doctor(probe_network: bool = False) -> int:
-    """Report what can run now, without a model and without spending anything."""
+    """Report what can run now, without a model and without spending anything.
+
+    A mode that could not start is reported as a failure rather than as one more line of output:
+    doctor is what an operator checks before trusting the rest of the report.
+    """
     print(f"Re0 doctor — re0-research {version()}")
     print(f"python: {sys.version.split()[0]} (this package needs >=3.11)")
     print(f"package: {Path(__file__).resolve().parent}")
     print()
-    print("mode: `paper search`, `paper text`, `mcp`, `skill`, `zotero` and")
+    startable = print_deployment()
+    print()
+    print("mode: `paper search`, `paper text`, `mcp`, `skill`, `zotero`, `auth` and")
     print("      `session list/show/delta/scope` need no model key; a standalone task does,")
     print("      and so do `session follow-up`/`retry`")
     print("      (those two post to the running local service, where the key lives in memory)")
@@ -76,7 +111,7 @@ def doctor(probe_network: bool = False) -> int:
         print("network probes: not run. Retrieval and resource checks do reach the internet, so they "
               "only run when asked: `re0 doctor --probe-network` spends requests and may hit a "
               "provider's rate limit.")
-        return 0
+        return 0 if startable else 2
     print("network probes: running because --probe-network was passed")
     from re0.providers import ProviderError, check_resource
     for host in PROBE_HOSTS:
@@ -89,7 +124,7 @@ def doctor(probe_network: bool = False) -> int:
             print(f"  {host}: unavailable ({exc})")
         except Exception as exc:  # noqa: BLE001 - never a traceback, never a key
             print(f"  {host}: unavailable ({type(exc).__name__})")
-    return 0
+    return 0 if startable else 2
 
 
 def skill_command(arguments) -> int:
@@ -171,6 +206,9 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands.add_parser("zotero", add_help=False,
                            help="read-only incremental sync from one Zotero library; previews "
                                 "before it writes, and never reads notes or attachments")
+    subcommands.add_parser("auth", add_help=False,
+                           help="hosted mode only: print a session secret, provision an account, "
+                                "list, disable or end sessions (the password is never a flag)")
 
     skill = subcommands.add_parser("skill",
                                    help="package or install the skill directory (no model key needed)")
@@ -212,6 +250,9 @@ def main(argv=None) -> int:
     if argv[:1] == ["zotero"]:
         from re0.zotero_cli import main as zotero_main
         return zotero_main(argv[1:])
+    if argv[:1] == ["auth"]:
+        from re0.auth_cli import main as auth_main
+        return auth_main(argv[1:])
     passthrough: list = []
     if argv[:2] in (["paper", "search"], ["paper", "text"]):
         argv, passthrough = argv[:2], argv[2:]

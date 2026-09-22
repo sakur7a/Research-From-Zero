@@ -7,6 +7,7 @@ between the request body and the wire, and a disconnect that quietly takes paper
 import httpx
 from fastapi.testclient import TestClient
 
+from re0.deployment import LOCAL_OWNER
 from re0.main import create_app
 from re0.models import PaperInput
 from test_zotero import KEY, ZoteroService, item
@@ -230,7 +231,8 @@ def test_a_synced_paper_still_takes_part_in_the_ordinary_library(tmp_path):
         # The library's own duplicate guard still applies to a synced DOI.
         from fastapi import HTTPException
         try:
-            client.app.state.store.create_paper(PaperInput(title="重复 DOI", doi="10.1000/a"))
+            client.app.state.store.create_paper(PaperInput(title="重复 DOI", doi="10.1000/a"),
+                                                    owner=LOCAL_OWNER)
             raise AssertionError("a duplicate DOI was accepted")
         except HTTPException as exc:
             assert exc.status_code == 409

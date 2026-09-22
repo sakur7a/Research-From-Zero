@@ -105,23 +105,47 @@ def paper_document(record: dict) -> dict:
     return document
 
 
+# Tools whose answer depends on who is asking: one reads the reader's own library, the other caches
+# what was retrieved. Every other tool talks to a public scholarly API and returns the same thing
+# to everybody, so it takes no owner.
+OWNER_SCOPED_TOOLS = ("search_papers", "search_library")
+# One response cache per owner, and a bounded number of them: a cache shared by every reader would
+# answer one person's query with another's retrieval, and a dict that never forgets an owner would
+# grow for as long as the process lives.
+CACHE_LIMIT = 32
+
+
 class ResearchTools:
     def __init__(self, library, transport=None, workspace=None):
         self.library, self.transport, self.workspace = library, transport, workspace
-        # Scoped to this instance, which is one session: long enough that repeating a question
-        # does not re-spend the budget, short enough that it cannot carry an answer across users.
-        self.cache = ResponseCache()
+        self._caches: dict = {}
+
+    def cache_for(self, owner: str) -> ResponseCache:
+        """This owner's retrieval cache. Long enough that repeating a question does not re-spend
+        the budget; separate enough that it cannot carry an answer to somebody else."""
+        cache = self._caches.get(owner)
+        if cache is None:
+            if len(self._caches) >= CACHE_LIMIT:
+                self._caches.pop(next(iter(self._caches)))
+            cache = self._caches[owner] = ResponseCache()
+        return cache
 
     @property
     def web_enabled(self):
         return bool(os.getenv("TAVILY_API_KEY"))
 
-    def execute(self, name, raw_args, *, use_library=False, workspace=None):
+    def execute(self, name, raw_args, *, use_library=False, workspace=None, owner: str = ""):
         if name not in TOOL_TYPES or name in {"update_plan", "finish_report", "read_evidence"}:
             raise ValueError("未知或非检索工具")
         args = TOOL_TYPES[name][0].model_validate(raw_args)
         if name == "search_library" and not use_library:
             raise ValueError("用户未授权发送文献库元数据")
+        if name == "search_library" and not owner:
+            # Fail closed. An unowned library search has no correct answer: every row would be
+            # somebody's, and "everybody's" is the one result that must never be served. A public
+            # scholarly search is different — it returns the same thing to any caller, and the owner
+            # only decides which cache the answer is kept in.
+            raise ValueError("这次调用没有已验证的所有者，拒绝检索文献库")
         if name == "search_web" and not self.web_enabled:
             raise ValueError("尚未配置网页检索服务，不能假装已经搜索")
         if name == "fetch_paper_text":
@@ -130,9 +154,11 @@ class ResearchTools:
             # right one.
             return self.fetch_paper_text(args, workspace=workspace or self.workspace)
         method = getattr(self, name)
+        if name in OWNER_SCOPED_TOOLS:
+            return method(args, owner=owner)
         return method(args)
 
-    def search_papers(self, args):
+    def search_papers(self, args, *, owner: str = ""):
         """Query one or more sources for one or more queries, and merge the duplicates once.
 
         A source that fails contributes a failure entry, not an empty result: a rate
@@ -150,7 +176,7 @@ class ResearchTools:
         # honoured by the fourth, and a per-client budget cannot express that; nor can it keep a
         # total request ceiling across five sources and several queries.
         governor = Governor(max_requests=args.max_requests, seconds=60 * max(1, len(queries)),
-                            cache=self.cache)
+                            cache=self.cache_for(owner))
         # Scholarly APIs are slower than the metadata endpoints the default 8s was tuned for:
         # arXiv alone measures >5s for a plain query. The budget scales with the number of
         # (query, source) pairs and is shared by all of them, so the ceiling still bounds the call.
@@ -513,10 +539,10 @@ class ResearchTools:
         finally:
             client.close()
 
-    def search_library(self, args):
+    def search_library(self, args, *, owner: str):
         words = args.query.casefold().split()
         documents = []
-        for p in self.library.list_papers():
+        for p in self.library.list_papers(owner=owner):
             if p["is_demo"]:
                 continue
             public = {k: p[k] for k in ("title", "authors", "year", "doi", "arxiv_id", "paper_url", "abstract", "topics")}

@@ -20,6 +20,7 @@ import json
 import re
 from posixpath import basename
 
+from .deployment import LOCAL_OWNER
 from .literature import artifact_urls
 from .models import (AUDIT_COMPONENTS, AUDIT_STATES, ComponentFinding, Evidence, ResourceAudit,
                      VERIFICATION_DEPTHS, now)
@@ -120,7 +121,8 @@ def discover(document: dict, tools, *, per_kind: int = PER_ENDPOINT_LIMIT, not_r
             result, last = None, None
             for _ in range(DISCOVERY_ATTEMPTS):
                 try:
-                    result = tools.execute(tool, {"query": name, "limit": per_kind, **extra})
+                    result = tools.execute(tool, {"query": name, "limit": per_kind, **extra},
+                                           owner=LOCAL_OWNER)
                     break
                 except (ProviderError, ValueError) as exc:
                     last = exc

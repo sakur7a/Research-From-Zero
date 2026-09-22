@@ -286,7 +286,7 @@ class StubNameSearch:
     def __init__(self, hits, kinds=None):
         self.hits, self.calls = hits, []
 
-    def execute(self, name, args):
+    def execute(self, name, args, *, owner=""):
         self.calls.append((name, args.get("kind")))
         return {"documents": self.hits if name == "search_repositories" else []}
 
@@ -303,7 +303,7 @@ def test_a_partially_failed_name_search_is_not_reported_as_a_complete_one():
     the reasons were printed and never reached the JSON at all.
     """
     class HalfBroken(StubNameSearch):
-        def execute(self, name, args):
+        def execute(self, name, args, *, owner=""):
             if name == "search_hub":
                 raise ProviderError("提供商限流；稍后重试", http_status=429)
             return super().execute(name, args)

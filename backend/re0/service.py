@@ -1,4 +1,15 @@
-"""Application services: explicit identities, safe imports, immutable evidence."""
+"""Application services: explicit identities, safe imports, immutable evidence.
+
+Every method here that touches a reader's library takes an `owner`, and it is a required keyword on
+purpose. A default would let a new endpoint serve whoever's data the default names — and that default
+would be the local owner's, which is exactly the library a hosted deployment must not hand to a
+visitor. Required means an endpoint that forgets fails loudly in a test instead of quietly leaking.
+
+The owner is never read from a request payload. It comes from the verified identity resolved in
+`main.py` (`auth.Identity.owner`), so a body that declares an `owner_id` is describing something that
+does not exist. Cross-owner access raises 404 rather than 403: a 403 confirms the id belongs to
+somebody, which turns an id space into an enumeration of who has what.
+"""
 from __future__ import annotations
 
 import json
@@ -17,6 +28,11 @@ from .models import PaperInput, ResourceAudit, ResourceInput, ResourceKind, now
 # kind: a model's reading of a check is stored as an observation with its inference inside it, not
 # as its own authority.
 RECORD_KINDS = ("observation", "confirmation")
+
+# Resources and observations carry no owner column: they belong to a paper, and one source of truth
+# beats two that can disagree. Every query on them therefore joins `papers` and filters there.
+OWNED_RESOURCES = ("SELECT r.* FROM resources r JOIN papers p ON p.id=r.paper_id "
+                   "WHERE p.owner=?")
 
 
 def paper_record(row) -> dict:
@@ -71,74 +87,101 @@ class Store:
     def __init__(self, db: Database):
         self.db = db
 
-    def list_papers(self) -> list[dict]:
+    def _resources(self, con, owner: str, paper_id: str = "") -> list[dict]:
+        query, args = OWNED_RESOURCES, [owner]
+        if paper_id:
+            query += " AND r.paper_id=?"
+            args.append(paper_id)
+        rows = [resource_record(row) for row in
+                con.execute(query + " ORDER BY r.created_at, r.id", args)]
+        if not rows:
+            return rows
+        ids = {row["id"] for row in rows}
+        latest = {row["resource_id"]: {**json.loads(row["data"]), "id": row["id"]} for row in con.execute(
+            """SELECT o.* FROM observations o JOIN
+               (SELECT resource_id, MAX(id) mid FROM observations GROUP BY resource_id) recent
+               ON recent.mid=o.id""") if row["resource_id"] in ids}
+        for row in rows:
+            row["latest"] = latest.get(row["id"])
+        return rows
+
+    def list_papers(self, *, owner: str) -> list[dict]:
         with self.db.connect() as con:
-            papers = [paper_record(row) for row in con.execute("SELECT * FROM papers ORDER BY updated_at DESC, id")]
-            resources = [resource_record(row) for row in con.execute("SELECT * FROM resources ORDER BY created_at, id")]
-            rows = con.execute("""SELECT o.* FROM observations o JOIN
-                (SELECT resource_id, MAX(id) mid FROM observations GROUP BY resource_id) latest ON latest.mid=o.id""")
-            latest = {row["resource_id"]: {**json.loads(row["data"]), "id": row["id"]} for row in rows}
+            papers = [paper_record(row) for row in con.execute(
+                "SELECT * FROM papers WHERE owner=? ORDER BY updated_at DESC, id", (owner,))]
             by_paper: dict[str, list] = {}
-            for resource in resources:
-                resource["latest"] = latest.get(resource["id"])
+            for resource in self._resources(con, owner):
                 by_paper.setdefault(resource["paper_id"], []).append(resource)
             for paper in papers:
                 paper["resources"] = by_paper.get(paper["id"], [])
             return papers
 
-    def get_paper(self, paper_id: str) -> dict:
-        for paper in self.list_papers():
-            if paper["id"] == paper_id:
-                return paper
-        raise HTTPException(404, "论文不存在")
+    def get_paper(self, paper_id: str, *, owner: str) -> dict:
+        with self.db.connect() as con:
+            row = con.execute("SELECT * FROM papers WHERE id=? AND owner=?",
+                              (paper_id, owner)).fetchone()
+            if row is None:
+                raise HTTPException(404, "论文不存在")
+            paper = paper_record(row)
+            paper["resources"] = self._resources(con, owner, paper_id)
+            return paper
 
-    def create_paper(self, data: PaperInput, *, demo: bool = False) -> dict:
+    def create_paper(self, data: PaperInput, *, owner: str, demo: bool = False) -> dict:
         paper_id, timestamp = str(uuid4()), now()
         try:
             with self.db.connect() as con:
-                con.execute("INSERT INTO papers VALUES (?,?,?,?,?,?,?)", (
-                    paper_id, encode(data.model_dump(mode="json")), data.doi,
-                    re.sub(r"v\d+$", "", data.arxiv_id), timestamp, timestamp, int(demo)))
-                con.executemany("INSERT OR IGNORE INTO topics VALUES (?)", [(name,) for name in data.topics])
+                con.execute("INSERT INTO papers(id,data,doi,arxiv_base,created_at,updated_at,"
+                            "is_demo,owner) VALUES (?,?,?,?,?,?,?,?)", (
+                                paper_id, encode(data.model_dump(mode="json")), data.doi,
+                                re.sub(r"v\d+$", "", data.arxiv_id), timestamp, timestamp,
+                                int(demo), owner))
+                con.executemany("INSERT OR IGNORE INTO topics(name,owner) VALUES (?,?)",
+                                [(name, owner) for name in data.topics])
         except sqlite3.IntegrityError as exc:
             raise HTTPException(409, "此 DOI 或 arXiv 已在文献库中；请编辑已有条目，原有笔记不会被覆盖") from exc
-        return self.get_paper(paper_id)
+        return self.get_paper(paper_id, owner=owner)
 
-    def update_paper(self, paper_id: str, data: PaperInput) -> dict:
+    def update_paper(self, paper_id: str, data: PaperInput, *, owner: str) -> dict:
         try:
             with self.db.connect() as con:
-                result = con.execute("UPDATE papers SET data=?,doi=?,arxiv_base=?,updated_at=? WHERE id=?", (
-                    encode(data.model_dump(mode="json")), data.doi, re.sub(r"v\d+$", "", data.arxiv_id), now(), paper_id))
+                result = con.execute("UPDATE papers SET data=?,doi=?,arxiv_base=?,updated_at=? "
+                                     "WHERE id=? AND owner=?", (
+                                         encode(data.model_dump(mode="json")), data.doi,
+                                         re.sub(r"v\d+$", "", data.arxiv_id), now(), paper_id, owner))
                 if not result.rowcount:
                     raise HTTPException(404, "论文不存在")
-                con.executemany("INSERT OR IGNORE INTO topics VALUES (?)", [(name,) for name in data.topics])
+                con.executemany("INSERT OR IGNORE INTO topics(name,owner) VALUES (?,?)",
+                                [(name, owner) for name in data.topics])
         except sqlite3.IntegrityError as exc:
             raise HTTPException(409, "此 DOI 或 arXiv 已被另一篇论文使用；没有覆盖任何条目") from exc
-        return self.get_paper(paper_id)
+        return self.get_paper(paper_id, owner=owner)
 
-    def delete_paper(self, paper_id: str):
+    def delete_paper(self, paper_id: str, *, owner: str):
         with self.db.connect() as con:
-            if not con.execute("DELETE FROM papers WHERE id=?", (paper_id,)).rowcount:
+            if not con.execute("DELETE FROM papers WHERE id=? AND owner=?",
+                               (paper_id, owner)).rowcount:
                 raise HTTPException(404, "论文不存在")
 
-    def create_resource(self, paper_id: str, data: ResourceInput) -> dict:
+    def create_resource(self, paper_id: str, data: ResourceInput, *, owner: str) -> dict:
         resource_id = str(uuid4())
         with self.db.connect() as con:
-            if not con.execute("SELECT 1 FROM papers WHERE id=?", (paper_id,)).fetchone():
+            if not con.execute("SELECT 1 FROM papers WHERE id=? AND owner=?",
+                               (paper_id, owner)).fetchone():
                 raise HTTPException(404, "论文不存在")
-            con.execute("INSERT INTO resources VALUES (?,?,?,?)", (resource_id, paper_id, encode(data.model_dump(mode="json")), now()))
-            con.execute("UPDATE papers SET updated_at=? WHERE id=?", (now(), paper_id))
-        return self.get_resource(resource_id)
+            con.execute("INSERT INTO resources VALUES (?,?,?,?)",
+                        (resource_id, paper_id, encode(data.model_dump(mode="json")), now()))
+            con.execute("UPDATE papers SET updated_at=? WHERE id=? AND owner=?", (now(), paper_id, owner))
+        return self.get_resource(resource_id, owner=owner)
 
-    def get_resource(self, resource_id: str) -> dict:
+    def get_resource(self, resource_id: str, *, owner: str) -> dict:
         with self.db.connect() as con:
-            row = con.execute("SELECT * FROM resources WHERE id=?", (resource_id,)).fetchone()
+            row = con.execute(OWNED_RESOURCES + " AND r.id=?", (owner, resource_id)).fetchone()
             if not row:
                 raise HTTPException(404, "资源不存在")
             return resource_record(row)
 
-    def history(self, resource_id: str) -> list[dict]:
-        self.get_resource(resource_id)
+    def history(self, resource_id: str, *, owner: str) -> list[dict]:
+        self.get_resource(resource_id, owner=owner)
         with self.db.connect() as con:
             rows = [{**json.loads(row["data"]), "id": row["id"]} for row in con.execute(
                 "SELECT * FROM observations WHERE resource_id=? ORDER BY id DESC", (resource_id,))]
@@ -146,8 +189,8 @@ class Store:
         # Defaulting it to anything else would rewrite history rather than read it.
         return [{"record_kind": "observation", **row} for row in rows]
 
-    def save_observation(self, resource_id: str, observation: dict, *, kind: str = "observation",
-                         origin: str = "check"):
+    def save_observation(self, resource_id: str, observation: dict, *, owner: str,
+                         kind: str = "observation", origin: str = "check"):
         """Append one immutable record, labelled with who is speaking.
 
         A machine check and a human confirmation are different kinds of statement, and an
@@ -157,6 +200,9 @@ class Store:
         """
         if kind not in RECORD_KINDS:
             raise HTTPException(422, f"记录类型只能是 {' 或 '.join(RECORD_KINDS)}")
+        # Ownership is checked before the write: an observation appended to somebody else's resource
+        # cannot be un-appended, and the foreign key would not stop it.
+        self.get_resource(resource_id, owner=owner)
         record = {**observation, "record_kind": kind, "record_origin": origin, "recorded_at": now()}
         try:
             with self.db.connect() as con:
@@ -164,9 +210,9 @@ class Store:
                             (resource_id, encode(record), record.get("checked_at") or now()))
         except sqlite3.IntegrityError as exc:
             raise HTTPException(409, "检查期间资源已被删除，结果未写入其他资源") from exc
-        return self.history(resource_id)[0]
+        return self.history(resource_id, owner=owner)[0]
 
-    def confirm_resource(self, resource_id: str, revision: ResourceAudit) -> dict:
+    def confirm_resource(self, resource_id: str, revision: ResourceAudit, *, owner: str) -> dict:
         """A human confirmation, stored as its own record beside the observations it revises.
 
         This is the only writer that may carry a settled attribution or a version judgement, and the
@@ -174,13 +220,13 @@ class Store:
         reaches here: a `confirmed: true` inside a tool result is a string in some payload, not a
         user's approval, and there is no argument that turns one into the other.
         """
-        resource = self.get_resource(resource_id)
+        resource = self.get_resource(resource_id, owner=owner)
         if resource["url"] != revision.resource_url:
             raise HTTPException(422, "确认的内容必须对应这个资源的链接")
-        return self.save_observation(resource_id, revision.model_dump(mode="json"),
+        return self.save_observation(resource_id, revision.model_dump(mode="json"), owner=owner,
                                      kind="confirmation", origin="user")
 
-    def import_audits(self, items: list[dict], dry_run: bool = True) -> dict:
+    def import_audits(self, items: list[dict], dry_run: bool = True, *, owner: str) -> dict:
         """Link approved papers and their resource audits into the library.
 
         Idempotent by identifier, by resource URL and by audit fingerprint, and it never updates a
@@ -216,22 +262,24 @@ class Store:
                     # Nothing to link, so nothing to create. A paper this import cannot attach a
                     # single resource to is a record nobody asked the library to hold.
                     continue
-                paper_id, was_new = self._paper_for_import(paper)
+                paper_id, was_new = self._paper_for_import(paper, owner=owner)
                 if was_new:
                     created.append({"index": index, "paper_id": paper_id, "title": paper.title})
-                known = {item["url"]: item["id"] for item in self.get_paper(paper_id)["resources"]}
+                known = {item["url"]: item["id"]
+                         for item in self.get_paper(paper_id, owner=owner)["resources"]}
                 for audit in linkable:
                     resource_id = known.get(audit.resource_url)
                     if resource_id is None:
-                        resource_id = self.create_resource(paper_id, resource_from_audit(audit))["id"]
+                        resource_id = self.create_resource(
+                            paper_id, resource_from_audit(audit), owner=owner)["id"]
                         known[audit.resource_url] = resource_id
                     fingerprint = (audit.checked_at, audit.revision, audit.status)
                     if any((row.get("checked_at"), row.get("revision"), row.get("status")) == fingerprint
-                           for row in self.history(resource_id)):
+                           for row in self.history(resource_id, owner=owner)):
                         skipped.append({"index": index, "url": audit.resource_url,
                                         "reason": "同一次检查已导入过"})
                         continue
-                    self.save_observation(resource_id, audit.model_dump(mode="json"),
+                    self.save_observation(resource_id, audit.model_dump(mode="json"), owner=owner,
                                           kind="observation", origin="import")
                     linked.append({"index": index, "paper_id": paper_id,
                                    "resource_id": resource_id, "url": audit.resource_url,
@@ -243,41 +291,54 @@ class Store:
                             for index, paper, audits in prepared[:20]],
                 "note": "导入只建立关联，不修改已存在论文的笔记或字段；确认归属是另一条记录。"}
 
-    def _paper_for_import(self, paper: PaperInput) -> tuple:
-        """Find the paper by identifier, or create it. An existing one is returned untouched."""
+    def _paper_for_import(self, paper: PaperInput, *, owner: str) -> tuple:
+        """Find the paper by identifier, or create it. An existing one is returned untouched.
+
+        The lookup is scoped, so an identifier another owner holds is not found here and becomes this
+        owner's own row. Sharing a DOI is not a reason to share a record, and the answer must not
+        reveal that somebody else already has it.
+        """
         arxiv = re.sub(r"v\d+$", "", paper.arxiv_id)
         with self.db.connect() as con:
-            row = con.execute(
-                "SELECT id FROM papers WHERE (doi != '' AND doi=?) OR (arxiv_base != '' AND arxiv_base=?)",
-                (paper.doi, arxiv)).fetchone()
+            row = con.execute("SELECT id FROM papers WHERE owner=? AND ((doi != '' AND doi=?) "
+                              "OR (arxiv_base != '' AND arxiv_base=?))",
+                              (owner, paper.doi, arxiv)).fetchone()
         if row:
             return row[0], False
-        return self.create_paper(paper)["id"], True
+        return self.create_paper(paper, owner=owner)["id"], True
 
-    def delete_resource(self, resource_id: str):
+    def delete_resource(self, resource_id: str, *, owner: str):
+        # The subquery is the authorization: without it an id from another library would delete a row
+        # this caller was never shown.
         with self.db.connect() as con:
-            if not con.execute("DELETE FROM resources WHERE id=?", (resource_id,)).rowcount:
+            if not con.execute("DELETE FROM resources WHERE id=? AND paper_id IN "
+                               "(SELECT id FROM papers WHERE owner=?)",
+                               (resource_id, owner)).rowcount:
                 raise HTTPException(404, "资源不存在")
 
-    def topics(self) -> list[str]:
+    def topics(self, *, owner: str) -> list[str]:
         with self.db.connect() as con:
-            return [row[0] for row in con.execute("SELECT name FROM topics ORDER BY name")]
+            return [row[0] for row in con.execute("SELECT name FROM topics WHERE owner=? "
+                                                  "ORDER BY name", (owner,))]
 
-    def add_topic(self, name: str):
+    def add_topic(self, name: str, *, owner: str):
         with self.db.connect() as con:
-            con.execute("INSERT OR IGNORE INTO topics VALUES (?)", (name,))
+            con.execute("INSERT OR IGNORE INTO topics(name,owner) VALUES (?,?)", (name, owner))
 
-    def export(self) -> dict:
-        papers = self.list_papers()
+    def export(self, *, owner: str) -> dict:
+        papers = self.list_papers(owner=owner)
         for paper in papers:
             for resource in paper["resources"]:
-                resource["observations"] = self.history(resource["id"])
-        return {"schema_version": 1, "exported_at": now(), "topics": self.topics(), "papers": papers}
+                resource["observations"] = self.history(resource["id"], owner=owner)
+        # `owner` is in the export because a file that does not say whose library it is can be
+        # imported into somebody else's, and then the answer is wrong in a way nobody can see.
+        return {"schema_version": 2, "exported_at": now(), "owner": owner,
+                "topics": self.topics(owner=owner), "papers": papers}
 
-    def import_csl(self, items: list[dict], dry_run: bool = True) -> dict:
+    def import_csl(self, items: list[dict], dry_run: bool = True, *, owner: str) -> dict:
         if len(items) > 500:
             raise HTTPException(422, "单次最多导入 500 条 CSL JSON 记录")
-        existing = self.list_papers()
+        existing = self.list_papers(owner=owner)
         dois = {p["doi"] for p in existing if p["doi"]}
         arxivs = {re.sub(r"v\d+$", "", p["arxiv_id"]) for p in existing if p["arxiv_id"]}
         titles = {p["title"].strip().casefold() for p in existing}
@@ -312,7 +373,7 @@ class Store:
         if not dry_run:
             for data in prepared:
                 try:
-                    created.append(self.create_paper(data)["id"])
+                    created.append(self.create_paper(data, owner=owner)["id"])
                 except HTTPException as exc:
                     if exc.status_code != 409:
                         raise
@@ -320,9 +381,9 @@ class Store:
         return {"dry_run": dry_run, "ready": len(prepared), "skipped": skipped, "errors": errors,
                 "preview": [x.model_dump(mode="json") for x in prepared[:20]], "created": created, "conflicts": conflicts}
 
-    def seed_demo(self) -> int:
+    def seed_demo(self, *, owner: str) -> int:
         # Seed only on explicit user action; all records and observations are fictional.
-        if any(p["is_demo"] for p in self.list_papers()):
+        if any(p["is_demo"] for p in self.list_papers(owner=owner)):
             return 0
         examples = [
             ("Layered Canvas: Editable Image Decomposition", ["图层分解 / 生成"], "baseline", ["code", "checkpoint", "dataset"], ["metadata_accessible", "gated", "indeterminate"]),
@@ -338,11 +399,11 @@ class Store:
                                                 venue="虚构演示 · 非真实论文", topics=topics, status=status,
                                                 abstract="这是一条用于体验产品的虚构论文。展示研究方向、多维资源状态、证据记录与 baseline 筛选流程；不可用于学术引用。",
                                                 notes="演示笔记：先检查输入输出和实验协议，再确认所需资源。此记录没有对应真实论文。",
-                                                version_label="演示 v1"), demo=True)
+                                                version_label="演示 v1"), owner=owner, demo=True)
             for n, (kind, result) in enumerate(zip(kinds, results)):
                 resource = self.create_resource(paper["id"], ResourceInput(kind=kind, label=labels[kind],
                     url=f"https://example.org/re0-demo/{index}/{kind}",
-                    ownership="unconfirmed"))
+                    ownership="unconfirmed"), owner=owner)
                 if result:
                     summary = {"metadata_accessible": "演示：元数据与候选文件可定位；没有进行运行验证。",
                                "gated": "演示：模型页面存在，但文件访问需要申请。",
@@ -354,12 +415,12 @@ class Store:
                         "indicators": {"training": ["train.py"], "inference": ["inference.py"]} if kind == "code" and result == "metadata_accessible" else {},
                         "evidence": [{"source_url": resource["url"], "locator": "演示说明", "excerpt": summary, "category": "demo"}],
                         "discovered": [], "license_id": "", "content_sha256": "", "paper_version_snapshot": "演示 v1"
-                    })
+                    }, owner=owner)
         return len(examples)
 
-    def clear_demo(self) -> int:
+    def clear_demo(self, *, owner: str) -> int:
         with self.db.connect() as con:
-            return con.execute("DELETE FROM papers WHERE is_demo=1").rowcount
+            return con.execute("DELETE FROM papers WHERE is_demo=1 AND owner=?", (owner,)).rowcount
 
 
 def bibtex_export(papers: list[dict]) -> str:

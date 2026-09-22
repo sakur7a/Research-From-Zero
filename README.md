@@ -1,6 +1,6 @@
 # Re0: Research From Zero
 
-**v0.2.0 · Agent-first · 本地单用户 Alpha。**
+**v0.2.0 · Agent-first · 默认是本地单人 Alpha。** 另有 `RE0_MODE=hosted`（账户、会话、按账户的数据与密钥隔离），但**尚不是可交付状态**，见[两种运行模式](#两种运行模式)。
 
 输入研究目标，由模型自主选择检索工具、阅读返回材料、补查资源并输出有来源的研究报告。文献库不再是主入口，而是研究结果的保存位置。**这不是把固定脚本包装成 agent，也没有在未配置模型时用演示结果冒充分析。**
 
@@ -33,6 +33,28 @@ python run.py
 4. 查看报告与来源；候选论文仅在点击批准后写入文献库。可取消任务、导出结果，对失败／中断任务进行有限次数的手动恢复。
 
 Base URL 通常包含 `/v1`，不要填写 `/chat/completions`；本地服务示例为 `http://127.0.0.1:11434/v1`。**具体模型必须支持工具调用**；不是任何聊天模型、厂商专有推理模式、原生 Messages/Responses API 都已适配。若供应商要求 `max_completion_tokens`，可在界面切换输出参数。此版不会自动切换到另一模型服务。不是每个供应商都实现 `GET /models`，拉取失败时手动填写 Model ID 即可。
+
+### 两种运行模式
+
+`RE0_MODE` 由部署者**声明**，服务不会自己猜：进程看不到谁能访问它的端口，所以"大概是本地"这种推断一旦错了就是静默开放。
+
+**`local`（默认）** —— 单人使用，没有账户也没有登录这一步，所有记录属于 owner `local`。**只应绑回环地址**；`RE0_HOST` 设成非回环地址时 `run.py` 会拒绝启动并说明原因。需要远程访问请用 SSH 隧道。
+
+**`hosted`** —— 每个 `/api/*` 接口都属于某一个账户。缺任何一项配置，服务**拒绝启动并一次列全**（不会静默降级成本地模式）：
+
+```bash
+python -m re0 auth secret            # 打印一个 RE0_SESSION_SECRET，只打印这一次
+export RE0_MODE=hosted
+export RE0_SESSION_SECRET=...        # 至少 32 字符；文档里出现过的示例值（含重复拼凑到够长的）会被拒绝
+export RE0_PUBLIC_ENTRY=https://re0.example.org      # 对外的 https 入口，TLS 在哪一层终止
+export RE0_ALLOWED_ORIGINS=https://re0.example.org   # 逗号分隔的 https 源
+python -m re0 auth create-user       # 开户：密码从终端提示读，不是命令行参数
+python run.py
+```
+
+`re0 auth list|disable|revoke|purge` 分别用于查看账户、停用账户、结束会话、清理过期会话。**没有注册接口**，账户只能由运维在控制台开。跨账户访问返回 **404 而不是 403** —— 403 等于确认这个 id 属于某个人，会把每个标识符变成枚举的入口。托管模式还额外拒绝本机模型地址（`127.0.0.1` / `[::1]`）与解析结果不全为公网的模型主机，`RE0_ALLOW_LOCAL_RESOLVER` 在托管模式下不适用（拒绝信息会这么说，而不是给一个用不上的开关）。`re0 doctor` 第一行就报当前模式，声明了 `hosted` 却起不来时**退出码是 2**，不是"打印一行提示然后返回 0"。
+
+> **托管模式还不是可交付状态。** 登录接口有了，但界面上还没有登录页；配额、限流和全站熔断也还没有做；没有真实 TLS 终端加真实第二用户的部署验证。已经实现并有测试覆盖的是：身份、按账户隔离、按账户的密钥作用域、启动前拒绝。缺的部分逐条写在 [SECURITY.md](SECURITY.md)。自己用请继续用 `local`。
 
 ## v0.2 已实现的架构
 
@@ -84,7 +106,7 @@ Base URL 通常包含 `/v1`，不要填写 `/chat/completions`；本地服务示
 
 ## 模型、密钥和数据
 
-网页填写的模型配置仅保留在**本地服务内存**；不会返回 API Key 到界面，不进入任务数据库、JSON 导出或 git。重启后需要重新设置，或通过启动前的环境变量配置。浏览器向本地后端提交 Key，后端再向选定的模型服务发送请求。
+网页填写的模型配置仅保留在**服务内存**；不会返回 API Key 到界面，不进入任务数据库、JSON 导出或 git。重启后需要重新设置，或通过启动前的环境变量配置。浏览器向本地后端提交 Key，后端再向选定的模型服务发送请求。这份内存里的配置**按账户分开**（`hosted` 模式下每个账户一份，`local` 模式下就是 owner `local` 那一份）：一个账户填的 Key，另一个账户既读不到也清不掉；任务启动时会把当轮的配置快照下来，所以之后换 Key 不会把正在跑的那一轮改道。
 
 默认允许的远程模型主机：`api.openai.com`、`api.deepseek.com`、`dashscope.aliyuncs.com`、`dashscope-intl.aliyuncs.com`、`openrouter.ai`、`open.bigmodel.cn`、`api.moonshot.cn`、`api.siliconflow.cn`、`ark.cn-beijing.volces.com`。远程必须 HTTPS；自定义域名需由部署者通过 `RE0_LLM_ALLOWED_HOSTS` 明确加入。这个列表是**网络目的地许可，不是已通过实测的模型兼容性清单**；界面里的服务商预设是本列表的子集，且「拉取可用模型」只向这些地址之一发请求。本地服务允许 `127.0.0.1` / `[::1]` 加显式端口，Key 可以留空。
 
@@ -103,11 +125,18 @@ Base URL 通常包含 `/v1`，不要填写 `/chat/completions`；本地服务示
 | `OPENREVIEW_TOKEN` | 可选：OpenReview 的公开检索不需要账号，token 用于更宽的读取范围 |
 | `GITHUB_TOKEN` | 可选 GitHub API 凭证，仅发往 GitHub API |
 | `RE0_DB` | SQLite 路径，默认仓库下 `.data/re0.sqlite3` |
-| `RE0_HOST` / `RE0_PORT` | 默认 `127.0.0.1:8000` |
+| `RE0_HOST` / `RE0_PORT` | 默认 `127.0.0.1:8000`。**`local` 模式下 `RE0_HOST` 只能填回环地址**，否则 `run.py` 拒绝启动：无认证的服务绑到 `0.0.0.0` 不是配置，是开门 |
+| `RE0_MODE` | `local`（默认）或 `hosted`。不声明就是 `local`；服务不会根据绑定地址去猜 |
+| `RE0_SESSION_SECRET` | `hosted` 必需，至少 32 字符随机值（`python -m re0 auth secret` 生成）。文档里出现过的示例值会被拒绝，**包括重复拼凑到够长的那种** |
+| `RE0_PUBLIC_ENTRY` | `hosted` 必需：对外的 https 入口，也就是 TLS 在哪一层终止。http 会被拒绝 |
+| `RE0_ALLOWED_ORIGINS` | `hosted` 必需：逗号分隔的 https 源，且必须包含 `RE0_PUBLIC_ENTRY` 自己。`localhost` 源在托管模式下不被接受 |
+| `RE0_ALLOW_INSECURE_COOKIES` | **只用于被拒绝**：托管模式下设了它就是启动失败，因为会话 Cookie 必须带 `Secure`。它存在的意义是让一个从别处抄来的开关不会静默生效 |
 
 `.env.example` 只是说明文件，**不自动加载**。环境配置启动后仍只保存在进程内存；从界面清除并不会删除 shell 环境变量，下一次启动可能重新加载。HTTP 客户端当前不读取系统代理变量。
 
-**本地部署不等于材料不出本机。** 执行任务会把目标、工具返回的公开材料、以及经授权的文献库元数据发送到你选择的模型服务。任务和证据在本地明文存储，导出也可能包含敏感研究主题。无登录、认证、多用户隔离或加密数据库，**不要直接暴露到公网或不可信局域网**。安全限制见 [SECURITY.md](SECURITY.md)。
+**本地部署不等于材料不出本机。** 执行任务会把目标、工具返回的公开材料、以及经授权的文献库元数据发送到你选择的模型服务。任务和证据在本地明文存储，导出也可能包含敏感研究主题。**数据库始终不加密**，两种模式都一样。
+
+`local` 模式没有登录，也没有多用户隔离（只有一个 owner：`local`），**不要直接暴露到公网或不可信局域网**。`hosted` 模式有账户、会话和按账户的数据与密钥隔离，但**它还不是可交付状态** —— 界面上还没有登录页，也没有配额、限流和全站熔断，所以"能隔离"不等于"可以公开部署"。两种模式的安全边界与已知缺口逐条写在 [SECURITY.md](SECURITY.md)。
 
 ## 作为 skill 使用（多源文献检索）
 
@@ -225,12 +254,13 @@ official 时，准确率报 `no value` 并给出原因；② **未命中就是�
 skill 脚本和 `re0` 命令走**同一份实现**（`backend/re0/skill_search.py`），所以两者不会分叉：
 
 ```bash
-re0 doctor                                            # 现在能跑什么；默认不联网、不花钱
+re0 doctor                                            # 现在能跑什么、当前是哪种部署模式；默认不联网、不花钱
 re0 paper search --query "layer decomposition" --start-year 2025
 re0 mcp                                               # 只读工具走 stdio，本机可用
 re0 mcp --workspace ./ws                              # 可选：把工具取得的来源存成稳定 ID
 re0 session list                                      # 会话与它们的累计账本（不联网、不花钱）
 re0 session scope <run id> --goal "只保留有训练代码的两篇" --reuse-evidence ev_xxx
+re0 auth list                                         # 托管模式的账户与会话；本地模式会说明没有账户这一步
 ```
 
 `mcp` **默认无状态**：不打开目录、不碰文献数据库。只有显式给 `--workspace DIR` 才会把工具取得的来源存下来，每份有**稳定 ID**（按内容寻址，同一来源不会存成两份），可导出/导入。导入**默认只预览**、幂等、**不会自动把论文入文献库**，并且**拒绝来自别的工作区的包**。**模型写出的文字不允许当成来源存进去** —— 工作区里只有工具真正取回的材料。
@@ -387,6 +417,8 @@ python -m re0.mcp_server
 ## 从 v0.1 升级
 
 没有删除或重建原论文表；新增独立版本的 agent 表。原文献、笔记、分类、静态检查记录均保留，旧界面移到 `/library`。
+
+**加了 owner 之后的结构升级**（papers v1→v2、agent v2→v3、zotero v1→v2）在启动时自动完成：先用 SQLite 备份 API 把文件复制成 `<原名>.pre-v2-<时间戳>.sqlite3`，再改结构；已有记录全部归到 owner `local`，重建表的行数对不上就不会删旧表；`PRAGMA foreign_key_check` 不干净也算失败。比当前版本**更新**的 schema 会被拒绝启动而不是降级。所以升级前自己再备份一次仍然是建议动作，但漏了也不会拿唯一的原库去冒险。`local` 是保留账户名，托管模式下没有人能占用它，也就没有人能认领迁移刚分配出去的那些行。
 
 先用旧版自带备份工具建立完整备份，再停止旧服务、替换代码、启动新版：
 

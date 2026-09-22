@@ -1,5 +1,6 @@
 import json
 
+from re0.deployment import LOCAL_OWNER
 from re0.main import create_app
 from fastapi.testclient import TestClient
 
@@ -88,7 +89,7 @@ def test_check_cache_and_append_only_history(client):
     assert len(client.get(f"/api/resources/{r['id']}/observations").json()) == 1
     store = client.app.state.store
     old = {**first["observation"], "checked_at": "2000-01-01T00:00:00+00:00", "status": "access_failed"}
-    store.save_observation(r["id"], old)
+    store.save_observation(r["id"], old, owner=LOCAL_OWNER)
     assert client.post(path, json={}).json()["cached"] is False
     history = client.get(f"/api/resources/{r['id']}/observations").json()
     assert len(history) == 3
@@ -293,7 +294,10 @@ def test_export_contains_evidence_and_safe_bibtex(client):
     r = resource(client, p["id"])
     client.post(f"/api/resources/{r['id']}/check", json={})
     data = client.get("/api/export").json()
-    assert data["schema_version"] == 1
+    # Version 2 because the export now names whose library it is: a file that does not say can be
+    # imported into somebody else's, and then the answer is wrong in a way nobody can see.
+    assert data["schema_version"] == 2
+    assert data["owner"] == LOCAL_OWNER
     assert data["papers"][0]["resources"][0]["observations"][0]["evidence"]
     bib = client.get("/api/export?format=bibtex")
     assert bib.status_code == 200

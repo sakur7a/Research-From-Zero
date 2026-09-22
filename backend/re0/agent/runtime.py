@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import HTTPException
 from pydantic import ValidationError
 
+from ..deployment import Deployment
 from ..models import now
 from ..providers import ProviderError
 from .model import ENDPOINT_PRESETS, ChatModel, ModelError, ModelVault, list_models as fetch_model_list
@@ -64,17 +65,24 @@ class Cancelled(Exception):
 
 
 class AgentRuntime:
-    def __init__(self, library, *, transport=None, model_factory=None):
+    def __init__(self, library, *, transport=None, model_factory=None, deployment=None):
+        self.deployment = deployment or Deployment()
         self.tasks = TaskStore(library.db)
-        self.vault = ModelVault()
+        # One configuration per owner: a global vault would let whoever configured last decide where
+        # everybody else's prompts and evidence are sent.
+        self.vault = ModelVault(hosted=self.deployment.hosted)
         self.tools = ResearchTools(library, transport)
-        self.model_factory = model_factory or (lambda config: ChatModel(config, transport))
+        self.model_factory = model_factory or (
+            lambda config: ChatModel(config, transport, hosted=self.deployment.hosted))
         self._transport = transport
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="re0-agent")
         self._future = None
         self._busy = False
+        # Who holds the single execution slot. A lease rather than a boolean, so a refused submit can
+        # say whether the slot is the caller's own without saying whose it is.
+        self._lease: dict = {}
 
     def start(self):
         self.tasks.recover()
@@ -84,10 +92,14 @@ class AgentRuntime:
         self._pool.shutdown(wait=True, cancel_futures=False)
         self.vault.clear()
 
-    def public(self):
-        return {**self.vault.public(), "busy": self.busy(), "runtime": "native-durable-tool-loop",
-                "web_search_enabled": self.tools.web_enabled, "task_defaults": self.task_defaults().model_dump(),
-                "session_caps": self.session_caps().model_dump(),
+    def public(self, *, owner: str):
+        """Everything the settings panel needs about *this* owner. No key, and nobody else's state:
+        `busy` is a fact about the process, and the lease says only whether the slot is theirs."""
+        return {**self.vault.public(owner=owner), **self.busy_view(owner),
+                "runtime": "native-durable-tool-loop",
+                "web_search_enabled": self.tools.web_enabled,
+                "task_defaults": self.task_defaults(owner=owner).model_dump(),
+                "session_caps": self.session_caps(owner=owner).model_dump(),
                 "endpoint_presets": ENDPOINT_PRESETS,
                 "tool_names": [x["function"]["name"] for x in specifications(True, self.tools.web_enabled)]}
 
@@ -161,21 +173,25 @@ class AgentRuntime:
             self.tasks.event(rid, "context_compacted", {"message": f"上下文接近上限，已收起 {elided} 条较早的工具摘录；证据保留，可用 read_evidence 取回"})
         return elided
 
-    def task_defaults(self) -> TaskDefaults:
-        """Stored workspace defaults for new tasks. Credentials are never stored here."""
-        stored = self.tasks.setting(DEFAULTS_KEY)
+    def task_defaults(self, *, owner: str) -> TaskDefaults:
+        """This owner's stored defaults for new tasks. Credentials are never stored here.
+
+        Per owner rather than global: one reader raising their own tool budget must not become the
+        budget somebody else's task runs under.
+        """
+        stored = self.tasks.setting(DEFAULTS_KEY, owner=owner)
         try:
             return TaskDefaults(**stored)
         except ValidationError:
             # A hand-edited or legacy row must not stop the service or widen a budget.
             return TaskDefaults()
 
-    def set_defaults(self, data: TaskDefaults):
-        """Applies to new tasks only. Already created tasks keep their saved budgets."""
-        self.tasks.save_setting(DEFAULTS_KEY, data.model_dump())
-        return self.public()
+    def set_defaults(self, data: TaskDefaults, *, owner: str):
+        """Applies to this owner's new tasks only. Created tasks keep their saved budgets."""
+        self.tasks.save_setting(DEFAULTS_KEY, data.model_dump(), owner=owner)
+        return self.public(owner=owner)
 
-    def session_caps(self) -> SessionCaps:
+    def session_caps(self, *, owner: str) -> SessionCaps:
         """Ceilings applied to conversations created from now on.
 
         Stored under their own key rather than inside `task_defaults`: a per-turn budget and a
@@ -183,65 +199,95 @@ class AgentRuntime:
         it was created with either way.
         """
         try:
-            return SessionCaps(**self.tasks.setting(SESSION_KEY))
+            return SessionCaps(**self.tasks.setting(SESSION_KEY, owner=owner))
         except ValidationError:
             # A hand-edited row must not stop the service, and must not widen a ceiling.
             return SessionCaps()
 
-    def set_session_caps(self, data: SessionCaps):
-        self.tasks.save_setting(SESSION_KEY, data.model_dump())
-        return self.public()
+    def set_session_caps(self, data: SessionCaps, *, owner: str):
+        self.tasks.save_setting(SESSION_KEY, data.model_dump(), owner=owner)
+        return self.public(owner=owner)
 
     def busy(self):
         with self._lock:
             return self._busy
 
-    def configure(self, config: ModelConfig | None):
-        with self._lock:
-            if self._busy:
-                raise HTTPException(409, "任务正在运行；停止后再更换或清除模型配置")
-            if config is None:
-                self.vault.clear()
-            else:
-                self.vault.set(config)
-            return self.public()
+    def busy_view(self, owner: str) -> dict:
+        """Whether the single execution slot is taken, and whether it is this caller's.
 
-    def test_connection(self):
+        Deliberately not whose it is: a queue that names the holder tells every other reader when a
+        stranger starts and stops working, which is information nobody needs and cannot unlearn.
+        """
         with self._lock:
-            if self._busy:
-                raise HTTPException(409, "当前有模型任务，请勿重复测试")
-            self._busy = True
-        try:
-            return self.model_factory(self.vault.snapshot()).test()
-        finally:
-            with self._lock:
-                self._busy = False
+            held = bool(self._busy)
+            mine = held and self._lease.get("owner") == owner
+            since = self._lease.get("since", "") if mine else ""
+        return {"busy": held, "queue": {"held": held, "mine": mine, "run_id":
+                                        self._lease.get("run_id", "") if mine else "",
+                                        "since": since},
+                "execution": "serial-one-task",
+                "note": ("执行槽由你当前这一轮持有" if mine else
+                         "服务一次只执行一个研究任务；槽位被占用时新请求会被拒绝，不会排队扣费"
+                         if held else "执行槽空闲")}
 
-    def submit(self, params: TaskInput):
+    def _busy_message(self) -> str:
+        if self.deployment.hosted:
+            return ("服务当前正在执行一个研究任务（串行执行，一次一个）；本次请求没有创建任务，"
+                    "也没有产生任何花费")
+        return "本地单用户版一次执行一个研究任务；请先停止当前任务"
+
+    def _owner_busy(self, owner: str) -> bool:
+        """Whether this owner has a turn queued or running.
+
+        Used where the old global flag was too broad: with a per-owner vault, one reader changing
+        their own model configuration cannot affect a task that is already running — the task
+        carries its own snapshot — so the only reason to refuse is their own turn in flight.
+        """
+        return any(row["status"] in ("queued", "running")
+                   for row in self.tasks.list(owner=owner))
+
+    def configure(self, config: ModelConfig | None, *, owner: str):
+        if self._owner_busy(owner):
+            raise HTTPException(409, "你有一轮任务正在运行；停止后再更换或清除模型配置")
+        if config is None:
+            self.vault.clear(owner=owner)
+        else:
+            self.vault.set(config, owner=owner)
+        return self.public(owner=owner)
+
+    def test_connection(self, *, owner: str):
+        """One possibly billed capability test against this owner's own destination.
+
+        It does not take the execution slot: the test runs in the request thread, and reserving the
+        slot for it would let a settings page block everybody's research.
+        """
+        return self.model_factory(self.vault.snapshot(owner=owner)).test()
+
+    def submit(self, params: TaskInput, *, owner: str):
         with self._lock:
             if self._busy or self._stop.is_set():
-                raise HTTPException(409, "本地单用户版一次执行一个研究任务；请先停止当前任务")
-            config = self.vault.snapshot()
-            defaults = self.task_defaults()
+                raise HTTPException(409, self._busy_message())
+            config = self.vault.snapshot(owner=owner)
+            defaults = self.task_defaults(owner=owner)
             budgets = defaults.merged(params)
-            caps = self.session_caps().model_dump()
+            caps = self.session_caps(owner=owner).model_dump()
             # A new question starts a new conversation, and with it a new cumulative ledger. Adding a
             # turn to an existing conversation goes through follow_up/retry, which is the only path
             # that has to answer for what it reuses and what it spends.
-            conversation_id = self.tasks.start_conversation(params.goal, caps)
+            conversation_id = self.tasks.start_conversation(params.goal, caps, owner=owner)
             scope = Scope(conversation_id=conversation_id, parent_run="", parent_turn=0, turn=1,
-                          kind="new", goal=params.goal,
+                          kind="new", goal=params.goal, owner=owner,
                           authorizations={"use_library": budgets.use_library, "spend": True,
                                           "consent_to_send": True, "reuse_routes": [], "reuse_count": 0,
                                           "library_reauthorized": False, "trust_new_destination": False,
                                           "workspace": "", "raise_session_caps": None,
                                           "idempotency_key": ""},
-                          caps=caps, ledger=self.tasks.ledger(conversation_id))
-            rid = self._create_turn(scope, [], config, budgets)
-            self._launch(rid, config)
-            return self.tasks.get(rid)
+                          caps=caps, ledger=self.tasks.ledger(conversation_id, owner=owner))
+            rid = self._create_turn(scope, [], config, budgets, owner=owner)
+            self._launch(rid, config, owner)
+            return self.tasks.get(rid, owner=owner)
 
-    def _replay(self, parent_run: str, key: str) -> dict | None:
+    def _replay(self, parent_run: str, key: str, *, owner: str) -> dict | None:
         """Return the turn an identical request already created, before any other check.
 
         This runs ahead of the busy guard on purpose. A double click or a retried POST arrives while
@@ -250,8 +296,10 @@ class AgentRuntime:
         """
         if not key:
             return None
-        parent = self.tasks.get(parent_run, internal=True)
-        existing = self.tasks.run_by_key(parent["conversation_id"], key)
+        # Scoped by owner as well as by id: replaying somebody else's turn is not idempotence, it is
+        # a read of their task through a key they never held.
+        parent = self.tasks.get(parent_run, owner=owner, internal=True)
+        existing = self.tasks.run_by_key(parent["conversation_id"], key, owner=owner)
         if not existing:
             return None
         # Recorded, so a repeated submit leaves a trace instead of looking like it never happened.
@@ -259,72 +307,81 @@ class AgentRuntime:
                          {"idempotency_key": key,
                           "message": "重复提交命中同一个 idempotency_key；返回已创建的那一轮，"
                                      "没有新建任务，也没有新增花费"})
-        return self.tasks.get(existing)
+        return self.tasks.get(existing, owner=owner)
 
-    def follow_up(self, params: FollowUpInput):
+    def follow_up(self, params: FollowUpInput, *, owner: str):
         """Add a turn to an existing conversation, reusing named evidence instead of re-fetching it.
 
         Scope is decided before the run exists, so a refusal (an id from another conversation, a model
         destination nobody agreed to, a cap already reached) leaves nothing half-created behind.
         """
-        replayed = self._replay(params.parent_run, (params.idempotency_key or "").strip())
+        replayed = self._replay(params.parent_run, (params.idempotency_key or "").strip(),
+                               owner=owner)
         if replayed:
             return replayed
         with self._lock:
             if self._busy or self._stop.is_set():
-                raise HTTPException(409, "本地单用户版一次执行一个研究任务；请先停止当前任务")
-            config = self.vault.snapshot()
-            budgets = self.task_defaults().merged(params)
-            scope, seeds = validate_followup(self.tasks, params, vault_public=config.public(),
-                                             budgets=budgets)
+                raise HTTPException(409, self._busy_message())
+            config = self.vault.snapshot(owner=owner)
+            budgets = self.task_defaults(owner=owner).merged(params)
+            scope, seeds = validate_followup(self.tasks, params, owner=owner,
+                                             vault_public=config.public(), budgets=budgets)
             if scope.existing_run:
                 self.tasks.event(scope.existing_run, "idempotent_replay",
                                  {"message": "重复提交命中同一个 idempotency_key；返回已创建的那一轮，"
                                              "没有新建任务，也没有新增花费"})
-                return self.tasks.get(scope.existing_run)
+                return self.tasks.get(scope.existing_run, owner=owner)
             # The stored budget is forced to equal the authorized snapshot. `_worker` gates the tool
             # set on params["use_library"], so a disagreement between the two would let a turn call a
             # tool its own immutable record says it was never given.
             budgets = budgets.model_copy(update={"use_library": scope.authorizations["use_library"]})
-            rid = self._create_turn(scope, seeds, config, budgets, raise_caps=params.raise_session_caps)
-            self._launch(rid, config)
-            return self.tasks.get(rid)
+            rid = self._create_turn(scope, seeds, config, budgets, owner=owner,
+                                    raise_caps=params.raise_session_caps)
+            self._launch(rid, config, owner)
+            return self.tasks.get(rid, owner=owner)
 
-    def retry(self, params: RetryInput):
+    def retry(self, params: RetryInput, *, owner: str):
         """The same request again as a new turn, when resume is unavailable or exhausted."""
-        replayed = self._replay(params.parent_run, (params.idempotency_key or "").strip())
+        replayed = self._replay(params.parent_run, (params.idempotency_key or "").strip(),
+                               owner=owner)
         if replayed:
             return replayed
         with self._lock:
             if self._busy or self._stop.is_set():
-                raise HTTPException(409, "本地单用户版一次执行一个研究任务；请先停止当前任务")
-            config = self.vault.snapshot()
-            budgets = self.task_defaults().merged(params)
-            scope, seeds = validate_retry(self.tasks, params, vault_public=config.public(),
-                                          budgets=budgets)
+                raise HTTPException(409, self._busy_message())
+            config = self.vault.snapshot(owner=owner)
+            budgets = self.task_defaults(owner=owner).merged(params)
+            scope, seeds = validate_retry(self.tasks, params, owner=owner,
+                                          vault_public=config.public(), budgets=budgets)
             if scope.existing_run:
                 self.tasks.event(scope.existing_run, "idempotent_replay",
                                  {"message": "重复提交命中同一个 idempotency_key；返回已创建的那一轮"})
-                return self.tasks.get(scope.existing_run)
+                return self.tasks.get(scope.existing_run, owner=owner)
             # A retry inherits the parent's library authorization because its goal and its send scope
             # are both unchanged; the snapshot records that it was inherited rather than re-asked.
             budgets = budgets.model_copy(update={"use_library": scope.authorizations["use_library"]})
-            rid = self._create_turn(scope, seeds, config, budgets, raise_caps=params.raise_session_caps)
-            self._launch(rid, config)
-            return self.tasks.get(rid)
+            rid = self._create_turn(scope, seeds, config, budgets, owner=owner,
+                                    raise_caps=params.raise_session_caps)
+            self._launch(rid, config, owner)
+            return self.tasks.get(rid, owner=owner)
 
-    def scope_preview(self, params: FollowUpInput | RetryInput) -> dict:
+    def scope_preview(self, params: FollowUpInput | RetryInput, *, owner: str) -> dict:
         """Validate a continuing turn without creating it. Spends nothing and starts no model.
 
         This is what `re0 session scope` prints: the caller can see which history would be handed
         over, which of it is stale, and whether the ledger has room, before authorizing any of it.
         """
-        budgets = self.task_defaults().merged(params)
-        vault_public = self.vault.snapshot().public()
+        budgets = self.task_defaults(owner=owner).merged(params)
+        # A console-driven preview has no key, and an empty destination is reported as unchecked by
+        # `check_destination` rather than guessed at.
+        vault_public = (self.vault.public(owner=owner)
+                        if self.vault.configured(owner=owner) else {})
         if isinstance(params, RetryInput):
-            scope, _ = validate_retry(self.tasks, params, vault_public=vault_public, budgets=budgets)
+            scope, _ = validate_retry(self.tasks, params, owner=owner, vault_public=vault_public,
+                                      budgets=budgets)
         else:
-            scope, _ = validate_followup(self.tasks, params, vault_public=vault_public, budgets=budgets)
+            scope, _ = validate_followup(self.tasks, params, owner=owner,
+                                         vault_public=vault_public, budgets=budgets)
         result = scope.as_dict()
         result["budgets"] = budgets.model_copy(
             update={"use_library": scope.authorizations.get("use_library", False)}).model_dump()
@@ -332,7 +389,8 @@ class AgentRuntime:
                                        for name in ("base_url", "model", "token_parameter")}
         return result
 
-    def _create_turn(self, scope: Scope, seeds: list[dict], config, budgets, *, raise_caps=None) -> str:
+    def _create_turn(self, scope: Scope, seeds: list[dict], config, budgets, *, owner: str,
+                     raise_caps=None) -> str:
         """Create one turn: an immutable authorization snapshot, then the material it may build on.
 
         Evidence is seeded before the handover message is written, because the message names the new
@@ -343,7 +401,7 @@ class AgentRuntime:
                    for tool in specifications(bool(budgets.use_library), self.tools.web_enabled)]
         parent_goal, parent_report = "", None
         if scope.parent_run:
-            parent = self.tasks.get(scope.parent_run, internal=True)
+            parent = self.tasks.get(scope.parent_run, owner=owner, internal=True)
             parent_goal = parent["goal"]
             parent_report = (parent["state"] or {}).get("report")
         stored = {"goal": scope.goal, "consent_to_send": True, **budgets.model_dump()}
@@ -359,7 +417,8 @@ class AgentRuntime:
                      "parent_run": scope.parent_run, "parent_turn": scope.parent_turn},
         }
         rid = self.tasks.create(
-            stored, config.public(), state, conversation_id=scope.conversation_id, turn=scope.turn,
+            stored, config.public(), state, owner=owner,
+            conversation_id=scope.conversation_id, turn=scope.turn,
             kind=scope.kind,
             origin=turn_snapshot(scope, config_public=config.public(), budgets=budgets,
                                  allowed_tools=allowed),
@@ -373,7 +432,7 @@ class AgentRuntime:
                                   if scope.kind != "new" else scope.goal})
         self.tasks.checkpoint(rid, state)
         if raise_caps is not None:
-            self.tasks.raise_caps(scope.conversation_id, scope.caps,
+            self.tasks.raise_caps(scope.conversation_id, scope.caps, owner=owner,
                                   reason=f"第 {scope.turn} 轮请求显式提高", run_id=rid)
         self.tasks.event(rid, "turn_started", {
             "conversation_id": scope.conversation_id, "turn": scope.turn, "kind": scope.kind,
@@ -383,14 +442,14 @@ class AgentRuntime:
             "message": "；".join(scope.notes) or "本轮作用域已校验；历史材料按授权复用，没有重新抓取"})
         return rid
 
-    def resume(self, rid):
+    def resume(self, rid, *, owner: str):
         with self._lock:
             if self._busy or self._stop.is_set():
                 raise HTTPException(409, "已有任务运行")
-            run = self.tasks.get(rid, internal=True)
+            run = self.tasks.get(rid, owner=owner, internal=True)
             if run["status"] not in {"interrupted", "failed"}:
                 raise HTTPException(409, "仅中断或失败的任务可恢复；已完成、已取消或预算耗尽的任务请新建")
-            config = self.vault.snapshot()
+            config = self.vault.snapshot(owner=owner)
             if any(config.public()[k] != run["config"][k] for k in ("base_url", "model", "token_parameter", "max_output_tokens")):
                 raise HTTPException(409, "恢复任务需要同一模型、Base URL 和输出配置，防止把历史内容发送到另一服务")
             state = run["state"]
@@ -402,16 +461,23 @@ class AgentRuntime:
             self.tasks.reset_cancel(rid)
             self.tasks.checkpoint(rid, state, "queued")
             self.tasks.event(rid, "resumed", {"message": "使用已保存的对话与工具结果继续；模型/工具次数不重置，单次执行时间窗口重新开始"})
-            self._launch(rid, config)
-            return self.tasks.get(rid)
+            self._launch(rid, config, owner)
+            return self.tasks.get(rid, owner=owner)
 
-    def _launch(self, rid, config):
+    def _launch(self, rid, config, owner: str):
+        # The lease names the owner so a refused submit can say whether the slot is the caller's own,
+        # and the configuration travels with the launch: a key changed afterwards cannot redirect a
+        # turn that is already running.
         self._busy = True
+        self._lease = {"run_id": rid, "owner": owner, "since": now()}
         self._future = self._pool.submit(self._worker, rid, config)
 
     def _worker(self, rid, config):
         run = self.tasks.get(rid, internal=True)
         state, params = run["state"], run["params"]
+        # The owner is read from the stored run, not from anything the model can supply: a tool call
+        # that could name an owner could read anybody's library.
+        owner = run.get("owner") or ""
         deadline = time.monotonic() + params["attempt_seconds"]
         # The conversation cap is enforced live, not only at admission. A turn admitted with room to
         # spare still has to stop at the ceiling, and the ceiling is read from this turn's immutable
@@ -496,7 +562,8 @@ class AgentRuntime:
                             elif name == "read_evidence":
                                 payload = self.read_evidence(rid, args)
                             else:
-                                payload = {"ok": True, **self.tools.execute(name, args, use_library=params["use_library"])}
+                                payload = {"ok": True, **self.tools.execute(
+                                    name, args, use_library=params["use_library"], owner=owner)}
                         except ValidationError as exc:
                             payload = {"ok": False, "error": "工具参数结构不正确", "fields": [".".join(map(str, e["loc"])) for e in exc.errors()][:10]}
                         except ProviderError as exc:
@@ -563,3 +630,4 @@ class AgentRuntime:
         finally:
             with self._lock:
                 self._busy = False
+                self._lease = {}

@@ -2,18 +2,51 @@
 
 ## Deployment boundary
 
-Re0 is an **unauthenticated, local, single-user Alpha**. Bind only to loopback.
-Do not expose it to the internet or untrusted LAN, even behind a bare reverse
-proxy. Host checks, JSON content type, same-origin checks and `X-Re0-Client` are
-CSRF/origin defenses, **not authorization**. Local software can still call the
-API. Run one process/worker per SQLite file.
+Re0 runs in one of two modes, and the mode is **declared, never inferred**: a
+process cannot see who can reach its port, so it cannot work out on its own
+whether it is public.
+
+**`RE0_MODE=local` (the default) is an unauthenticated, single-user Alpha.**
+Every row belongs to the owner `local`; there are no accounts and no login step.
+Bind it to loopback. `run.py` refuses a non-loopback `RE0_HOST` in this mode
+instead of starting an open door, and passes one worker explicitly. Do not expose
+it to the internet or an untrusted LAN, even behind a bare reverse proxy. Host
+checks, JSON content type, same-origin checks and `X-Re0-Client` are CSRF/origin
+defenses, **not authorization**. Local software can still call the API. Run one
+process/worker per SQLite file.
+
+**`RE0_MODE=hosted` requires an identity and refuses to start without one:**
+`RE0_SESSION_SECRET` (at least 32 characters; `python -m re0 auth secret` prints
+one, once), `RE0_PUBLIC_ENTRY` (the https URL TLS terminates at) and
+`RE0_ALLOWED_ORIGINS`. Start-up names every missing item at once and never falls
+back to local mode silently. An http entry, `RE0_ALLOW_INSECURE_COOKIES` and a
+documented example secret — including one padded until it is long enough — are
+each a start-up refusal. Accounts are provisioned by an operator from the console
+(`python -m re0 auth create-user`); **there is no registration endpoint**, and a
+password is never a command-line flag. Every `/api/*` route then needs a session
+cookie, while `/`, `/library` and `/api/health` stay reachable so a login form is
+reachable at all. Cross-account access is answered with **404 rather than 403**,
+because a 403 confirms that an id belongs to somebody and turns every identifier
+into an enumeration oracle. Loopback model destinations are refused, and a model
+host whose resolution is not entirely public is refused with no opt-out:
+`RE0_ALLOW_LOCAL_RESOLVER` is a single-user setting and hosted mode says so
+instead of pointing at it.
+
+**Hosted mode is not yet a deliverable.** There is no login page in the UI (the
+session endpoints exist; the browser pages do not use them yet), no quotas or rate
+limiting, no site-wide circuit breaker, no retention or audit-redaction rules, and
+none of it has run behind a real TLS terminator with a real second user. What is
+in place — identity, per-account isolation, per-account key scope and the start-up
+refusals above — is tested; what is missing is written here so it cannot be
+mistaken for finished.
 
 `X-Re0-Client` accepts `web` (the browser pages) and `cli` (the console entry
 points that drive the same service, `re0 session follow-up`/`retry`). A request
 claiming `cli` while carrying an `Origin` or `Referer` header is refused: a
 browser always names its origin on a cross-origin POST, so a page cannot borrow
-the console identity. This widens *who may write* to a loopback service that was
-already unauthenticated; it does not make that service safe to expose.
+the console identity. In hosted mode a `cli` claim is refused outright. This
+widens *who may write* to a loopback service that was already unauthenticated; it
+does not make that service safe to expose.
 
 ## Secrets and material flow
 
@@ -23,6 +56,16 @@ omit supplied values, and provider error bodies are suppressed. Keys are not
 stored in task tables, normal exports, frontend storage or repository files.
 Startup environment variables are supported but are not deleted by UI clear.
 Memory storage is not a defense against a compromised local OS or process dump.
+
+The vault holding those settings is **keyed by owner**, so one account's key is
+not readable, echoable or clearable by another, and the configuration a turn runs
+with is snapshotted when the turn launches: rotating a key afterwards cannot
+redirect a turn already in flight. Passwords are PBKDF2-HMAC-SHA256 at 210k rounds
+with a per-account salt; session tokens are opaque random values stored as
+SHA-256 so they can be revoked, which a signed token cannot be. Verifying an
+unknown account runs a dummy hash, so a wrong username does not answer faster than
+a wrong password, and five failures lock an account for 15 minutes. Sessions live
+in a cookie that is HttpOnly and SameSite=Strict, and Secure in hosted mode.
 
 The selected LLM receives the user goal and tool-returned research material.
 Library metadata is sent only when explicitly authorized for that task; notes,
@@ -111,6 +154,13 @@ Task records and approved papers share the original SQLite file. Use
 `scripts/backup.py` rather than copying an active WAL database's main file alone.
 Back up before upgrading. Never commit `.data`, `.env`, credentials, exported
 private notes, live model responses or database files to GitHub.
+
+Upgrades that add the `owner` column (papers v1→v2, agent v2→v3, zotero v1→v2)
+copy the file with the SQLite backup API before writing anything, assign every
+existing row to the owner `local`, and compare row counts before dropping an old
+table. A database written by a newer build is refused rather than downgraded, and
+nothing is migrated in place without that copy beside it. `local` is a reserved
+account name, so no account can later claim the rows a migration assigned.
 
 ## Reporting
 

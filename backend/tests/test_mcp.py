@@ -145,7 +145,7 @@ class StubTools:
         # caller's session rather than in some tools-wide default.
         self.workspaces = []
 
-    def execute(self, name, arguments, *, workspace=None):
+    def execute(self, name, arguments, *, workspace=None, owner=""):
         self.workspaces.append(workspace)
         return self.payload
 

@@ -1,4 +1,10 @@
-"""BYOK gateway. Credentials never enter prompts, checkpoint JSON or responses."""
+"""BYOK gateway. Credentials never enter prompts, checkpoint JSON or responses.
+
+One configuration per owner, held in server memory for the length of the process. A single
+global configuration would mean that whoever configured last decides where everybody else's
+prompts and evidence are sent — which is not a multi-user inconvenience but a leak with a bill
+attached, since the other reader's task keeps running against the new destination.
+"""
 from __future__ import annotations
 
 import json
@@ -10,6 +16,7 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import ValidationError
 
+from ..deployment import LOCAL_OWNER
 from .schemas import ModelConfig, ModelListRequest
 
 # A destination permit, not a compatibility claim. Every host here still has to
@@ -43,12 +50,22 @@ class ModelError(Exception):
     """Only application-authored, credential-free messages may be exposed."""
 
 
-def validate_endpoint(config: "ModelConfig | ModelListRequest"):
+def validate_endpoint(config: "ModelConfig | ModelListRequest", *, hosted: bool = False):
+    """Refuse a destination this deployment must not talk to.
+
+    A hostname allowlist is the first gate and it is not enough on its own: an allowlisted name can
+    resolve to a private address, and in hosted mode that turns a model call into a probe of the
+    network the service runs on. So hosted mode also refuses loopback outright — a local Ollama is
+    a single-user convenience, not something a public service should reach for a stranger — and
+    requires every address the name resolves to be public.
+    """
     try:
         p = urlsplit(config.base_url)
         allowed = DEFAULT_HOSTS | {h.strip().lower() for h in os.getenv("RE0_LLM_ALLOWED_HOSTS", "").split(",") if h.strip()}
         if p.username or p.password or p.query or p.fragment or not p.hostname:
             raise ValueError
+        if hosted and p.hostname in LOOPBACK:
+            raise ModelError("托管模式不接受本机模型地址（127.0.0.1 / [::1]）：那会把公网请求转发到服务器自己的回环接口")
         if p.hostname in LOOPBACK:
             if p.scheme not in {"http", "https"} or not p.port:
                 raise ValueError
@@ -60,9 +77,27 @@ def validate_endpoint(config: "ModelConfig | ModelListRequest"):
             raise ModelError("请填写 Base URL（通常到 /v1），不要包含 /chat/completions")
         if p.hostname not in LOOPBACK and not config.api_key.get_secret_value():
             raise ModelError("远程模型服务需要 API Key")
+        if hosted:
+            _require_public_resolution(p.hostname)
     except ValueError as exc:
         raise ModelError("模型地址不受信任：使用预设 HTTPS 主机，或显式端口的 127.0.0.1 / [::1]；自定义主机需由部署者设置 RE0_LLM_ALLOWED_HOSTS") from exc
     return config.model_copy(update={"base_url": config.base_url.rstrip("/")})
+
+
+def _require_public_resolution(hostname: str) -> None:
+    """Every address the name resolves to must be public, and no opt-out applies here.
+
+    `RE0_ALLOW_LOCAL_RESOLVER` exists so a single user behind a transparent proxy can still read a
+    paper. It is not a hosted-mode setting: a public service that accepts a private resolution is
+    an SSRF probe with a model bill attached, so a non-public answer is refused whatever the
+    environment says — and the refusal says so instead of pointing at a variable that will not help.
+    """
+    from ..safe_fetch import FetchError, validate_resolution
+
+    try:
+        validate_resolution(hostname, local_opt_out=False)
+    except FetchError as exc:
+        raise ModelError(f"托管模式无法把模型地址解析为公网主机：{exc}") from exc
 
 
 def _model_entries(payload):
@@ -117,35 +152,64 @@ def list_models(credential: "ModelConfig | ModelListRequest", *, transport=None)
 
 
 class ModelVault:
-    def __init__(self):
+    """One configuration per owner, in memory, for the length of the process.
+
+    Nothing here is written to the database, a checkpoint, a log line or a response; `public()` is
+    the only view that leaves, and it has no key in it. An owner with no configuration gets an
+    error that says so, never somebody else's destination.
+    """
+
+    def __init__(self, *, hosted: bool = False):
         self._lock = threading.RLock()
-        self._config = None
+        self._configs: dict = {}
+        self.hosted = hosted
         self.startup_error = ""
         if os.getenv("RE0_LLM_MODEL") and os.getenv("RE0_LLM_BASE_URL"):
             try:
                 self.set(ModelConfig(base_url=os.environ["RE0_LLM_BASE_URL"], model=os.environ["RE0_LLM_MODEL"],
                                      api_key=os.getenv("RE0_LLM_API_KEY", ""), trust_endpoint=True,
-                                     token_parameter=os.getenv("RE0_LLM_TOKEN_PARAMETER", "max_tokens")))
+                                     token_parameter=os.getenv("RE0_LLM_TOKEN_PARAMETER", "max_tokens")),
+                         owner=LOCAL_OWNER)
             except (ModelError, ValidationError):
                 self.startup_error = "环境中的模型配置无效；请在模型设置中重新配置"
 
-    def set(self, config):
+    def set(self, config, *, owner: str):
         with self._lock:
-            self._config = validate_endpoint(config)
+            # Validated before it replaces anything, so a refused destination leaves the previous
+            # configuration in place rather than clearing it.
+            validated = validate_endpoint(config, hosted=self.hosted)
+            self._configs[owner] = validated
 
-    def clear(self):
+    def clear(self, *, owner: str = ""):
         with self._lock:
-            self._config = None
+            if owner:
+                self._configs.pop(owner, None)
+            else:
+                # Shutdown only: dropping every owner's configuration is what `close()` means, and
+                # no request path calls it without an owner.
+                self._configs.clear()
 
-    def snapshot(self):
+    def snapshot(self, *, owner: str):
         with self._lock:
-            if self._config is None:
+            config = self._configs.get(owner)
+            if config is None:
                 raise ModelError("尚未配置模型：请先设置 Base URL、Model ID 和 API Key")
-            return self._config.model_copy(deep=True)
+            return config.model_copy(deep=True)
 
-    def public(self):
+    def configured(self, *, owner: str) -> bool:
         with self._lock:
-            return self._config.public() if self._config else {"configured": False, "storage": "server_memory", "startup_error": self.startup_error}
+            return owner in self._configs
+
+    def public(self, *, owner: str):
+        with self._lock:
+            config = self._configs.get(owner)
+            return config.public() if config else {"configured": False, "storage": "server_memory",
+                                                   "startup_error": self.startup_error}
+
+    def owners(self) -> list:
+        """Which owners hold a configuration. Names only, for shutdown and diagnostics."""
+        with self._lock:
+            return sorted(self._configs)
 
 
 def redact(text: str, config: ModelConfig) -> str:
@@ -154,8 +218,11 @@ def redact(text: str, config: ModelConfig) -> str:
 
 
 class ChatModel:
-    def __init__(self, config: ModelConfig, transport=None):
-        self.config, self.transport = validate_endpoint(config), transport
+    def __init__(self, config: ModelConfig, transport=None, *, hosted: bool = False):
+        # Validated again at construction, not only when it was stored: the destination is re-checked
+        # at the moment it is about to be dialled, which is the only moment the answer matters.
+        self.config = validate_endpoint(config, hosted=hosted)
+        self.transport = transport
 
     def complete(self, messages: list[dict], tools: list[dict], *, timeout=60, force_tool=None) -> dict:
         payload = {"model": self.config.model, "messages": messages, "tools": tools,

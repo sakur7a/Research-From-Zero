@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from re0.agent.schemas import FollowUpInput, RetryInput, SessionCaps, TaskDefaults
+from re0.deployment import LOCAL_OWNER as OWNER
 from re0.agent.session import (STALE_AFTER_DAYS, Scope, age_days, handover_message,
                                parent_report_text, report_delta, turn_snapshot, validate_followup,
                                validate_retry)
@@ -243,21 +244,36 @@ def test_turn_snapshot_records_every_authorization_the_turn_rests_on():
 
 # --------------------------------------------------------------------------- store level, no model
 
+# Every scope check in this file acts as the local owner, so the owner is injected once here instead
+# of being repeated at two dozen call sites — and a call that forgot it would fail loudly rather than
+# silently validating somebody else's conversation.
+_validate_followup, _validate_retry = validate_followup, validate_retry
+
+
+def validate_followup(store, params, **kwargs):
+    return _validate_followup(store, params, owner=OWNER, **kwargs)
+
+
+def validate_retry(store, params, **kwargs):
+    return _validate_retry(store, params, owner=OWNER, **kwargs)
+
+
 def _store(tmp_path) -> TaskStore:
     return TaskStore(Database(str(tmp_path / "session.sqlite3")))
 
 
 def _run(store, *, goal="第一轮目标", status="completed", conversation=None, evidence=(),
          config=None, params=None, turn=None, kind="new"):
-    conversation = conversation or store.start_conversation(goal, default_caps())
+    conversation = conversation or store.start_conversation(goal, default_caps(), owner=OWNER)
     state = {"messages": [], "pending": [], "plan": [], "report": None, "model_calls": 3,
              "tool_calls": 3, "usage": {"prompt_tokens": 0, "completion_tokens": 0,
                                         "total_tokens": 0, "unreported_calls": 0},
              "resumes": 0, "reserved_tools": []}
     rid = store.create({"goal": goal, "consent_to_send": True,
                         **(params or TaskDefaults().model_dump())},
-                       config or DESTINATION, state, conversation_id=conversation,
-                       turn=turn or store.next_turn(conversation), kind=kind)
+                       config or DESTINATION, state, owner=OWNER,
+                       conversation_id=conversation,
+                       turn=turn or store.next_turn(conversation, owner=OWNER), kind=kind)
     if evidence:
         store.seed_evidence(rid, [{"data": item, "reused_from": {}} for item in evidence])
     store.checkpoint(rid, state, status)
@@ -272,12 +288,13 @@ def _follow(**extra):
 def test_the_ledger_is_recomputed_so_a_new_turn_cannot_reset_it(tmp_path):
     store = _store(tmp_path)
     rid, cid = _run(store)
-    assert store.ledger(cid)["model_calls"] == 3
+    assert store.ledger(cid, owner=OWNER)["model_calls"] == 3
     _run(store, conversation=cid, turn=2, kind="followup")
-    ledger = store.ledger(cid)
+    ledger = store.ledger(cid, owner=OWNER)
     assert ledger["model_calls"] == 6 and ledger["turns"] == 2
     # Nothing in the conversation row is incremented, so there is nothing to zero out.
-    assert "ledger" not in store.conversation(cid) or store.conversation(cid)["ledger"] == ledger
+    assert "ledger" not in store.conversation(cid, owner=OWNER) or \
+        store.conversation(cid, owner=OWNER)["ledger"] == ledger
 
 
 def test_seeding_reused_evidence_twice_does_not_duplicate_it(tmp_path):
@@ -302,11 +319,11 @@ def test_the_origin_snapshot_survives_every_later_checkpoint(tmp_path):
                              config_public=DESTINATION, budgets=TaskDefaults(), allowed_tools=["a"])
     with store.db.connect() as con:
         con.execute("UPDATE agent_runs SET origin=? WHERE id=?", (encode(snapshot), rid))
-    before = store.origin(rid)
+    before = store.origin(rid, owner=OWNER)
     state = store.get(rid, internal=True)["state"]
     for status in ("running", "completed", "budget_exhausted"):
         store.checkpoint(rid, state, status)
-        assert store.origin(rid) == before, f"checkpoint at {status} rewrote the snapshot"
+        assert store.origin(rid, owner=OWNER) == before, f"checkpoint at {status} rewrote the snapshot"
 
 
 def test_a_run_from_a_v1_database_keeps_its_data_and_gains_a_conversation(tmp_path):
@@ -352,21 +369,21 @@ def test_a_run_from_a_v1_database_keeps_its_data_and_gains_a_conversation(tmp_pa
     assert run["goal"] == "旧的已完成任务" and run["status"] == "completed"
     assert run["turn"] == 1 and run["kind"] == "new"
     cid = run["conversation_id"]
-    assert cid and store.conversation(cid)["note"].startswith("由 v1 迁移生成")
+    assert cid and store.conversation(cid, owner=OWNER)["note"].startswith("由 v1 迁移生成")
     # The checkpoint counters became the opening ledger: a migration must not erase what was spent.
-    ledger = store.ledger(cid)
+    ledger = store.ledger(cid, owner=OWNER)
     assert ledger["model_calls"] == 7 and ledger["tool_calls"] == 9
     assert ledger["unreported_calls"] == 1 and ledger["turns"] == 1
     assert store.evidence("legacy-run")[0]["paper"]["title"] == "旧证据"
-    assert store.setting("task_defaults") == {"max_model_calls": 9}
+    assert store.setting("task_defaults", owner=OWNER) == {"max_model_calls": 9}
     assert any(event["kind"] == "conversation_adopted"
                for event in store.events("legacy-run"))
     # Re-opening is a no-op rather than a second adoption.
     again = TaskStore(Database(path))
     assert again.get("legacy-run", internal=True)["conversation_id"] == cid
-    assert len(again.conversations()) == 1
+    assert len(again.conversations(owner=OWNER)) == 1
     with Database(path).connect() as con:
-        assert con.execute("SELECT version FROM agent_schema_version").fetchone()[0] == 2
+        assert con.execute("SELECT version FROM agent_schema_version").fetchone()[0] == 3
 
 
 def test_a_database_from_a_later_version_is_refused_rather_than_downgraded(tmp_path):
@@ -494,7 +511,7 @@ def test_a_spent_session_cap_blocks_a_followup_until_it_is_explicitly_raised(tmp
     assert scope.caps["max_session_model_calls"] == 20
     assert any("上限将被显式提高" in note for note in scope.notes)
     # Validation alone must not move the cap: a later check can still refuse the turn.
-    assert store.conversation(cid)["caps"]["max_session_model_calls"] == 3
+    assert store.conversation(cid, owner=OWNER)["caps"]["max_session_model_calls"] == 3
 
 
 def test_a_followup_cannot_lower_a_session_cap(tmp_path):

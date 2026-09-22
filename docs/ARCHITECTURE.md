@@ -34,6 +34,9 @@ web/agent.html + agent.js        web/index.html + app.js
 
 | Module | Responsibility |
 |---|---|
+| `deployment.py` | Which kind of service this is (`RE0_MODE`), and everything that kind must prove before it starts. Accumulates every missing piece into one refusal instead of one per restart |
+| `auth.py` | Accounts, password hashing, revocable session tokens and the `Identity` whose `owner` is the workspace. The identity that stands for "nobody" owns nothing |
+| `auth_cli.py` | `re0 auth`: the only way an account comes to exist. Prints a session secret once, provisions, lists, disables, ends sessions; a password is never a flag |
 | `agent/schemas.py` | Config, task, approval, tool and report input contracts |
 | `agent/model.py` | In-memory BYOK config, destination validation, bounded HTTP, common tool-call protocol |
 | `agent/tools.py` | Tool registry, argument validation, consent-scoped adapters, source documents |
@@ -96,7 +99,13 @@ The original `schema_version=1` tables are unchanged. Independent
 
 An HTTP server process owns **one** worker. Do not run Uvicorn with multiple
 workers or two application processes against the same task database. There is no
-distributed scheduler, process lease or multi-user isolation in this release.
+distributed scheduler and no cross-process lease in this release: the execution
+lease is per process, which is why `run.py` passes `workers=1` explicitly rather
+than leaving it to a default. Multi-user **isolation** does exist in hosted mode —
+one owner per account, enforced in the store, answered with 404 across accounts —
+but it is not a concurrency story: quotas, rate limiting and a site-wide circuit
+breaker are not implemented, so two accounts can still spend against one process
+one after the other.
 Application startup marks unfinished work `interrupted`; it does not silently
 resume paid requests. User-requested resume uses the same model/base URL/token
 parameter/output limit, at most three times. Calls stay cumulative; elapsed time
@@ -190,13 +199,78 @@ machine is stated at the moment the task starts. Notes and demo records are
 excluded even when consented. Tools never see the model config or key.
 The model has no approval, configuration-write, library-delete or shell tool.
 
+## Deployment modes, identity and ownership
+
+Everything above was written for one reader at one keyboard. `deployment.py` turns that into an
+explicit input rather than an assumption, because the two modes fail differently and only one of them
+can afford to fail silently.
+
+- **The mode is declared, never inferred.** `RE0_MODE` is `local` (the default) or `hosted`. A process
+  cannot observe who can reach its port: a loopback bind behind a reverse proxy, a container port
+  mapping and a `RE0_HOST=0.0.0.0` in a unit file all look identical from the inside. So nothing is
+  guessed, and `run.py` refuses a non-loopback `RE0_HOST` while the mode is local rather than letting
+  an unauthenticated service listen on a network.
+- **A hosted start-up fails whole.** `require_startable()` collects every missing piece — session
+  secret, public entry, allowed origins — and raises once, naming all of them. One variable per
+  restart turns configuration into a guessing game, and the guess is usually "then it must be fine".
+  It also refuses an http entry, a loopback origin in the allowlist (every visitor has their own
+  localhost), `RE0_ALLOW_INSECURE_COOKIES`, and a documented example secret, including one repeated
+  until it is long enough — because "太短" invites padding rather than generation.
+- **Identity.** `auth.py` stores opaque random session tokens as SHA-256, so a session can be
+  revoked; a signed token cannot be, short of a blacklist, which is the same table with extra steps.
+  Passwords are PBKDF2-HMAC-SHA256 at 210k rounds with a per-account salt. An unknown account still
+  runs a dummy hash, so a wrong username does not answer faster than a wrong password, and five
+  failures lock the account for 15 minutes. **There is no registration route**: `auth_cli.py`
+  (`re0 auth`) is the only way an account comes to exist, and it reads a password from a prompt, from
+  `RE0_AUTH_PASSWORD` or from stdin — never from argv, which is in the shell history and the process
+  list.
+- **Ownership is a column and a required keyword.** `papers`, `topics`, `agent_runs`,
+  `agent_conversations`, `agent_settings` and the three `zotero_*` tables carry `owner`; resources and
+  observations are scoped by a join through `papers` instead of carrying a second copy of the same
+  fact. Request-facing store methods take `owner` as a **required keyword argument**, so an omission
+  is a `TypeError` at the call site rather than a query that quietly returns another reader's rows.
+  `Identity.owner` is the workspace name, and the identity that stands for "nobody" owns nothing, so a
+  bug that loses the identity fails closed instead of failing open.
+- **Cross-account access answers 404, not 403.** A 403 confirms the id belongs to somebody, which
+  turns every identifier in the system into an enumeration oracle. The same reasoning made the DOI and
+  arXiv uniqueness indexes per owner, so a collision refusal no longer tells a second reader that the
+  first one already has the paper.
+- **State that used to be per-process is per-account:** the model vault, the task defaults, the
+  session caps, and the retrieval cache (32 of them, least-recently-used evicted). A turn snapshots the
+  configuration it launched with, so rotating a key afterwards cannot redirect that turn. The execution
+  lease is still one task per process, and `busy` reports that the slot is held and whether it is
+  yours — never whose.
+- **Hosted mode tightens the model destination as well.** A loopback endpoint is refused outright, and
+  every address the model host resolves to must be public, with no opt-out: a public service that
+  accepts a private resolution is an SSRF probe with a model bill attached. `RE0_ALLOW_LOCAL_RESOLVER`
+  still exists on the single-user full-text path, where the connection genuinely is the reader's own,
+  and the hosted refusal says the variable does not apply rather than advertising it.
+- **Migrations carry the old data across.** papers v1→v2, agent v2→v3, zotero v1→v2: the file is
+  copied with the SQLite backup API before anything is written, every existing row is assigned to the
+  owner `local`, rebuilt tables are row-counted before the original is dropped, and a schema newer
+  than this build is refused rather than downgraded. `local` is a reserved account name, so nobody can
+  later claim the rows a migration just assigned.
+
+**What is not here yet:** quotas and rate limiting, a site-wide circuit breaker, a login page in the
+UI, lease behaviour under concurrent load, retention and audit-redaction rules, and any real hosted
+deployment. Two accounts in one process are tested; nothing has run behind a real TLS terminator with
+a real second user. Hosted mode is not a deliverable.
+
 ## HTTP interface
 
 All write endpoints preserve the original JSON, same-origin and
-`X-Re0-Client: web` requirements. These guards are **not authentication**.
+`X-Re0-Client: web` requirements. In local mode these guards are **not
+authentication**. In hosted mode every `/api/*` route additionally requires a
+session cookie and is scoped to that identity's owner, while `/`, `/library` and
+`/api/health` stay reachable — otherwise nobody could reach a login form, and an
+orchestrator could not ask whether the process is up.
 
 | Route | Purpose |
 |---|---|
+| `POST /api/auth/login` | Exchange a username and password for a session cookie; 409 in local mode, where there are no accounts |
+| `POST /api/auth/logout` | Revoke this session server-side; the token stops working immediately |
+| `GET /api/auth/session` | Who this request is, plus the declared mode; never a token or a secret |
+| `GET /api/health` | Liveness and mode; reports whether a model key is present only in local mode, where there is one reader to report it to |
 | `GET /api/agent/config` | Redacted config, capabilities, task defaults, endpoint presets, busy status |
 | `PUT /api/agent/config` | Explicitly trusted model settings, memory only |
 | `DELETE /api/agent/config` | Clear in-memory settings (not shell environment) |
@@ -328,8 +402,14 @@ connector cannot afford — the same reason a narrow `itemType` list has to repo
 
 Arbitrary website fetching/browser automation, vector memory, theorem graphs,
 scheduled monitoring, Zotero write-back or attachment/note reading, remote code
-execution, multi-agent
-specialist teams, multi-user authentication, exact dollar accounting,
-model-specific reasoning protocols and a distributed task queue.
+execution, multi-agent specialist teams, self-registration, SSO or federated
+login, exact dollar accounting, model-specific reasoning protocols and a
+distributed task queue.
 These should be added only against real evaluated workflows, not described as
 hidden existing capabilities. See ROADMAP.md for the staged direction.
+
+Multi-user authentication has come off that list, which is not the same as saying
+it is finished: accounts, revocable sessions and per-account isolation exist and
+are tested, while quotas, rate limiting, a site-wide circuit breaker, a login page
+in the UI and a real hosted deployment do not. See "Deployment modes, identity and
+ownership" above for exactly which is which.

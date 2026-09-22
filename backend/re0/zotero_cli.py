@@ -17,6 +17,7 @@ import os
 import sys
 from pathlib import Path
 
+from .deployment import LOCAL_OWNER
 from .zotero import Connection, ZoteroError, ZoteroStore
 from .zotero_sync import sync
 
@@ -73,7 +74,7 @@ def zotero_command(arguments) -> int:
     try:
         library, zotero = _stores(database_path(arguments.db))
         if action == "status":
-            status = zotero.status(_connection(arguments, needs_key=False))
+            status = zotero.status(_connection(arguments, needs_key=False), owner=LOCAL_OWNER)
             print(f"库：{status['connection']['library_type']} {status['connection']['library_id']}"
                   f"{'（' + status['connection']['label'] + '）' if status['connection']['label'] else ''}")
             cursor = status["cursor"]
@@ -98,7 +99,7 @@ def zotero_command(arguments) -> int:
             connection = _connection(arguments)
             with ZoteroClient(connection, max_requests=10) as client:
                 rows = client.collections()
-            written = zotero.save_collections(connection, rows,
+            written = zotero.save_collections(connection, rows, owner=LOCAL_OWNER,
                                               selected=list(arguments.collection or []) or None)
             print(f"读到 {written} 个集合（只读名称与 key，没有读取集合内容）：")
             for row in rows[:60]:
@@ -110,14 +111,15 @@ def zotero_command(arguments) -> int:
             return 0
         if action == "select":
             result = zotero.select_collections(_connection(arguments, needs_key=False),
-                                               list(arguments.collection or []))
+                                               list(arguments.collection or []),
+                                               owner=LOCAL_OWNER)
             print(f"已选中 {len(result['selected'])} 个集合。{result['note']}")
             return 0
         if action in {"preview", "sync"}:
             connection = _connection(arguments)
             apply = action == "sync" and bool(arguments.apply)
-            result = sync(zotero, library.list_papers(), connection,
-                          apply=apply, max_requests=arguments.max_requests)
+            result = sync(zotero, library.list_papers(owner=LOCAL_OWNER), connection,
+                          owner=LOCAL_OWNER, apply=apply, max_requests=arguments.max_requests)
             print(("已提交同步" if result.get("applied") else "预览（没有写入任何内容）"))
             _print_counts(result)
             print()
@@ -146,6 +148,7 @@ def zotero_command(arguments) -> int:
             return 0
         if action == "disconnect":
             result = zotero.disconnect(_connection(arguments, needs_key=False),
+                                       owner=LOCAL_OWNER,
                                        remove_links=bool(arguments.remove_links))
             print(f"已断开。删除映射 {result['removed_links']} 条；文献库仍有 "
                   f"{result['papers_remaining']} 篇论文。")

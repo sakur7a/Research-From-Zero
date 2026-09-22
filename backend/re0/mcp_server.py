@@ -25,6 +25,7 @@ import sys
 from pydantic import ValidationError
 
 from . import result_model
+from .deployment import LOCAL_OWNER
 from .agent.tools import TOOL_TYPES, ResearchTools
 from .providers import ProviderError
 from .workspace import Workspace, WorkspaceError
@@ -234,7 +235,9 @@ def call_tool(tools: ResearchTools, name: str, arguments: dict, *, web_enabled: 
     if name not in exposed_names(web_enabled=web_enabled):
         return f"Re0 does not expose this tool here: {name}", None, True
     try:
-        payload = tools.execute(name, arguments or {}, workspace=workspace)
+        # The server is a local console entry point, so it acts as the local owner: it has no
+        # session to present, and a hosted deployment refuses it for exactly that reason.
+        payload = tools.execute(name, arguments or {}, workspace=workspace, owner=LOCAL_OWNER)
         structure = result_model.normalize(payload, body_chars=STRUCTURED_BODY_CHARS)
     except ValidationError as exc:
         # Report which fields are wrong, not a pydantic traceback.

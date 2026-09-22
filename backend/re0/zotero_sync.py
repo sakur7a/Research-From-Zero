@@ -76,13 +76,18 @@ def _match(item, index: dict) -> tuple[str, str]:
     return "", ""
 
 
-def plan(store: ZoteroStore, papers: list[dict], connection: Connection, *,
+def plan(store: ZoteroStore, papers: list[dict], connection: Connection, *, owner: str,
          client: ZoteroClient) -> dict:
-    """Read the remote library and classify every change. Writes nothing."""
-    cursor = store.cursor(connection)
+    """Read the remote library and classify every change. Writes nothing.
+
+    `papers` and `owner` must agree: the caller passes one owner's library, and every mapping this
+    plan reads or writes belongs to that owner. Two readers syncing the same Zotero library therefore
+    get two plans and two cursors, which is the point — one reader's "unchanged" is not the other's.
+    """
+    cursor = store.cursor(connection, owner=owner)
     since = int(cursor.get("committed_version") or 0)
-    selected = connection.collections or [row["key"] for row in store.status(connection)["collections"]
-                                          if row["selected"]]
+    selected = connection.collections or [
+        row["key"] for row in store.status(connection, owner=owner)["collections"] if row["selected"]]
     remote_version = client.library_version()
     changed = client.changed_versions(since)
     deleted = set(client.deleted_keys(since))
@@ -105,7 +110,7 @@ def plan(store: ZoteroStore, papers: list[dict], connection: Connection, *,
         if item.key in seen:
             continue
         seen.add(item.key)
-        existing = store.link(connection, item.key)
+        existing = store.link(connection, item.key, owner=owner)
         if existing and existing["state"] == "linked" and existing["remote_version"] >= item.version \
                 and existing["paper_id"] in index["by_id"]:
             unchanged.append({"key": item.key, "title": item.title, "version": item.version})
@@ -139,8 +144,8 @@ def plan(store: ZoteroStore, papers: list[dict], connection: Connection, *,
                  "previous_version": int(existing["remote_version"]) if existing else 0,
                  "was_tombstoned": bool(existing and existing["state"] == "remote_deleted"),
                  "record": item.paper(existing=index["by_id"].get(target)).model_dump(mode="json")}
-        owner = index["doi"].get(doi) if doi else None
-        if owner and target and owner != target:
+        holder = index["doi"].get(doi) if doi else None
+        if holder and target and holder != target:
             # This happens when an already-linked item's DOI is edited remotely to one another paper
             # here already holds. Writing it would break the unique index, so neither side is touched.
             skipped.append({"key": item.key, "title": item.title,
@@ -156,7 +161,7 @@ def plan(store: ZoteroStore, papers: list[dict], connection: Connection, *,
                 claimed_arxiv[base] = item.key
 
     for key in sorted(deleted):
-        existing = store.link(connection, key)
+        existing = store.link(connection, key, owner=owner)
         if existing and existing["state"] == "linked":
             paper = index["by_id"].get(existing["paper_id"]) or {}
             tombstoned.append({"key": key, "paper_id": existing["paper_id"],
@@ -203,11 +208,14 @@ def plan(store: ZoteroStore, papers: list[dict], connection: Connection, *,
     }
 
 
-def commit(store: ZoteroStore, plan: dict, connection: Connection) -> dict:
+def commit(store: ZoteroStore, plan: dict, connection: Connection, *, owner: str) -> dict:
     """Write one plan in a single transaction, cursor included.
 
     Everything or nothing: a collision, a vanished paper or a crash part-way leaves the library
-    exactly as it was, with the cursor still pointing at the last committed version.
+    exactly as it was, with the cursor still pointing at the last committed version. Every row
+    written carries the owner the plan was made for, and the cursor precondition is read from
+    that owner's row: another reader of the same Zotero library has their own cursor, so their
+    progress can neither invalidate nor be invalidated by this plan.
     """
     kind, identifier = connection.identity
     expected = int(plan["cursor"]["from"])
@@ -216,49 +224,51 @@ def commit(store: ZoteroStore, plan: dict, connection: Connection) -> dict:
     try:
         with store.db.connect() as con:
             con.execute("BEGIN IMMEDIATE")
-            row = con.execute("SELECT committed_version FROM zotero_cursors WHERE library_type=? "
-                              "AND library_id=?", (kind, identifier)).fetchone()
+            row = con.execute("SELECT committed_version FROM zotero_cursors WHERE owner=? AND "
+                              "library_type=? AND library_id=?",
+                              (owner, kind, identifier)).fetchone()
             if (int(row[0]) if row else 0) != expected:
                 raise HTTPException(409, "同步计划已过期：游标已经移动，请重新预览后再确认")
             stamp = now()
             for entry in plan["added"]:
                 paper_id = str(uuid4())
                 record = entry["record"]
-                _insert_paper(con, paper_id, record, stamp)
-                _upsert_link(con, kind, identifier, entry, paper_id, stamp)
+                _insert_paper(con, paper_id, record, stamp, owner)
+                _upsert_link(con, owner, kind, identifier, entry, paper_id, stamp)
                 written["added"].append({"key": entry["key"], "paper_id": paper_id,
                                          "title": record.get("title", "")})
             for entry in plan["updated"]:
-                _update_paper(con, entry["paper_id"], entry["record"], stamp)
-                _upsert_link(con, kind, identifier, entry, entry["paper_id"], stamp)
+                _update_paper(con, entry["paper_id"], entry["record"], stamp, owner)
+                _upsert_link(con, owner, kind, identifier, entry, entry["paper_id"], stamp)
                 written["updated"].append({"key": entry["key"], "paper_id": entry["paper_id"],
                                            "title": entry["record"].get("title", ""),
                                            "version": f"{entry['previous_version']} → {entry['version']}"})
             for entry in plan["linked_existing"]:
-                _upsert_link(con, kind, identifier, entry, entry["paper_id"], stamp)
+                _upsert_link(con, owner, kind, identifier, entry, entry["paper_id"], stamp)
                 written["linked_existing"].append({"key": entry["key"], "paper_id": entry["paper_id"],
                                                    "matched_on": entry["matched_on"]})
             for entry in plan["remote_deleted"]:
                 con.execute("UPDATE zotero_links SET state='remote_deleted', synced_at=? WHERE "
-                            "library_type=? AND library_id=? AND item_key=?",
-                            (stamp, kind, identifier, entry["key"]))
+                            "owner=? AND library_type=? AND library_id=? AND item_key=?",
+                            (stamp, owner, kind, identifier, entry["key"]))
                 written["remote_deleted"].append({"key": entry["key"], "paper_id": entry["paper_id"]})
-            con.execute("INSERT INTO zotero_cursors(library_type,library_id,committed_version,"
-                        "planned_version,label,scope,updated_at) VALUES (?,?,?,?,?,?,?) "
-                        "ON CONFLICT(library_type,library_id) DO UPDATE SET "
+            con.execute("INSERT INTO zotero_cursors(owner,library_type,library_id,committed_version,"
+                        "planned_version,label,scope,updated_at) VALUES (?,?,?,?,?,?,?,?) "
+                        "ON CONFLICT(owner,library_type,library_id) DO UPDATE SET "
                         "committed_version=excluded.committed_version, label=excluded.label, "
                         "scope=excluded.scope, updated_at=excluded.updated_at",
-                        (kind, identifier, target_version, target_version, connection.label[:200],
+                        (owner, kind, identifier, target_version, target_version,
+                         connection.label[:200],
                          # The scope as it was applied, not as it was asked for: `scope_filters`
                          # deduplicates and clamps, and a stored scope that disagreed with the
                          # parameters actually sent would make `status` describe a different sync.
                          encode(plan.get("scope") or {}), stamp))
-            con.execute("INSERT INTO zotero_sync_log(library_type,library_id,at,applied,data) "
-                        "VALUES (?,?,?,1,?)",
-                        (kind, identifier, stamp, encode({"counts": plan["counts"],
-                                                          "cursor": plan["cursor"],
-                                                          "notes": plan["notes"],
-                                                          "skipped": plan["skipped"][:50]})))
+            con.execute("INSERT INTO zotero_sync_log(owner,library_type,library_id,at,applied,data) "
+                        "VALUES (?,?,?,?,1,?)",
+                        (owner, kind, identifier, stamp, encode({"counts": plan["counts"],
+                                                                 "cursor": plan["cursor"],
+                                                                 "notes": plan["notes"],
+                                                                 "skipped": plan["skipped"][:50]})))
     except sqlite3.IntegrityError as exc:
         raise HTTPException(409, f"写入被数据库拒绝，本次同步没有任何改动：{exc}") from exc
     return {"applied": True, "connection": connection.public(), "cursor": plan["cursor"],
@@ -267,43 +277,47 @@ def commit(store: ZoteroStore, plan: dict, connection: Connection) -> dict:
                     "本地笔记、资源与证据没有被删除。"}
 
 
-def _insert_paper(con, paper_id: str, record: dict, stamp: str) -> None:
-    con.execute("INSERT INTO papers(id,data,doi,arxiv_base,created_at,updated_at,is_demo) "
-                "VALUES (?,?,?,?,?,?,0)",
+def _insert_paper(con, paper_id: str, record: dict, stamp: str, owner: str) -> None:
+    con.execute("INSERT INTO papers(id,data,doi,arxiv_base,created_at,updated_at,is_demo,owner) "
+                "VALUES (?,?,?,?,?,?,0,?)",
                 (paper_id, encode(record), record.get("doi", ""),
-                 re.sub(r"v\d+$", "", record.get("arxiv_id") or ""), stamp, stamp))
-    con.executemany("INSERT OR IGNORE INTO topics(name) VALUES (?)",
-                    [(name,) for name in record.get("topics") or []])
+                 re.sub(r"v\d+$", "", record.get("arxiv_id") or ""), stamp, stamp, owner))
+    con.executemany("INSERT OR IGNORE INTO topics(name,owner) VALUES (?,?)",
+                    [(name, owner) for name in record.get("topics") or []])
 
 
-def _update_paper(con, paper_id: str, record: dict, stamp: str) -> None:
+def _update_paper(con, paper_id: str, record: dict, stamp: str, owner: str) -> None:
     """Overwrite the bibliographic fields only.
 
     The stored row is read back and merged, so `notes`, `topics` and `status` — which the remote
-    payload has never seen — survive an update instead of being reset to defaults.
+    payload has never seen — survive an update instead of being reset to defaults. The owner is in
+    the WHERE clause of both statements, so a plan naming a paper this owner does not have writes
+    nothing rather than writing into somebody else's record.
     """
-    row = con.execute("SELECT data FROM papers WHERE id=?", (paper_id,)).fetchone()
+    row = con.execute("SELECT data FROM papers WHERE id=? AND owner=?",
+                      (paper_id, owner)).fetchone()
     if row is None:
         raise HTTPException(409, "计划里的论文在提交前被删除了；本次同步没有写入任何内容")
     stored = json.loads(row[0])
     merged = {**stored, **{key: value for key, value in record.items()
                            if key not in ("notes", "topics", "status")}}
-    con.execute("UPDATE papers SET data=?,doi=?,arxiv_base=?,updated_at=? WHERE id=?",
+    con.execute("UPDATE papers SET data=?,doi=?,arxiv_base=?,updated_at=? WHERE id=? AND owner=?",
                 (encode(merged), merged.get("doi", ""),
-                 re.sub(r"v\d+$", "", merged.get("arxiv_id") or ""), stamp, paper_id))
+                 re.sub(r"v\d+$", "", merged.get("arxiv_id") or ""), stamp, paper_id, owner))
 
 
-def _upsert_link(con, kind: str, identifier: str, entry: dict, paper_id: str, stamp: str) -> None:
-    con.execute("INSERT INTO zotero_links(library_type,library_id,item_key,paper_id,remote_version,"
-                "state,item_type,synced_at) VALUES (?,?,?,?,?,'linked',?,?) "
-                "ON CONFLICT(library_type,library_id,item_key) DO UPDATE SET "
+def _upsert_link(con, owner: str, kind: str, identifier: str, entry: dict, paper_id: str,
+                 stamp: str) -> None:
+    con.execute("INSERT INTO zotero_links(owner,library_type,library_id,item_key,paper_id,"
+                "remote_version,state,item_type,synced_at) VALUES (?,?,?,?,?,?,'linked',?,?) "
+                "ON CONFLICT(owner,library_type,library_id,item_key) DO UPDATE SET "
                 "paper_id=excluded.paper_id, remote_version=excluded.remote_version, "
                 "state='linked', item_type=excluded.item_type, synced_at=excluded.synced_at",
-                (kind, identifier, entry["key"], paper_id, int(entry["version"]),
+                (owner, kind, identifier, entry["key"], paper_id, int(entry["version"]),
                  entry.get("item_type", ""), stamp))
 
 
-def sync(store: ZoteroStore, papers: list[dict], connection: Connection, *,
+def sync(store: ZoteroStore, papers: list[dict], connection: Connection, *, owner: str,
          transport=None, apply: bool = False, max_requests: int = 60) -> dict:
     """One sync: preview by default, and only `apply=True` writes.
 
@@ -314,7 +328,7 @@ def sync(store: ZoteroStore, papers: list[dict], connection: Connection, *,
         with ZoteroClient(connection, transport=transport,
                           governor=Governor(max_requests=max_requests, seconds=180),
                           max_requests=max_requests) as client:
-            result = plan(store, papers, connection, client=client)
+            result = plan(store, papers, connection, owner=owner, client=client)
             result["requests_used"] = client.requests
     except ZoteroError as exc:
         raise HTTPException(502, str(exc)) from exc
@@ -325,5 +339,5 @@ def sync(store: ZoteroStore, papers: list[dict], connection: Connection, *,
                             % "、".join(result["pages"]["stops"]))
     if not apply:
         return result
-    applied = commit(store, result, connection)
+    applied = commit(store, result, connection, owner=owner)
     return {**result, **applied}

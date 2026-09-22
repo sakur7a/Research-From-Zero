@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from urllib.parse import urlsplit
 
+from re0.deployment import LOCAL_OWNER
 from re0.main import create_app
 from re0.models import PaperInput
 from re0.agent.model import DEFAULT_HOSTS, LOOPBACK, ChatModel, ModelError, validate_endpoint
@@ -314,12 +315,15 @@ def test_read_repository_file_pinned_and_bounded(client):
 
 def test_library_privacy_and_old_data_preserved(client):
     store=client.app.state.store
-    paper=store.create_paper(PaperInput(title='Layout private fixture',notes='DO NOT SEND ME',abstract='Public abstract'))
+    paper=store.create_paper(PaperInput(title='Layout private fixture',notes='DO NOT SEND ME',abstract='Public abstract'), owner=LOCAL_OWNER)
     tools=ResearchTools(store)
     with pytest.raises(ValueError):tools.execute('search_library',{'query':'layout'},use_library=False)
-    result=tools.execute('search_library',{'query':'layout'},use_library=True)
+    # An unowned library search is refused too: there is no correct answer to "whose library", and
+    # everybody's is the one answer that must never come back.
+    with pytest.raises(ValueError):tools.execute('search_library',{'query':'layout'},use_library=True)
+    result=tools.execute('search_library',{'query':'layout'},use_library=True,owner=LOCAL_OWNER)
     assert 'DO NOT SEND ME' not in json.dumps(result)
-    assert store.get_paper(paper['id'])['notes']=='DO NOT SEND ME'
+    assert store.get_paper(paper['id'], owner=LOCAL_OWNER)['notes']=='DO NOT SEND ME'
     assert all('search_library'!=x['function']['name'] for x in specifications())
 
 

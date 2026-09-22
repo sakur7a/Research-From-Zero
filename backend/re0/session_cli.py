@@ -29,11 +29,16 @@ from pydantic import ValidationError
 
 from .agent.schemas import FollowUpInput, RetryInput, TaskDefaults
 from .agent.session import validate_followup, validate_retry
+from .deployment import LOCAL_OWNER
 
 PROGRAM = "re0 session"
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 DEFAULTS_KEY = "task_defaults"
+# The console reads the database directly, so it acts as the owner a single-user database has: the
+# local one. It cannot act for a hosted account, which holds its identity in a session cookie the
+# console has no way to present — that is why hosted mode refuses requests claiming `X-Re0-Client:
+# cli` instead of letting them in as an owner they cannot prove.
 # The CLI holds no key, so it cannot know where a turn would be sent. An empty destination makes the
 # service-side check the only one that counts, and says so rather than pretending to have compared.
 UNCONFIGURED_DESTINATION: dict = {}
@@ -55,7 +60,7 @@ def _store(path: str):
 
 def _defaults(store) -> TaskDefaults:
     try:
-        return TaskDefaults(**store.setting(DEFAULTS_KEY))
+        return TaskDefaults(**store.setting(DEFAULTS_KEY, owner=LOCAL_OWNER))
     except ValidationError:
         # A hand-edited row must not stop a read command, and must not widen a budget.
         return TaskDefaults()
@@ -114,7 +119,7 @@ def session_command(arguments) -> int:
         if action in {"list", "show", "delta", "scope"}:
             store = _store(database_path(arguments.db))
         if action == "list":
-            rows = store.conversations()
+            rows = store.conversations(owner=LOCAL_OWNER)
             if not rows:
                 print("还没有会话。用 `re0 paper search` 检索，或在 Web 工作台里发起一个研究任务。")
                 return 0
@@ -126,7 +131,7 @@ def session_command(arguments) -> int:
                       f"{row['goal'][:60]}")
             return 0
         if action == "show":
-            conversation = store.conversation(arguments.conversation_id)
+            conversation = store.conversation(arguments.conversation_id, owner=LOCAL_OWNER)
             caps, ledger = conversation["caps"], conversation["ledger"]
             print(f"会话 {conversation['id']}")
             print(f"目标：{conversation['goal']}")
@@ -146,7 +151,7 @@ def session_command(arguments) -> int:
             print("每一轮的报告与证据都能单独导出：GET /api/agent/runs/<run id>/export")
             return 0
         if action == "delta":
-            stored = store.get(arguments.run_id)
+            stored = store.get(arguments.run_id, owner=LOCAL_OWNER)
             delta = stored.get("report_delta")
             if not delta:
                 print("这一轮没有已完成的报告，或它是会话的第一轮：没有可对比的上一轮。")
@@ -171,8 +176,8 @@ def session_command(arguments) -> int:
         if action == "scope":
             params = _followup_params(arguments)
             budgets = _defaults(store).merged(params)
-            scope, _ = validate_followup(store, params, vault_public=UNCONFIGURED_DESTINATION,
-                                         budgets=budgets)
+            scope, _ = validate_followup(store, params, owner=LOCAL_OWNER,
+                                         vault_public=UNCONFIGURED_DESTINATION, budgets=budgets)
             if arguments.json:
                 payload = {**scope.as_dict(), "budgets": budgets.model_dump()}
                 Path(arguments.json).write_text(json.dumps(payload, ensure_ascii=False, indent=2),

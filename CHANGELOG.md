@@ -2,6 +2,82 @@
 
 ## Unreleased
 
+### Two modes, one binary: hosted needs an identity, local needs nothing (#13)
+
+- Add `backend/re0/deployment.py`. `RE0_MODE` is `local` (the default) or `hosted`, **declared and
+  never inferred**: a process cannot observe who can reach its port, so guessing "probably local"
+  from a loopback bind is exactly the guess that must not be made silently. A hosted start-up refuses
+  with the whole list of what is missing at once — session secret, public entry, allowed origins —
+  instead of naming one variable per restart.
+- `run.py` checks the deployment before uvicorn imports the app, and refuses a non-loopback
+  `RE0_HOST` while the mode is local: an unauthenticated service bound to `0.0.0.0` is not a
+  configuration, it is an open door. It also passes `workers=1` explicitly, since task state, the
+  model vault and the execution lease are per process and a second worker would be a second,
+  disagreeing copy of each.
+- Add `backend/re0/auth.py` and `re0 auth`. Sessions are opaque random tokens stored as SHA-256, so
+  they can be revoked, which a signed token cannot be. Passwords are PBKDF2-HMAC-SHA256, 210k rounds,
+  a per-account 16-byte salt; verification runs a dummy hash when the account does not exist, so a
+  wrong username does not answer faster than a wrong password; five failures lock the account for 15
+  minutes, and a lock is not reported as a wrong password. **There is no registration endpoint** —
+  an operator provisions accounts from the console (`re0 auth
+  secret|create-user|list|disable|revoke|purge`), and a password is never a flag: it is read from a
+  prompt, from `RE0_AUTH_PASSWORD`, or from stdin, because argv ends up in the shell history and the
+  process list. In local mode `re0 auth` says there are no accounts and no login step, and exits
+  non-zero rather than pretending to have done something.
+- A documented example secret is refused, including one repeated until it is long enough: "太短"
+  invites an operator to pad the value they already typed, and a padded example is still public
+  knowledge.
+- The session cookie is HttpOnly and SameSite=Strict, and Secure whenever the mode is hosted;
+  `RE0_ALLOW_INSECURE_COOKIES` is itself a start-up refusal there, as is an http public entry and a
+  loopback origin in the allowlist — every visitor has their own `localhost`, so allowing one allows
+  any of them to present a page the origin check accepts.
+- **Every stored row now has an owner.** `papers` and `topics` gained an `owner` column; resources
+  and observations are scoped by a join through `papers` instead of carrying their own copy, so one
+  record has one source of truth; `agent_runs`, `agent_conversations`, `agent_settings` and the three
+  `zotero_*` tables carry the owner in the row or inside the primary key. Owner is a **required
+  keyword argument** on request-facing store methods, so forgetting it is a `TypeError` rather than a
+  query that quietly returns somebody else's rows.
+- Cross-account access is answered with **404, not 403**. A 403 confirms the id belongs to someone,
+  which turns every identifier into an enumeration oracle; a 404 says only what the caller was
+  entitled to learn.
+- The DOI and arXiv uniqueness indexes are per owner. The same work in two accounts is two records,
+  and the collision refusal no longer tells a second reader that the first one already has it.
+- Migrations: papers v1→v2, agent v2→v3, zotero v1→v2. A single-user database is copied with the
+  SQLite **backup API** before anything is written, every existing row is assigned to the owner
+  `local`, a schema newer than this build is refused rather than downgraded, and row counts are
+  compared before an old table is dropped. `local` and its obvious variants are reserved account
+  names, so no account can ever own the rows a migration just assigned.
+- **The model vault is per owner and stays in memory.** A key one account entered is not readable,
+  echoable or clearable by another, and the configuration a turn runs with is snapshotted at launch,
+  so rotating a key mid-turn cannot redirect that turn. Task defaults and session caps are per
+  account as well: one reader raising their own budget does not widen what another's tasks may spend.
+- Hosted mode refuses a loopback model destination outright and requires every address the model host
+  resolves to be public — a public service that accepts a private resolution is an SSRF probe with a
+  model bill attached. `RE0_ALLOW_LOCAL_RESOLVER` is not honoured there, and the refusal now says so
+  instead of advertising a variable that cannot help; that advice is still given, and still correct,
+  on the single-user full-text path where the connection really is the reader's own.
+- In hosted mode every `/api/*` route needs a session, while `/`, `/library` and `/api/health` stay
+  reachable — nobody could reach a login form otherwise. A request claiming `X-Re0-Client: cli` is
+  refused, a cross-origin write is refused unless the origin is on the allowlist, and `owner` is not a
+  field a request body may declare.
+- The execution lease is one task at a time per process. `busy` reports that the slot is held and
+  whether it is yours, never whose.
+- The per-process retrieval cache became per owner (32 of them, evicting the least recently used), so
+  a repeated question does not re-spend one reader's budget and a cached answer cannot cross accounts.
+- `re0 doctor` now reports the deployment first — which mode would run, and, when it is hosted, the
+  public entry and how many origins are allowed. A declared mode that could not start makes doctor
+  **exit 2** instead of printing one more informational line: doctor is what an operator checks before
+  trusting the rest of the report, so it must not say "all clear" with a status of 0.
+- 455 Python tests (was 428), including a two-account suite that runs two independent cookie jars
+  against one app: libraries, resources, observations, deletes, topics, exports, runs, defaults and
+  model keys, each invisible to the other, plus the migrations, the launcher's refusals and the
+  console's.
+- **Not done in this increment:** quotas, rate limiting and the site-wide circuit breaker; a login
+  **web page** (hosted mode authenticates over HTTP, but there is no form in the UI yet); lease
+  behaviour under concurrent load; retention and audit-redaction rules; and any real hosted
+  deployment — none of this has run behind a real TLS terminator with a real second user. **Hosted
+  mode is not yet a deliverable.** Local mode is unchanged in behaviour and remains the default.
+
 ### Read-only incremental Zotero sync (#11)
 
 - Add `backend/re0/zotero.py` (connector + mapping store), `backend/re0/zotero_sync.py` (plan and

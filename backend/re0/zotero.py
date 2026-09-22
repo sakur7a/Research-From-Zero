@@ -391,174 +391,251 @@ ZOTERO_SCHEMA = """
 CREATE TABLE IF NOT EXISTS zotero_schema_version (version INTEGER NOT NULL);
 INSERT INTO zotero_schema_version SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM zotero_schema_version);
 CREATE TABLE IF NOT EXISTS zotero_links (
+ owner TEXT NOT NULL DEFAULT 'local',
  library_type TEXT NOT NULL, library_id TEXT NOT NULL, item_key TEXT NOT NULL,
  paper_id TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
  remote_version INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'linked',
  item_type TEXT NOT NULL DEFAULT '', synced_at TEXT NOT NULL,
- PRIMARY KEY(library_type, library_id, item_key)
+ PRIMARY KEY(owner, library_type, library_id, item_key)
 );
 CREATE INDEX IF NOT EXISTS zotero_links_paper ON zotero_links(paper_id);
 CREATE TABLE IF NOT EXISTS zotero_cursors (
+ owner TEXT NOT NULL DEFAULT 'local',
  library_type TEXT NOT NULL, library_id TEXT NOT NULL,
  committed_version INTEGER NOT NULL DEFAULT 0, planned_version INTEGER NOT NULL DEFAULT 0,
  label TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL,
- PRIMARY KEY(library_type, library_id)
+ PRIMARY KEY(owner, library_type, library_id)
 );
 CREATE TABLE IF NOT EXISTS zotero_collections (
+ owner TEXT NOT NULL DEFAULT 'local',
  library_type TEXT NOT NULL, library_id TEXT NOT NULL, key TEXT NOT NULL,
  name TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0,
  selected INTEGER NOT NULL DEFAULT 0,
- PRIMARY KEY(library_type, library_id, key)
+ PRIMARY KEY(owner, library_type, library_id, key)
 );
 CREATE TABLE IF NOT EXISTS zotero_sync_log (
- id INTEGER PRIMARY KEY AUTOINCREMENT, library_type TEXT NOT NULL, library_id TEXT NOT NULL,
+ id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL DEFAULT 'local',
+ library_type TEXT NOT NULL, library_id TEXT NOT NULL,
  at TEXT NOT NULL, applied INTEGER NOT NULL, data TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS zotero_sync_log_library ON zotero_sync_log(library_type, library_id, id);
+CREATE INDEX IF NOT EXISTS zotero_sync_log_library ON zotero_sync_log(owner, library_type, library_id, id);
 """
+
+# The owner sits inside every primary key, which is the part that cannot be added later by an index:
+# two readers syncing the same Zotero library would otherwise write the same mapping row, and the
+# second one's cursor would tell the first one that nothing had changed.
+_LINKS_V2 = """CREATE TABLE zotero_links_v2 (
+ owner TEXT NOT NULL DEFAULT 'local',
+ library_type TEXT NOT NULL, library_id TEXT NOT NULL, item_key TEXT NOT NULL,
+ paper_id TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+ remote_version INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'linked',
+ item_type TEXT NOT NULL DEFAULT '', synced_at TEXT NOT NULL,
+ PRIMARY KEY(owner, library_type, library_id, item_key))"""
+_LINKS_COLUMNS = ("library_type", "library_id", "item_key", "paper_id", "remote_version", "state",
+                  "item_type", "synced_at")
+_CURSORS_V2 = """CREATE TABLE zotero_cursors_v2 (
+ owner TEXT NOT NULL DEFAULT 'local',
+ library_type TEXT NOT NULL, library_id TEXT NOT NULL,
+ committed_version INTEGER NOT NULL DEFAULT 0, planned_version INTEGER NOT NULL DEFAULT 0,
+ label TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL,
+ PRIMARY KEY(owner, library_type, library_id))"""
+_CURSORS_COLUMNS = ("library_type", "library_id", "committed_version", "planned_version", "label",
+                    "scope", "updated_at")
+_COLLECTIONS_V2 = """CREATE TABLE zotero_collections_v2 (
+ owner TEXT NOT NULL DEFAULT 'local',
+ library_type TEXT NOT NULL, library_id TEXT NOT NULL, key TEXT NOT NULL,
+ name TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0,
+ selected INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(owner, library_type, library_id, key))"""
+_COLLECTIONS_COLUMNS = ("library_type", "library_id", "key", "name", "version", "selected")
 
 
 class ZoteroStore:
-    """Mappings, cursors and the sync log. Holds no key and no note content."""
+    """Mappings, cursors and the sync log, per owner. Holds no key and no note content."""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, db: Database):
         self.db = db
         with db.connect() as con:
-            # Additive: these tables are new and independent of the paper schema, so creating them
-            # *is* the migration. A database stamped by a later version is refused rather than
-            # downgraded, and nothing here rewrites a paper row.
             con.executescript(ZOTERO_SCHEMA)
             version = con.execute("SELECT version FROM zotero_schema_version").fetchone()[0]
+            # A database stamped by a later version is refused rather than downgraded: it may hold
+            # columns this code cannot interpret, and guessing rewrites rows.
             if version > self.SCHEMA_VERSION:
                 raise RuntimeError(f"Unsupported zotero schema: {version}; no destructive migration "
                                    "was performed")
+            if version < self.SCHEMA_VERSION:
+                self._migrate(con, version)
+
+    def _migrate(self, con, version: int) -> None:
+        """Give every existing mapping to the owner it was made for.
+
+        A single-user database has one owner, and naming it `local` is what keeps those mappings away
+        from an account created later: a new reader syncing the same Zotero library gets their own
+        rows instead of inheriting somebody's cursor. Rows are copied, counted, and the original is
+        dropped only if the counts agree.
+        """
+        self._rebuild_with_owner(con, "zotero_links", _LINKS_V2, _LINKS_COLUMNS)
+        self._rebuild_with_owner(con, "zotero_cursors", _CURSORS_V2, _CURSORS_COLUMNS)
+        self._rebuild_with_owner(con, "zotero_collections", _COLLECTIONS_V2, _COLLECTIONS_COLUMNS)
+        if "owner" not in {row[1] for row in con.execute("PRAGMA table_info(zotero_sync_log)")}:
+            con.execute("ALTER TABLE zotero_sync_log ADD COLUMN owner TEXT NOT NULL DEFAULT 'local'")
+        # The v1 index does not lead with owner, so it would be scanned and then filtered.
+        con.execute("DROP INDEX IF EXISTS zotero_sync_log_library")
+        con.execute("CREATE INDEX IF NOT EXISTS zotero_sync_log_library ON zotero_sync_log"
+                    "(owner, library_type, library_id, id)")
+        con.execute("UPDATE zotero_schema_version SET version=?", (self.SCHEMA_VERSION,))
+
+    def _rebuild_with_owner(self, con, table: str, ddl: str, columns: tuple) -> None:
+        """Rebuild one table with `owner` in its primary key. Table names are module constants."""
+        if "owner" in {row[1] for row in con.execute(f"PRAGMA table_info({table})")}:
+            return
+        con.execute(ddl)
+        listing = ",".join(columns)
+        moved = con.execute(f"INSERT INTO {table}_v2(owner,{listing}) "
+                            f"SELECT 'local',{listing} FROM {table}").rowcount
+        expected = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        if moved != expected:
+            raise sqlite3.DatabaseError(f"{table} 迁移数量不符（{moved} != {expected}）；未删除原表")
+        con.execute(f"DROP TABLE {table}")
+        con.execute(f"ALTER TABLE {table}_v2 RENAME TO {table}")
 
     # --- cursor
 
-    def cursor(self, connection: Connection) -> dict:
+    def cursor(self, connection: Connection, *, owner: str) -> dict:
         kind, identifier = connection.identity
         with self.db.connect() as con:
-            row = con.execute("SELECT * FROM zotero_cursors WHERE library_type=? AND library_id=?",
-                              (kind, identifier)).fetchone()
+            row = con.execute("SELECT * FROM zotero_cursors WHERE owner=? AND library_type=? "
+                              "AND library_id=?", (owner, kind, identifier)).fetchone()
         if row is None:
             return {"library_type": kind, "library_id": identifier, "committed_version": 0,
                     "planned_version": 0, "label": connection.label, "scope": {}, "updated_at": "",
                     "note": "还没有同步过；第一次同步会读取整个库的当前状态"}
         result = dict(row)
         result["scope"] = _loads(result.pop("scope", "{}"))
+        result.pop("owner", None)
         return result
 
-    def _set_cursor(self, con, connection: Connection, *, committed: int, planned: int,
-                    scope: dict) -> None:
+    def _set_cursor(self, con, connection: Connection, *, owner: str, committed: int,
+                    planned: int, scope: dict) -> None:
         kind, identifier = connection.identity
-        con.execute("INSERT INTO zotero_cursors(library_type,library_id,committed_version,"
-                    "planned_version,label,scope,updated_at) VALUES (?,?,?,?,?,?,?) "
-                    "ON CONFLICT(library_type,library_id) DO UPDATE SET "
+        con.execute("INSERT INTO zotero_cursors(owner,library_type,library_id,committed_version,"
+                    "planned_version,label,scope,updated_at) VALUES (?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(owner,library_type,library_id) DO UPDATE SET "
                     "committed_version=excluded.committed_version, "
                     "planned_version=excluded.planned_version, label=excluded.label, "
                     "scope=excluded.scope, updated_at=excluded.updated_at",
-                    (kind, identifier, committed, planned, connection.label[:200],
+                    (owner, kind, identifier, committed, planned, connection.label[:200],
                      encode(scope), now()))
 
     # --- links
 
-    def links(self, *, paper_id: str = "") -> list[dict]:
-        query = "SELECT * FROM zotero_links"
-        args: tuple = ()
+    def links(self, *, owner: str, paper_id: str = "") -> list[dict]:
+        query = "SELECT * FROM zotero_links WHERE owner=?"
+        args: tuple = (owner,)
         if paper_id:
-            query += " WHERE paper_id=?"
-            args = (paper_id,)
+            query += " AND paper_id=?"
+            args += (paper_id,)
         with self.db.connect() as con:
-            return [dict(row) for row in con.execute(query + " ORDER BY synced_at DESC", args)]
+            rows = [dict(row) for row in con.execute(query + " ORDER BY synced_at DESC", args)]
+        for row in rows:
+            row.pop("owner", None)
+        return rows
 
-    def link(self, connection: Connection, key: str) -> dict | None:
+    def link(self, connection: Connection, key: str, *, owner: str) -> dict | None:
         kind, identifier = connection.identity
         with self.db.connect() as con:
-            row = con.execute("SELECT * FROM zotero_links WHERE library_type=? AND library_id=? "
-                              "AND item_key=?", (kind, identifier, key)).fetchone()
+            row = con.execute("SELECT * FROM zotero_links WHERE owner=? AND library_type=? "
+                              "AND library_id=? AND item_key=?",
+                              (owner, kind, identifier, key)).fetchone()
         return dict(row) if row else None
 
-    def status(self, connection: Connection) -> dict:
-        """What is mapped, and what a sync would start from. Contains no key and no note text."""
+    def status(self, connection: Connection, *, owner: str) -> dict:
+        """What this owner has mapped, and what a sync would start from. No key, no note text."""
         kind, identifier = connection.identity
         with self.db.connect() as con:
-            rows = con.execute("SELECT state, COUNT(*) FROM zotero_links WHERE library_type=? "
-                               "AND library_id=? GROUP BY state", (kind, identifier)).fetchall()
-            papers = con.execute("SELECT COUNT(DISTINCT paper_id) FROM zotero_links WHERE "
-                                 "library_type=? AND library_id=?", (kind, identifier)).fetchone()[0]
-            runs = con.execute("SELECT at, applied, data FROM zotero_sync_log WHERE library_type=? "
-                               "AND library_id=? ORDER BY id DESC LIMIT 10",
-                               (kind, identifier)).fetchall()
+            rows = con.execute("SELECT state, COUNT(*) FROM zotero_links WHERE owner=? AND "
+                               "library_type=? AND library_id=? GROUP BY state",
+                               (owner, kind, identifier)).fetchall()
+            papers = con.execute("SELECT COUNT(DISTINCT paper_id) FROM zotero_links WHERE owner=? "
+                                 "AND library_type=? AND library_id=?",
+                                 (owner, kind, identifier)).fetchone()[0]
+            runs = con.execute("SELECT at, applied, data FROM zotero_sync_log WHERE owner=? AND "
+                               "library_type=? AND library_id=? ORDER BY id DESC LIMIT 10",
+                               (owner, kind, identifier)).fetchall()
             collections = con.execute("SELECT key,name,version,selected FROM zotero_collections "
-                                      "WHERE library_type=? AND library_id=? ORDER BY name",
-                                      (kind, identifier)).fetchall()
-        return {"connection": connection.public(), "cursor": self.cursor(connection),
+                                      "WHERE owner=? AND library_type=? AND library_id=? "
+                                      "ORDER BY name", (owner, kind, identifier)).fetchall()
+        return {"connection": connection.public(), "cursor": self.cursor(connection, owner=owner),
                 "links": {row[0]: row[1] for row in rows}, "distinct_papers": papers,
                 "collections": [{"key": row[0], "name": row[1], "version": row[2],
                                  "selected": bool(row[3])} for row in collections],
                 "recent_syncs": [{"at": row[0], "applied": bool(row[1]), **_loads(row[2])}
                                  for row in runs]}
 
-    def save_collections(self, connection: Connection, rows: list[dict],
+    def save_collections(self, connection: Connection, rows: list[dict], *, owner: str,
                          selected: list[str] | None = None) -> int:
         kind, identifier = connection.identity
         keep = set(selected) if selected is not None else None
         with self.db.connect() as con:
             previous = {row[0]: row[1] for row in con.execute(
-                "SELECT key, selected FROM zotero_collections WHERE library_type=? AND library_id=?",
-                (kind, identifier))}
+                "SELECT key, selected FROM zotero_collections WHERE owner=? AND library_type=? "
+                "AND library_id=?", (owner, kind, identifier))}
             for row in rows:
                 key = _text(row.get("key"), 8)
                 if not key:
                     continue
                 chosen = bool(previous.get(key, 0)) if keep is None else key in keep
-                con.execute("INSERT INTO zotero_collections(library_type,library_id,key,name,version,"
-                            "selected) VALUES (?,?,?,?,?,?) "
-                            "ON CONFLICT(library_type,library_id,key) DO UPDATE SET "
+                con.execute("INSERT INTO zotero_collections(owner,library_type,library_id,key,name,"
+                            "version,selected) VALUES (?,?,?,?,?,?,?) "
+                            "ON CONFLICT(owner,library_type,library_id,key) DO UPDATE SET "
                             "name=excluded.name, version=excluded.version, selected=excluded.selected",
-                            (kind, identifier, key, _text(row.get("name"), 200),
+                            (owner, kind, identifier, key, _text(row.get("name"), 200),
                              int(row.get("version") or 0), int(chosen)))
         return len(rows)
 
-    def select_collections(self, connection: Connection, keys: list[str]) -> dict:
+    def select_collections(self, connection: Connection, keys: list[str], *, owner: str) -> dict:
         """Choosing which collections to sync is a scope decision, so it is explicit and recorded."""
         kind, identifier = connection.identity
         with self.db.connect() as con:
             known = {row[0] for row in con.execute(
-                "SELECT key FROM zotero_collections WHERE library_type=? AND library_id=?",
-                (kind, identifier))}
+                "SELECT key FROM zotero_collections WHERE owner=? AND library_type=? AND library_id=?",
+                (owner, kind, identifier))}
             unknown = [key for key in keys if key not in known]
             if unknown:
                 raise HTTPException(404, f"这些集合不属于该库：{'、'.join(unknown[:8])}")
-            con.execute("UPDATE zotero_collections SET selected=0 WHERE library_type=? AND library_id=?",
-                        (kind, identifier))
+            con.execute("UPDATE zotero_collections SET selected=0 WHERE owner=? AND library_type=? "
+                        "AND library_id=?", (owner, kind, identifier))
             for key in keys:
-                con.execute("UPDATE zotero_collections SET selected=1 WHERE library_type=? AND "
-                            "library_id=? AND key=?", (kind, identifier, key))
+                con.execute("UPDATE zotero_collections SET selected=1 WHERE owner=? AND library_type=? "
+                            "AND library_id=? AND key=?", (owner, kind, identifier, key))
         return {"selected": list(keys), "note": "只有选中的集合会被同步；取消选择不会删除已经读入的条目"}
 
     # --- sync write
 
-    def disconnect(self, connection: Connection, *, remove_links: bool = False) -> dict:
+    def disconnect(self, connection: Connection, *, owner: str,
+                   remove_links: bool = False) -> dict:
         """Forget the connection. Never touches papers, notes, resources or evidence.
 
-        `remove_links` drops the mapping rows only, which is what "delete the remote mapping" means:
-        the research record on this side is independent of whether Zotero still holds the item.
+        `remove_links` drops this owner's mapping rows only, which is what "delete the remote
+        mapping" means: the research record on this side is independent of whether Zotero still holds
+        the item, and another owner's mapping of the same library is not this caller's to delete.
         """
         kind, identifier = connection.identity
         with self.db.connect() as con:
-            links = con.execute("DELETE FROM zotero_links WHERE library_type=? AND library_id=?",
-                                (kind, identifier)).rowcount if remove_links else 0
-            con.execute("DELETE FROM zotero_cursors WHERE library_type=? AND library_id=?",
-                        (kind, identifier))
-            con.execute("DELETE FROM zotero_collections WHERE library_type=? AND library_id=?",
-                        (kind, identifier))
-            papers = con.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+            links = con.execute("DELETE FROM zotero_links WHERE owner=? AND library_type=? "
+                                "AND library_id=?", (owner, kind, identifier)).rowcount \
+                if remove_links else 0
+            con.execute("DELETE FROM zotero_cursors WHERE owner=? AND library_type=? AND library_id=?",
+                        (owner, kind, identifier))
+            con.execute("DELETE FROM zotero_collections WHERE owner=? AND library_type=? "
+                        "AND library_id=?", (owner, kind, identifier))
+            papers = con.execute("SELECT COUNT(*) FROM papers WHERE owner=?", (owner,)).fetchone()[0]
         return {"disconnected": True, "removed_links": links, "papers_remaining": papers,
                 "note": "断开连接不会删除文献库里的任何论文、笔记、资源或证据；"
                         "删除的只是同步游标、集合选择" + ("和远端映射" if remove_links else "")}
+
 
 
 def _loads(value, default=None):

@@ -653,7 +653,7 @@ class StubTools:
     def __init__(self, results):
         self.results, self.calls = results, []
 
-    def execute(self, name, args):
+    def execute(self, name, args, *, owner=""):
         self.calls.append((name, args.get("kind")))
         outcome = self.results.get((name, args.get("kind")))
         if isinstance(outcome, Exception):
@@ -725,7 +725,7 @@ def test_a_failed_name_search_is_retried_and_never_reported_as_no_result(capsys)
     calls = []
 
     class Flaky:
-        def execute(self, name, args):
+        def execute(self, name, args, *, owner=""):
             calls.append(name)
             raise ProviderError("网络连接或读取失败，本次未完成验证")
 

@@ -102,7 +102,7 @@ def local_resolver_allowed() -> bool:
     return os.getenv(LOCAL_RESOLVER_ENV, "").strip().lower() in TRUTHY
 
 
-def validate_resolution(host: str) -> tuple[list[str], str]:
+def validate_resolution(host: str, *, local_opt_out: bool = True) -> tuple[list[str], str]:
     """Resolve the host and require every address it returns to be public.
 
     All of them, not the first: a resolver can answer with several records, and connecting to a
@@ -112,12 +112,15 @@ def validate_resolution(host: str) -> tuple[list[str], str]:
 
     Returns `(addresses, note)`. The note is empty unless `RE0_ALLOW_LOCAL_RESOLVER` let a
     non-public address through, in which case it says so and names the addresses.
+
+    `local_opt_out=False` is for a caller acting on behalf of the service rather than of the person
+    at the keyboard: there the variable must not be honoured, and the refusal must not advertise it
+    either, because advice that cannot be followed reads as a bug in the operator's setup.
     """
     try:
         infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
-        raise FetchError(f"无法解析 {host}（{exc.strerror or 'DNS 失败'}）；本次没有取得全文",
-                         "dns_refused") from exc
+        raise FetchError(f"无法解析 {host}（{exc.strerror or 'DNS 失败'}）", "dns_refused") from exc
     addresses = sorted({info[4][0] for info in infos})
     if not addresses:
         raise FetchError(f"{host} 没有解析到任何地址", "dns_refused")
@@ -125,14 +128,14 @@ def validate_resolution(host: str) -> tuple[list[str], str]:
     if not refused:
         return addresses, ""
     listed = "、".join(refused)
-    if local_resolver_allowed():
+    if local_opt_out and local_resolver_allowed():
         return addresses, (f"{host} 解析到了非公网地址（{listed}）；因为设置了 "
                            f"{LOCAL_RESOLVER_ENV}，本次按本机透明代理处理并继续。"
                            "目标主机仍受白名单限制，但连接确实经过了本机代理。")
-    raise FetchError(
-        f"{host} 解析到了非公网地址（{listed}）；已拒绝连接。"
-        f"如果这是你所在网络的透明代理（不是攻击），可以设 {LOCAL_RESOLVER_ENV}=1 显式允许，"
-        "届时结果里会记录连到了哪些地址", "dns_refused")
+    advice = (f"如果这是你所在网络的透明代理（不是攻击），可以设 {LOCAL_RESOLVER_ENV}=1 显式允许，"
+              "届时结果里会记录连到了哪些地址" if local_opt_out else
+              f"{LOCAL_RESOLVER_ENV} 在这里不适用：这次连接代表的是服务本身，不是你本机的网络")
+    raise FetchError(f"{host} 解析到了非公网地址（{listed}）；已拒绝连接。{advice}", "dns_refused")
 
 
 def fetch(url: str, *, accept: tuple[str, ...] = ("text/html", "application/pdf"),
@@ -170,8 +173,9 @@ def fetch(url: str, *, accept: tuple[str, ...] = ("text/html", "application/pdf"
                 if note and note not in notes:
                     notes.append(note)
             except FetchError as exc:
-                return {"state": exc.state, "detail": str(exc), "url": url, "final_url": current,
-                        "fetched_at": started, "hops": seen, "bytes_read": 0}
+                # The resolver speaks in addresses; this caller owes the reader the consequence too.
+                return {"state": exc.state, "detail": f"{exc}；本次没有取得全文", "url": url,
+                        "final_url": current, "fetched_at": started, "hops": seen, "bytes_read": 0}
             try:
                 with client.stream("GET", current,
                                    headers={"User-Agent": USER_AGENT,

@@ -22,6 +22,7 @@ from pathlib import Path
 
 from re0 import resource_audit, resource_matrix, result_model
 from re0.agent.tools import ResearchTools
+from re0.deployment import LOCAL_OWNER
 from re0.env_file import load
 from re0.literature import PUBLICATION_CAVEAT, PUBLICATION_LABELS
 from re0.models import AUDIT_LABELS, COMPONENT_LABELS
@@ -424,7 +425,7 @@ def main(argv=None) -> int:
         payload["source"] = "all"
     tools = ResearchTools(None)
     try:
-        result = tools.execute("search_papers", payload)
+        result = tools.execute("search_papers", payload, owner=LOCAL_OWNER)
     except ProviderError as exc:
         # Reported verbatim. A failed search is not an empty result.
         print(f"search failed: {exc}", file=sys.stderr)

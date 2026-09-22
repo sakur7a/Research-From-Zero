@@ -115,6 +115,9 @@ class Scope:
     ledger: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     existing_run: str = ""
+    # Whose turn this is. Carried on the scope so the immutable snapshot can record it: "who
+    # authorized this" is part of what authorized it.
+    owner: str = ""
 
     @property
     def stale(self) -> list[str]:
@@ -127,7 +130,7 @@ class Scope:
                 "reuse": [item.as_dict() for item in self.reuse],
                 "stale": self.stale,
                 "authorizations": self.authorizations, "caps": self.caps, "ledger": self.ledger,
-                "notes": self.notes, "existing_run": self.existing_run,
+                "notes": self.notes, "existing_run": self.existing_run, "owner": self.owner,
                 "note": "这是作用域校验的结果，不是执行结果；没有发起任何模型或网络调用。"}
 
 
@@ -170,7 +173,8 @@ def _reuse_row(data: dict, origin: dict) -> Reuse:
                  tool=str(data.get("tool") or "")), data
 
 
-def collect_reuse(store, params, conversation_id: str) -> tuple[list[Reuse], list[dict], list[str]]:
+def collect_reuse(store, params, conversation_id: str, *,
+                  owner: str) -> tuple[list[Reuse], list[dict], list[str]]:
     """Resolve the named ids to evidence bodies. Returns (reuse, seed_rows, notes).
 
     Refusals are errors, not omissions. An id from another conversation says so explicitly, because
@@ -183,14 +187,18 @@ def collect_reuse(store, params, conversation_id: str) -> tuple[list[Reuse], lis
     if len(wanted) > REUSE_LIMIT:
         raise HTTPException(422, f"一轮最多复用 {REUSE_LIMIT} 条材料；请缩小范围，其余留到下一轮")
     for eid in params.reuse_evidence or []:
-        owner = store.evidence_owner(eid)
-        if owner is None:
+        record = store.evidence_owner(eid)
+        if record is None:
             raise HTTPException(404, f"证据 {eid} 不存在；复用只能指向本会话真实记录过的材料")
-        if owner["conversation_id"] != conversation_id:
-            raise HTTPException(409, f"证据 {eid} 属于另一个会话（{owner['conversation_id'][:12]}…）；"
+        if record.get("owner", owner) != owner:
+            # Named as an ownership refusal rather than "not found": the id is valid, it is simply
+            # not this caller's, and pretending otherwise sends them hunting a typo.
+            raise HTTPException(409, f"证据 {eid} 属于另一个账户的任务；不能跨账户复用材料")
+        if record["conversation_id"] != conversation_id:
+            raise HTTPException(409, f"证据 {eid} 属于另一个会话（{record['conversation_id'][:12]}…）；"
                                      "跨会话复用请先把它导出到工作区，再按 source id 引入")
-        item, data = _reuse_row(owner["data"], {"route": "conversation", "run_id": owner["run_id"],
-                                               "turn": owner["turn"], "evidence_id": eid})
+        item, data = _reuse_row(record["data"], {"route": "conversation", "run_id": record["run_id"],
+                                                 "turn": record["turn"], "evidence_id": eid})
         reuse.append(item)
         seeds.append({"data": {**data, "reused_from": item.origin, "reuse_note": REUSE_NOTE}, "reused_from": item.origin})
     if params.reuse_sources:
@@ -255,8 +263,8 @@ def check_destination(parent_config: dict, vault_public: dict, trusted: bool) ->
                         for name in differences)]
 
 
-def check_ledger(store, conversation_id: str, budgets, params,
-                 scope_notes: list[str]) -> tuple[dict, dict]:
+def check_ledger(store, conversation_id: str, budgets, params, scope_notes: list[str], *,
+                 owner: str) -> tuple[dict, dict]:
     """Enforce the cumulative caps. Returns the ledger before this turn and the caps that apply.
 
     Raising a cap is allowed but has to be asked for in the same request that needs it. The new caps
@@ -265,8 +273,8 @@ def check_ledger(store, conversation_id: str, budgets, params,
     The caller applies them when the turn is created, and the ask is recorded in its snapshot — so
     "the cap moved" is always attributable to a turn that actually ran.
     """
-    ledger = store.ledger(conversation_id)
-    caps = dict(store.conversation(conversation_id)["caps"])
+    ledger = store.ledger(conversation_id, owner=owner)
+    caps = dict(store.conversation(conversation_id, owner=owner)["caps"])
     if params.raise_session_caps is not None:
         raised = params.raise_session_caps.model_dump()
         for name, value in raised.items():
@@ -287,8 +295,10 @@ def check_ledger(store, conversation_id: str, budgets, params,
     return ledger, caps
 
 
-def _parent(store, rid: str) -> dict:
-    run = store.get(rid, internal=True)
+def _parent(store, rid: str, *, owner: str) -> dict:
+    # Scoped, so a run id belonging to another account is "not found" here and never becomes a
+    # parent turn: the conversation it would open is not this caller's to continue.
+    run = store.get(rid, owner=owner, internal=True)
     if not run.get("conversation_id"):
         # Only reachable on a database written before the v2 migration ran.
         raise HTTPException(409, "这个任务没有会话关联；请先启动一次服务完成迁移，再追问")
@@ -297,29 +307,31 @@ def _parent(store, rid: str) -> dict:
     return run
 
 
-def validate_followup(store, params, *, vault_public: dict, budgets) -> tuple[Scope, list[dict]]:
+def validate_followup(store, params, *, owner: str, vault_public: dict,
+                      budgets) -> tuple[Scope, list[dict]]:
     """Decide everything about a follow-up turn before it is created.
 
     Order matters: the parent must be stopped, the reuse must be in scope, the destination must be
     agreed, and the ledger must have room — and only then does a run exist at all. A refusal leaves
     no half-created turn behind.
     """
-    parent = _parent(store, params.parent_run)
+    parent = _parent(store, params.parent_run, owner=owner)
     conversation_id = parent["conversation_id"]
     idempotency_key = (params.idempotency_key or "").strip()
-    existing = store.run_by_key(conversation_id, idempotency_key)
+    existing = store.run_by_key(conversation_id, idempotency_key, owner=owner)
     if existing:
         # A repeated submit is not a second turn. Returning the run it already created is what makes
         # a double click, a retried POST and a flaky network cost nothing.
         return Scope(conversation_id=conversation_id, parent_run=params.parent_run,
                      parent_turn=parent["turn"], turn=0, kind="followup", goal=params.goal,
                      authorizations={"idempotent_replay": True, "idempotency_key": idempotency_key},
-                     notes=["命中同一个 idempotency_key，返回已创建的那一轮，没有新建任务"]), []
+                     notes=["命中同一个 idempotency_key，返回已创建的那一轮，没有新建任务"],
+                     owner=owner), []
     notes: list[str] = []
-    reuse, seeds, workspace_notes = collect_reuse(store, params, conversation_id)
+    reuse, seeds, workspace_notes = collect_reuse(store, params, conversation_id, owner=owner)
     notes.extend(workspace_notes)
     notes.extend(check_destination(parent["config"], vault_public, params.trust_new_destination))
-    ledger, caps = check_ledger(store, conversation_id, budgets, params, notes)
+    ledger, caps = check_ledger(store, conversation_id, budgets, params, notes, owner=owner)
     use_library = bool(params.use_library)
     inherited = bool((parent["params"] or {}).get("use_library"))
     if use_library and not inherited:
@@ -343,35 +355,37 @@ def validate_followup(store, params, *, vault_public: dict, budgets) -> tuple[Sc
         "idempotency_key": idempotency_key,
     }
     return Scope(conversation_id=conversation_id, parent_run=parent["id"], parent_turn=parent["turn"],
-                 turn=store.next_turn(conversation_id), kind="followup", goal=params.goal,
-                 reuse=reuse, authorizations=authorizations, caps=caps, ledger=ledger,
-                 notes=notes), seeds
+                 turn=store.next_turn(conversation_id, owner=owner), kind="followup",
+                 goal=params.goal, reuse=reuse, authorizations=authorizations, caps=caps,
+                 ledger=ledger, notes=notes, owner=owner), seeds
 
 
-def validate_retry(store, params, *, vault_public: dict, budgets) -> tuple[Scope, list[dict]]:
+def validate_retry(store, params, *, owner: str, vault_public: dict,
+                   budgets) -> tuple[Scope, list[dict]]:
     """A retry repeats the parent's goal and reuses nothing new.
 
     Deliberately narrower than a follow-up: no goal field and no reuse fields, so the only thing a
     retry can change is the budget. That is what keeps "try again" from becoming a way to widen scope
     without naming it.
     """
-    parent = _parent(store, params.parent_run)
+    parent = _parent(store, params.parent_run, owner=owner)
     if parent["status"] not in RETRYABLE_STATUSES:
         raise HTTPException(409, f"状态为 {parent['status']} 的任务不能重试；"
                                  f"可重试的是 {'、'.join(RETRYABLE_STATUSES)}，"
                                  "已完成的任务要补充条件请用追问")
     conversation_id = parent["conversation_id"]
     idempotency_key = (params.idempotency_key or "").strip() or \
-        f"retry:{parent['id']}:{store.next_turn(conversation_id)}"
-    existing = store.run_by_key(conversation_id, idempotency_key)
+        f"retry:{parent['id']}:{store.next_turn(conversation_id, owner=owner)}"
+    existing = store.run_by_key(conversation_id, idempotency_key, owner=owner)
     if existing:
         return Scope(conversation_id=conversation_id, parent_run=parent["id"],
                      parent_turn=parent["turn"], turn=0, kind="retry", goal=parent["goal"],
                      authorizations={"idempotent_replay": True, "idempotency_key": idempotency_key},
-                     notes=["命中同一个 idempotency_key，返回已创建的那一轮，没有新建任务"]), []
+                     notes=["命中同一个 idempotency_key，返回已创建的那一轮，没有新建任务"],
+                     owner=owner), []
     notes: list[str] = ["重试沿用上一轮的目标原文，不新增范围；需要补充条件请用追问"]
     notes.extend(check_destination(parent["config"], vault_public, params.trust_new_destination))
-    ledger, caps = check_ledger(store, conversation_id, budgets, params, notes)
+    ledger, caps = check_ledger(store, conversation_id, budgets, params, notes, owner=owner)
     authorizations = {"use_library": bool((parent["params"] or {}).get("use_library")),
                       "library_reauthorized": False, "spend": True, "consent_to_send": True,
                       "trust_new_destination": bool(params.trust_new_destination),
@@ -381,9 +395,9 @@ def validate_retry(store, params, *, vault_public: dict, budgets) -> tuple[Scope
                       "idempotency_key": idempotency_key,
                       "library_inherited_note": "重试沿用上一轮的本地库授权，因为目标与发送范围都没有变"}
     return Scope(conversation_id=conversation_id, parent_run=parent["id"],
-                 parent_turn=parent["turn"], turn=store.next_turn(conversation_id), kind="retry",
-                 goal=parent["goal"], authorizations=authorizations, caps=caps, ledger=ledger,
-                 notes=notes), []
+                 parent_turn=parent["turn"], turn=store.next_turn(conversation_id, owner=owner),
+                 kind="retry", goal=parent["goal"], authorizations=authorizations, caps=caps,
+                 ledger=ledger, notes=notes, owner=owner), []
 
 
 def parent_report_text(report: dict | None, limit: int = 4000) -> str:
@@ -532,7 +546,7 @@ def turn_snapshot(scope: Scope, *, config_public: dict, budgets, allowed_tools: 
     """
     return {"schema_version": "1", "kind": scope.kind, "conversation_id": scope.conversation_id,
             "turn": scope.turn, "parent_run": scope.parent_run, "parent_turn": scope.parent_turn,
-            "goal": scope.goal, "authorized_at": now(),
+            "goal": scope.goal, "authorized_at": now(), "owner": scope.owner,
             "model_destination": {name: config_public.get(name, "") for name in DESTINATION_FIELDS},
             "permissions": {**scope.authorizations, "allowed_tools": allowed_tools},
             "budgets": budgets.model_dump(),
