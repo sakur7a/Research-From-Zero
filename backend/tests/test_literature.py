@@ -838,6 +838,10 @@ def test_the_console_entry_point_keeps_no_model_and_byok_modes_apart(capsys):
     assert cli.main(["doctor"]) == 0
     printed = capsys.readouterr().out
     assert "need no model key" in printed and "standalone task does" in printed
+    # `session` is split across both modes, and doctor has to say which half is which: a read command
+    # that quietly needed a key would be the same trap the rest of this output exists to prevent.
+    assert "session list/show/delta/scope" in printed
+    assert "session follow-up" in printed
     assert "network probes: not run" in printed
     assert "--probe-network" in printed
     # Names and a yes/no only: a value must never be printed, not even masked.

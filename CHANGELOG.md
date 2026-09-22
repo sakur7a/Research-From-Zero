@@ -2,6 +2,55 @@
 
 ## Unreleased
 
+### Continuing a research conversation: follow-ups, changed constraints, auditable reruns (#9)
+
+- Add `backend/re0/agent/session.py`, the shared service behind `POST /api/agent/followups`,
+  `POST /api/agent/retries`, `POST /api/agent/followups/scope`, `GET /api/agent/conversations`
+  and `re0 session`. A run is one attempt; a **conversation** is the line of attempts that share
+  evidence and one cumulative ledger. Three turn kinds are told apart because they authorize
+  different things: `new`, `followup` (a new constraint on work already done) and `retry` (the same
+  goal verbatim, so it cannot carry new scope).
+- **Agent schema v2, additive.** `agent_conversations` plus five columns on `agent_runs`
+  (`conversation_id`, `turn`, `kind`, `origin`, `idempotency_key`). Every pre-existing run is adopted
+  into its own one-turn conversation with the counters from its last checkpoint, so a migration
+  cannot erase what was already spent. A database stamped with a *later* version is refused rather
+  than downgraded. Run statuses, exports and the paper schema are unchanged.
+- **Scope is validated before the model sees any history.** Reuse is limited to evidence ids from the
+  same conversation, or content-addressed source ids from an opt-in workspace. An id from another
+  conversation is refused with a message that says so — not treated as "not found", which would send
+  the caller hunting a typo where the real problem is scope. Refusing leaves no half-created turn.
+- **Nothing is inherited silently.** `use_library` must be granted again per turn; a model endpoint
+  that differs from the parent's requires an explicit `trust_new_destination`, so old material cannot
+  travel to a provider nobody agreed to. Each turn stores an immutable `origin` snapshot — goal,
+  destination, permissions, allowed tools, budget, and the ledger as it stood before the turn — which
+  no later checkpoint can rewrite.
+- **The ledger is cumulative and recomputed, never incremented.** A follow-up cannot escape a cap by
+  being a new run. Caps can be raised only by an explicit `raise_session_caps` on the request that
+  needs it, never lowered that way, and the cap is enforced live inside the turn rather than only at
+  admission. `unreported_calls` is carried forward because a call whose provider did not report usage
+  may still have been billed.
+- **A repeated submit is not a second turn.** An `idempotency_key` returns the run it already created,
+  checked *before* the busy guard so a double click is answered with the existing turn rather than
+  "one task at a time". Evidence seeding is idempotent too: ids derive from the run and the origin.
+- **A new report is a new version.** `report_delta` reports added, changed, dropped, still-uncertain
+  and resolved-from-uncertain against the previous turn, and the earlier report stays exportable
+  under its own run id. Findings are matched by the evidence they rest on, mapped back through reuse
+  — otherwise a finding carried forward unchanged would read as one addition and one drop.
+- Reused material keeps its original retrieval time and parent turn, and anything older than 30 days
+  is flagged stale. **Staleness is reported, never acted on**: no automatic paid re-fetch.
+- The handover gives the new turn the parent's goal and report, not the parent's transcript, and
+  deliberately omits the parent's evidence ids — they belong to the earlier run and a report citing
+  one is rejected. This reuses the existing compaction and `read_evidence`; it is not a second memory.
+- `re0 session list|show|delta|scope` read the task database with no model and no network; `scope`
+  runs the same validation the API runs and prints what a turn would be allowed to touch. Starting a
+  turn needs a key, and keys live in server memory, so `follow-up`/`retry` post to the local service.
+  The write guard now accepts `X-Re0-Client: cli`, refused when the request carries a browser
+  `Origin` or `Referer`.
+- Web adds a collapsed composer under a stopped run: the new condition, checkboxes for the evidence
+  to reuse, and the two consent gates. The logic is the shared service's, not the page's.
+- 393 Python tests (was 352) and 37 JS tests (was 31); both browser smoke scripts pass in Chromium,
+  the agent one now driving a real second turn.
+
 ### Full-text reading with paragraph and page locators (#8)
 
 - Add `backend/re0/safe_fetch.py` and `backend/re0/fulltext.py`, the tool `fetch_paper_text`, the CLI

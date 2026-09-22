@@ -1,6 +1,13 @@
-"""Versioned, additive task storage in the same database as the literature library."""
+"""Versioned, additive task storage in the same database as the literature library.
+
+Schema v2 adds the conversation layer: a run belongs to a conversation, carries a turn number and a
+kind, and stores an immutable `origin` snapshot of what authorized it. The migration is additive —
+columns are added with defaults, legacy runs each become a one-turn conversation, and no row is
+rewritten or dropped.
+"""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from uuid import uuid4
@@ -9,14 +16,23 @@ from fastapi import HTTPException
 
 from ..db import Database, encode
 from ..models import PaperInput, now
+from .schemas import SessionCaps
 
+SCHEMA_TARGET = 2
 AGENT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS agent_schema_version (version INTEGER NOT NULL);
-INSERT INTO agent_schema_version SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM agent_schema_version);
+INSERT INTO agent_schema_version SELECT 2 WHERE NOT EXISTS (SELECT 1 FROM agent_schema_version);
 CREATE TABLE IF NOT EXISTS agent_runs (
  id TEXT PRIMARY KEY, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
  status TEXT NOT NULL, goal TEXT NOT NULL, config TEXT NOT NULL, params TEXT NOT NULL,
- state TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', cancel_requested INTEGER NOT NULL DEFAULT 0
+ state TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', cancel_requested INTEGER NOT NULL DEFAULT 0,
+ conversation_id TEXT NOT NULL DEFAULT '', turn INTEGER NOT NULL DEFAULT 1,
+ kind TEXT NOT NULL DEFAULT 'new', origin TEXT NOT NULL DEFAULT '',
+ idempotency_key TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS agent_conversations (
+ id TEXT PRIMARY KEY, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ goal TEXT NOT NULL, caps TEXT NOT NULL, note TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS agent_events (
  id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL REFERENCES agent_runs(id),
@@ -40,6 +56,29 @@ CREATE TABLE IF NOT EXISTS agent_settings (
  key TEXT PRIMARY KEY, value TEXT NOT NULL
 );
 """
+# Split out from AGENT_SCHEMA on purpose: both indexes name columns that only exist from v2 onward,
+# so on a v1 database they have to be created *after* the migration adds those columns. Running them
+# as part of the same script would fail on exactly the database that needs migrating.
+AGENT_INDEXES_V2 = """
+CREATE INDEX IF NOT EXISTS agent_runs_conversation ON agent_runs(conversation_id, turn);
+CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_idempotency
+ ON agent_runs(conversation_id, idempotency_key) WHERE idempotency_key != '';
+"""
+# Columns v2 adds to a v1 `agent_runs`. Applied one at a time, only where missing, so re-running the
+# migration is a no-op and a hand-edited database is not clobbered.
+RUN_COLUMNS_V2 = {
+    "conversation_id": "TEXT NOT NULL DEFAULT ''",
+    "turn": "INTEGER NOT NULL DEFAULT 1",
+    "kind": "TEXT NOT NULL DEFAULT 'new'",
+    "origin": "TEXT NOT NULL DEFAULT ''",
+    "idempotency_key": "TEXT NOT NULL DEFAULT ''",
+}
+MIGRATION_NOTE = ("由 v1 迁移生成：这个既有任务各自成为一个会话，累计账本按其最近检查点填写，"
+                  "没有重置任何计数。")
+
+
+def default_caps() -> dict:
+    return SessionCaps().model_dump()
 
 
 class TaskStore:
@@ -47,16 +86,166 @@ class TaskStore:
         self.db = db
         with db.connect() as con:
             # Existing paper schema remains v1. Agent tables have their own version.
+            #
+            # The DDL runs first and the migration second: on a fresh database the script already
+            # creates every v2 column and stamps version 2, while on a v1 database `CREATE TABLE IF
+            # NOT EXISTS` leaves the old `agent_runs` alone and only adds what is missing
+            # (`agent_conversations`, the indexes), which is exactly what the migration then needs.
             con.executescript(AGENT_SCHEMA)
-            if con.execute("SELECT version FROM agent_schema_version").fetchone()[0] != 1:
+            version = con.execute("SELECT version FROM agent_schema_version").fetchone()[0]
+            if version > SCHEMA_TARGET:
+                raise RuntimeError("Unsupported agent schema; no destructive migration was performed")
+            if version < SCHEMA_TARGET:
+                self._migrate(con, version)
+            con.executescript(AGENT_INDEXES_V2)
+            if con.execute("SELECT version FROM agent_schema_version").fetchone()[0] != SCHEMA_TARGET:
                 raise RuntimeError("Unsupported agent schema; no destructive migration was performed")
 
-    def create(self, params: dict, config: dict, state: dict) -> str:
-        rid, stamp = str(uuid4()), now()
+    def _migrate(self, con, version: int):
+        """v1 -> v2: add the conversation columns, then give every orphan run a conversation.
+
+        Nothing is deleted and no existing value is overwritten except the three columns that did
+        not exist before. A run that already has a conversation_id is left alone, so a migration
+        interrupted halfway finishes the rest on the next start instead of redoing it.
+        """
+        have = {row[1] for row in con.execute("PRAGMA table_info(agent_runs)")}
+        for name, declaration in RUN_COLUMNS_V2.items():
+            if name not in have:
+                con.execute(f"ALTER TABLE agent_runs ADD COLUMN {name} {declaration}")
+        orphans = con.execute("SELECT id,goal,created_at,updated_at,state FROM agent_runs "
+                              "WHERE conversation_id='' ORDER BY created_at").fetchall()
+        for row in orphans:
+            state = json.loads(row["state"])
+            cid = "cv_" + uuid4().hex[:16]
+            con.execute("INSERT INTO agent_conversations(id,created_at,updated_at,goal,caps,note) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (cid, row["created_at"], row["updated_at"], row["goal"],
+                         encode(default_caps()), MIGRATION_NOTE))
+            con.execute("UPDATE agent_runs SET conversation_id=?, turn=1, kind='new' WHERE id=?",
+                        (cid, row["id"]))
+            con.execute("INSERT INTO agent_events(run_id,at,kind,data) VALUES (?,?,?,?)",
+                        (row["id"], now(), "conversation_adopted",
+                         encode({"conversation_id": cid, "message": MIGRATION_NOTE,
+                                 "checkpoint_model_calls": state.get("model_calls", 0),
+                                 "checkpoint_tool_calls": state.get("tool_calls", 0)})))
+        con.execute("UPDATE agent_schema_version SET version=?", (SCHEMA_TARGET,))
+
+    def start_conversation(self, goal: str, caps: dict | None = None, note: str = "") -> str:
+        cid, stamp = "cv_" + uuid4().hex[:16], now()
         with self.db.connect() as con:
-            con.execute("INSERT INTO agent_runs(id,created_at,updated_at,status,goal,config,params,state) VALUES (?,?,?,?,?,?,?,?)",
-                        (rid, stamp, stamp, "queued", params["goal"], encode(config), encode(params), encode(state)))
-        self.event(rid, "created", {"message": "任务已创建；只有用户确认后才会把候选论文写入文献库"})
+            con.execute("INSERT INTO agent_conversations(id,created_at,updated_at,goal,caps,note) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (cid, stamp, stamp, goal[:6000], encode(caps or default_caps()), note))
+        return cid
+
+    def conversation(self, cid: str) -> dict:
+        with self.db.connect() as con:
+            row = con.execute("SELECT * FROM agent_conversations WHERE id=?", (cid,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "会话不存在")
+        result = dict(row)
+        result["caps"] = json.loads(result["caps"])
+        result["ledger"] = self.ledger(cid)
+        result["runs"] = self.runs_in(cid)
+        return result
+
+    def conversations(self) -> list:
+        with self.db.connect() as con:
+            rows = [dict(row) for row in con.execute(
+                "SELECT id,created_at,updated_at,goal,note FROM agent_conversations "
+                "ORDER BY updated_at DESC LIMIT 100")]
+        for row in rows:
+            row["ledger"] = self.ledger(row["id"])
+        return rows
+
+    def runs_in(self, cid: str) -> list:
+        """Turns of one conversation, oldest first, with the counters that feed the ledger."""
+        with self.db.connect() as con:
+            rows = con.execute("SELECT id,turn,kind,status,goal,created_at,updated_at,error,state "
+                               "FROM agent_runs WHERE conversation_id=? ORDER BY turn, created_at",
+                               (cid,)).fetchall()
+        out = []
+        for row in rows:
+            state = json.loads(row["state"])
+            out.append({"id": row["id"], "turn": row["turn"], "kind": row["kind"],
+                        "status": row["status"], "goal": row["goal"], "error": row["error"],
+                        "created_at": row["created_at"], "updated_at": row["updated_at"],
+                        "model_calls": state.get("model_calls", 0),
+                        "tool_calls": state.get("tool_calls", 0),
+                        "unreported_calls": (state.get("usage") or {}).get("unreported_calls", 0),
+                        "has_report": bool(state.get("report"))})
+        return out
+
+    def ledger(self, cid: str) -> dict:
+        """Cumulative across every turn, recomputed from the runs rather than cached.
+
+        Recomputing is the point: a counter that is incremented somewhere can also be reset
+        somewhere, and the whole guarantee this ledger exists for is that it cannot be. A follow-up
+        therefore cannot escape a cap by being a new run.
+        """
+        model_calls = tool_calls = unreported = turns = 0
+        for run in self.runs_in(cid):
+            model_calls += run["model_calls"]
+            tool_calls += run["tool_calls"]
+            unreported += run["unreported_calls"]
+            turns += 1
+        return {"model_calls": model_calls, "tool_calls": tool_calls, "turns": turns,
+                # Honest about what we cannot know: a call whose provider did not report usage may
+                # still have been billed, and an in-flight request may be billed after a cancel.
+                "unreported_calls": unreported,
+                "note": "累计值由本会话每一轮的检查点重新求和，不会被新一轮重置；"
+                        "unreported_calls 是提供商未回报用量的调用数，可能已计费。"}
+
+    def next_turn(self, cid: str) -> int:
+        with self.db.connect() as con:
+            row = con.execute("SELECT COALESCE(MAX(turn),0) FROM agent_runs WHERE conversation_id=?",
+                              (cid,)).fetchone()
+        return int(row[0]) + 1
+
+    def run_by_key(self, cid: str, key: str) -> str | None:
+        if not key:
+            return None
+        with self.db.connect() as con:
+            row = con.execute("SELECT id FROM agent_runs WHERE conversation_id=? AND idempotency_key=?",
+                              (cid, key)).fetchone()
+        return row[0] if row else None
+
+    def raise_caps(self, cid: str, caps: dict, *, reason: str, run_id: str):
+        with self.db.connect() as con:
+            con.execute("UPDATE agent_conversations SET caps=?, updated_at=? WHERE id=?",
+                        (encode(caps), now(), cid))
+        self.event(run_id, "session_caps_raised",
+                   {"conversation_id": cid, "caps": caps, "reason": reason,
+                    "message": "会话上限被显式提高；累计账本没有重置"})
+
+    def origin(self, rid: str) -> dict:
+        """The immutable snapshot of what authorized this turn. Written once, never updated."""
+        with self.db.connect() as con:
+            row = con.execute("SELECT origin FROM agent_runs WHERE id=?", (rid,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "研究任务不存在")
+        try:
+            stored = json.loads(row[0] or "{}")
+        except ValueError:
+            return {}
+        return stored if isinstance(stored, dict) else {}
+
+    def create(self, params: dict, config: dict, state: dict, *, conversation_id: str = "",
+               turn: int = 1, kind: str = "new", origin: dict | None = None,
+               idempotency_key: str = "") -> str:
+        rid, stamp = str(uuid4()), now()
+        if not conversation_id:
+            conversation_id = self.start_conversation(params["goal"])
+        with self.db.connect() as con:
+            con.execute("INSERT INTO agent_runs(id,created_at,updated_at,status,goal,config,params,"
+                        "state,conversation_id,turn,kind,origin,idempotency_key) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (rid, stamp, stamp, "queued", params["goal"], encode(config), encode(params),
+                         encode(state), conversation_id, turn, kind, encode(origin or {}),
+                         idempotency_key))
+            con.execute("UPDATE agent_conversations SET updated_at=? WHERE id=?", (stamp, conversation_id))
+        self.event(rid, "created", {"conversation_id": conversation_id, "turn": turn, "kind": kind,
+                                    "message": "任务已创建；只有用户确认后才会把候选论文写入文献库"})
         return rid
 
     def get(self, rid: str, *, internal=False) -> dict:
@@ -67,15 +256,19 @@ class TaskStore:
         result = dict(row)
         for key in ("config", "params", "state"):
             result[key] = json.loads(result[key])
+        result["origin"] = json.loads(result.get("origin") or "{}")
         if not internal:
             state = result.pop("state")
-            result.update({k: state.get(k) for k in ("plan", "report", "model_calls", "tool_calls", "usage", "resumes")})
+            result.update({k: state.get(k) for k in ("plan", "report", "model_calls", "tool_calls",
+                                                     "usage", "resumes", "report_delta")})
             result["evidence"] = self.evidence(rid)
         return result
 
     def list(self) -> list:
         with self.db.connect() as con:
-            return [dict(row) for row in con.execute("SELECT id,created_at,updated_at,status,goal,error FROM agent_runs ORDER BY created_at DESC LIMIT 100")]
+            return [dict(row) for row in con.execute(
+                "SELECT id,created_at,updated_at,status,goal,error,conversation_id,turn,kind "
+                "FROM agent_runs ORDER BY created_at DESC LIMIT 100")]
 
     def setting(self, key: str) -> dict:
         """Workspace-level setting row. Missing or unreadable values return {}."""
@@ -115,6 +308,61 @@ class TaskStore:
         with self.db.connect() as con:
             rows = con.execute("SELECT id,data FROM agent_evidence WHERE run_id=? ORDER BY rowid", (rid,))
             return [{"id": row["id"], **json.loads(row["data"])} for row in rows]
+
+    def evidence_owner(self, eid: str) -> dict | None:
+        """Which run and which conversation an evidence id belongs to.
+
+        Reuse is scoped by this: an id from another conversation is refused with a message that says
+        so, rather than being treated as "not found" (which would invite retrying it) or, worse,
+        being honoured.
+        """
+        with self.db.connect() as con:
+            row = con.execute("SELECT e.run_id, e.data, r.conversation_id, r.turn, r.status "
+                              "FROM agent_evidence e JOIN agent_runs r ON r.id = e.run_id "
+                              "WHERE e.id=?", (eid,)).fetchone()
+        if row is None:
+            return None
+        return {"run_id": row["run_id"], "conversation_id": row["conversation_id"],
+                "turn": row["turn"], "status": row["status"], "data": json.loads(row["data"])}
+
+    def seed_evidence(self, rid: str, rows: list[dict]) -> list[str]:
+        """Carry reused material into a new turn as evidence rows of that turn.
+
+        Ids are derived from (run, origin) rather than random, so seeding twice — a crash between
+        the insert and the checkpoint, or a double submit — produces the same rows and INSERT OR
+        IGNORE makes the second pass a no-op. The original body, retrieval time and parent turn
+        travel with the row; nothing is re-fetched here.
+        """
+        written = []
+        with self.db.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            for index, row in enumerate(rows):
+                origin_key = json.dumps(row.get("reused_from") or index, ensure_ascii=False, sort_keys=True)
+                eid = "ev_" + hashlib.sha256(f"{rid}|{origin_key}".encode("utf-8")).hexdigest()[:16]
+                data = {**row["data"], "id": eid}
+                con.execute("INSERT OR IGNORE INTO agent_evidence VALUES (?,?,?,?)",
+                            (eid, rid, f"reuse_{index}", encode(data)))
+                written.append(eid)
+        return written
+
+    def previous_report(self, rid: str) -> dict | None:
+        """The latest earlier turn of the same conversation that produced a report.
+
+        Used to say what changed, never to overwrite anything: the earlier report stays readable and
+        exportable under its own run id.
+        """
+        with self.db.connect() as con:
+            row = con.execute("SELECT conversation_id, turn FROM agent_runs WHERE id=?", (rid,)).fetchone()
+            if row is None:
+                return None
+            candidates = con.execute(
+                "SELECT id, turn, state FROM agent_runs WHERE conversation_id=? AND turn<? "
+                "ORDER BY turn DESC", (row["conversation_id"], row["turn"])).fetchall()
+        for candidate in candidates:
+            state = json.loads(candidate["state"])
+            if state.get("report"):
+                return {"run_id": candidate["id"], "turn": candidate["turn"], "report": state["report"]}
+        return None
 
     def cached_tool(self, rid, cid):
         with self.db.connect() as con:

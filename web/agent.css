@@ -40,3 +40,18 @@
 .artifact-list small{display:block;font-size:10px;color:var(--ink-3);margin-top:3px;line-height:1.6}
 .paper-aside .quiet{font-size:11px;line-height:1.7;margin-top:10px}
 @media(max-width:960px){.paper-card{grid-template-columns:minmax(0,1fr)}.paper-aside{border-left:0;border-top:1px solid var(--line);padding-left:0;padding-top:16px}}
+
+/* Continuing a conversation: the composer sits under the run controls and stays collapsed until
+   asked for, so a first turn's page is unchanged. */
+.followup { margin: 14px 0; border: 1px solid var(--line, #d8dee9); border-radius: 10px; padding: 10px 14px; background: var(--surface-2, #fbfcfe); }
+.followup > summary { cursor: pointer; font-weight: 600; }
+.followup form { display: grid; gap: 10px; margin-top: 12px; }
+.followup textarea { width: 100%; resize: vertical; font: inherit; padding: 8px; border: 1px solid var(--line, #d8dee9); border-radius: 8px; }
+.followup fieldset { border: 1px solid var(--line, #d8dee9); border-radius: 8px; padding: 8px 10px; margin: 0; }
+.followup legend { font-size: .82rem; padding: 0 4px; }
+.followup .reuse { display: block; font-size: .86rem; margin: 3px 0; }
+.followup .consent { display: block; font-size: .86rem; margin: 3px 0; }
+.followup .run-controls { margin-top: 4px; }
+.report-delta { margin-top: 18px; padding-top: 12px; border-top: 1px dashed var(--line, #d8dee9); }
+.report-delta h3 { margin: 0 0 6px; }
+.report-delta p { margin: 2px 0; font-size: .9rem; }

@@ -18,12 +18,15 @@ from pydantic import ValidationError
 from ..models import now
 from ..providers import ProviderError
 from .model import ENDPOINT_PRESETS, ChatModel, ModelError, ModelVault, list_models as fetch_model_list
-from .schemas import EvidenceReadArgs, ModelConfig, ModelListRequest, PlanArgs, Report, TaskDefaults, TaskInput
+from .schemas import (EvidenceReadArgs, FollowUpInput, ModelConfig, ModelListRequest, PlanArgs, Report,
+                      RetryInput, SessionCaps, TaskDefaults, TaskInput)
+from .session import Scope, handover_message, report_delta, turn_snapshot, validate_followup, validate_retry
 from .storage import TaskStore
 from .tools import ResearchTools, specifications
 
 PROMPT_VERSION = "research-agent-v0.2-1"
 DEFAULTS_KEY = "task_defaults"
+SESSION_KEY = "session_defaults"
 # The conversation carries bounded excerpts, never whole evidence bodies: a tool
 # result is re-sent on every later model call, so its size multiplies by turn count.
 EVIDENCE_EXCERPT_CHARS = 6000   # one evidence item may claim the whole per-call budget
@@ -44,6 +47,7 @@ search_papers 和 resolve_paper 只提供元数据和摘要，不能冒充读过
 对相对时间以用户提供/工具返回时间为准，不凭记忆编造新论文。明确搜索范围和剩余缺口。
 不要输出无证据的理论、因果或矛盾关系。若证据不够，outcome=insufficient_evidence，说明未完成部分。
 保留一次模型调用和一次工具调用用于 finish_report，不要无休止检索。通常 5–10 次检索足以给首轮结果。
+若本轮是追问或重试，用户消息会给出上一轮目标、上一轮报告和已授权复用的证据 id。复用它们，不要重复抓取同样的来源；也不要断言上一轮没有给出的内容。上一轮报告没有被覆盖，本轮报告是新版本，完成后会与上一轮对比。
 """
 
 
@@ -83,6 +87,7 @@ class AgentRuntime:
     def public(self):
         return {**self.vault.public(), "busy": self.busy(), "runtime": "native-durable-tool-loop",
                 "web_search_enabled": self.tools.web_enabled, "task_defaults": self.task_defaults().model_dump(),
+                "session_caps": self.session_caps().model_dump(),
                 "endpoint_presets": ENDPOINT_PRESETS,
                 "tool_names": [x["function"]["name"] for x in specifications(True, self.tools.web_enabled)]}
 
@@ -170,6 +175,23 @@ class AgentRuntime:
         self.tasks.save_setting(DEFAULTS_KEY, data.model_dump())
         return self.public()
 
+    def session_caps(self) -> SessionCaps:
+        """Ceilings applied to conversations created from now on.
+
+        Stored under their own key rather than inside `task_defaults`: a per-turn budget and a
+        conversation ceiling answer different questions, and an existing conversation keeps the caps
+        it was created with either way.
+        """
+        try:
+            return SessionCaps(**self.tasks.setting(SESSION_KEY))
+        except ValidationError:
+            # A hand-edited row must not stop the service, and must not widen a ceiling.
+            return SessionCaps()
+
+    def set_session_caps(self, data: SessionCaps):
+        self.tasks.save_setting(SESSION_KEY, data.model_dump())
+        return self.public()
+
     def busy(self):
         with self._lock:
             return self._busy
@@ -200,17 +222,166 @@ class AgentRuntime:
             if self._busy or self._stop.is_set():
                 raise HTTPException(409, "本地单用户版一次执行一个研究任务；请先停止当前任务")
             config = self.vault.snapshot()
-            budgets = self.task_defaults().merged(params)
-            # Persist resolved budgets: later default changes must not alter a saved task.
-            stored = {"goal": params.goal, "consent_to_send": True, **budgets.model_dump()}
-            state = {"messages": [{"role": "system", "content": SYSTEM + f"\n任务创建时间（UTC）：{now()}。文献库元数据授权：{budgets.use_library}。"},
-                                  {"role": "user", "content": params.goal}],
-                     "pending": [], "plan": [], "report": None, "model_calls": 0, "tool_calls": 0,
-                     "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "unreported_calls": 0},
-                     "resumes": 0, "prompt_version": PROMPT_VERSION, "reserved_tools": []}
-            rid = self.tasks.create(stored, config.public(), state)
+            defaults = self.task_defaults()
+            budgets = defaults.merged(params)
+            caps = self.session_caps().model_dump()
+            # A new question starts a new conversation, and with it a new cumulative ledger. Adding a
+            # turn to an existing conversation goes through follow_up/retry, which is the only path
+            # that has to answer for what it reuses and what it spends.
+            conversation_id = self.tasks.start_conversation(params.goal, caps)
+            scope = Scope(conversation_id=conversation_id, parent_run="", parent_turn=0, turn=1,
+                          kind="new", goal=params.goal,
+                          authorizations={"use_library": budgets.use_library, "spend": True,
+                                          "consent_to_send": True, "reuse_routes": [], "reuse_count": 0,
+                                          "library_reauthorized": False, "trust_new_destination": False,
+                                          "workspace": "", "raise_session_caps": None,
+                                          "idempotency_key": ""},
+                          caps=caps, ledger=self.tasks.ledger(conversation_id))
+            rid = self._create_turn(scope, [], config, budgets)
             self._launch(rid, config)
             return self.tasks.get(rid)
+
+    def _replay(self, parent_run: str, key: str) -> dict | None:
+        """Return the turn an identical request already created, before any other check.
+
+        This runs ahead of the busy guard on purpose. A double click or a retried POST arrives while
+        the first submit is still running, so a busy check first would answer "one task at a time" to
+        a request that is not asking for a second task. It is a read, so it needs no lock.
+        """
+        if not key:
+            return None
+        parent = self.tasks.get(parent_run, internal=True)
+        existing = self.tasks.run_by_key(parent["conversation_id"], key)
+        if not existing:
+            return None
+        # Recorded, so a repeated submit leaves a trace instead of looking like it never happened.
+        self.tasks.event(existing, "idempotent_replay",
+                         {"idempotency_key": key,
+                          "message": "重复提交命中同一个 idempotency_key；返回已创建的那一轮，"
+                                     "没有新建任务，也没有新增花费"})
+        return self.tasks.get(existing)
+
+    def follow_up(self, params: FollowUpInput):
+        """Add a turn to an existing conversation, reusing named evidence instead of re-fetching it.
+
+        Scope is decided before the run exists, so a refusal (an id from another conversation, a model
+        destination nobody agreed to, a cap already reached) leaves nothing half-created behind.
+        """
+        replayed = self._replay(params.parent_run, (params.idempotency_key or "").strip())
+        if replayed:
+            return replayed
+        with self._lock:
+            if self._busy or self._stop.is_set():
+                raise HTTPException(409, "本地单用户版一次执行一个研究任务；请先停止当前任务")
+            config = self.vault.snapshot()
+            budgets = self.task_defaults().merged(params)
+            scope, seeds = validate_followup(self.tasks, params, vault_public=config.public(),
+                                             budgets=budgets)
+            if scope.existing_run:
+                self.tasks.event(scope.existing_run, "idempotent_replay",
+                                 {"message": "重复提交命中同一个 idempotency_key；返回已创建的那一轮，"
+                                             "没有新建任务，也没有新增花费"})
+                return self.tasks.get(scope.existing_run)
+            # The stored budget is forced to equal the authorized snapshot. `_worker` gates the tool
+            # set on params["use_library"], so a disagreement between the two would let a turn call a
+            # tool its own immutable record says it was never given.
+            budgets = budgets.model_copy(update={"use_library": scope.authorizations["use_library"]})
+            rid = self._create_turn(scope, seeds, config, budgets, raise_caps=params.raise_session_caps)
+            self._launch(rid, config)
+            return self.tasks.get(rid)
+
+    def retry(self, params: RetryInput):
+        """The same request again as a new turn, when resume is unavailable or exhausted."""
+        replayed = self._replay(params.parent_run, (params.idempotency_key or "").strip())
+        if replayed:
+            return replayed
+        with self._lock:
+            if self._busy or self._stop.is_set():
+                raise HTTPException(409, "本地单用户版一次执行一个研究任务；请先停止当前任务")
+            config = self.vault.snapshot()
+            budgets = self.task_defaults().merged(params)
+            scope, seeds = validate_retry(self.tasks, params, vault_public=config.public(),
+                                          budgets=budgets)
+            if scope.existing_run:
+                self.tasks.event(scope.existing_run, "idempotent_replay",
+                                 {"message": "重复提交命中同一个 idempotency_key；返回已创建的那一轮"})
+                return self.tasks.get(scope.existing_run)
+            # A retry inherits the parent's library authorization because its goal and its send scope
+            # are both unchanged; the snapshot records that it was inherited rather than re-asked.
+            budgets = budgets.model_copy(update={"use_library": scope.authorizations["use_library"]})
+            rid = self._create_turn(scope, seeds, config, budgets, raise_caps=params.raise_session_caps)
+            self._launch(rid, config)
+            return self.tasks.get(rid)
+
+    def scope_preview(self, params: FollowUpInput | RetryInput) -> dict:
+        """Validate a continuing turn without creating it. Spends nothing and starts no model.
+
+        This is what `re0 session scope` prints: the caller can see which history would be handed
+        over, which of it is stale, and whether the ledger has room, before authorizing any of it.
+        """
+        budgets = self.task_defaults().merged(params)
+        vault_public = self.vault.snapshot().public()
+        if isinstance(params, RetryInput):
+            scope, _ = validate_retry(self.tasks, params, vault_public=vault_public, budgets=budgets)
+        else:
+            scope, _ = validate_followup(self.tasks, params, vault_public=vault_public, budgets=budgets)
+        result = scope.as_dict()
+        result["budgets"] = budgets.model_copy(
+            update={"use_library": scope.authorizations.get("use_library", False)}).model_dump()
+        result["model_destination"] = {name: vault_public.get(name, "")
+                                       for name in ("base_url", "model", "token_parameter")}
+        return result
+
+    def _create_turn(self, scope: Scope, seeds: list[dict], config, budgets, *, raise_caps=None) -> str:
+        """Create one turn: an immutable authorization snapshot, then the material it may build on.
+
+        Evidence is seeded before the handover message is written, because the message names the new
+        evidence ids. Seeding is idempotent (ids derive from the run and the origin), so a crash
+        between the two writes cannot duplicate material on a later resume.
+        """
+        allowed = [tool["function"]["name"]
+                   for tool in specifications(bool(budgets.use_library), self.tools.web_enabled)]
+        parent_goal, parent_report = "", None
+        if scope.parent_run:
+            parent = self.tasks.get(scope.parent_run, internal=True)
+            parent_goal = parent["goal"]
+            parent_report = (parent["state"] or {}).get("report")
+        stored = {"goal": scope.goal, "consent_to_send": True, **budgets.model_dump()}
+        state = {
+            "messages": [{"role": "system",
+                          "content": SYSTEM + f"\n任务创建时间（UTC）：{now()}。"
+                                              f"文献库元数据授权：{bool(budgets.use_library)}。"}],
+            "pending": [], "plan": [], "report": None, "model_calls": 0, "tool_calls": 0,
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+                      "unreported_calls": 0},
+            "resumes": 0, "prompt_version": PROMPT_VERSION, "reserved_tools": [],
+            "turn": {"kind": scope.kind, "turn": scope.turn, "conversation_id": scope.conversation_id,
+                     "parent_run": scope.parent_run, "parent_turn": scope.parent_turn},
+        }
+        rid = self.tasks.create(
+            stored, config.public(), state, conversation_id=scope.conversation_id, turn=scope.turn,
+            kind=scope.kind,
+            origin=turn_snapshot(scope, config_public=config.public(), budgets=budgets,
+                                 allowed_tools=allowed),
+            idempotency_key=scope.authorizations.get("idempotency_key") or "")
+        if seeds:
+            for item, eid in zip(scope.reuse, self.tasks.seed_evidence(rid, seeds)):
+                item.evidence_id = eid
+        state["messages"].append({"role": "user",
+                                  "content": handover_message(scope, parent_goal=parent_goal,
+                                                              parent_report=parent_report)
+                                  if scope.kind != "new" else scope.goal})
+        self.tasks.checkpoint(rid, state)
+        if raise_caps is not None:
+            self.tasks.raise_caps(scope.conversation_id, scope.caps,
+                                  reason=f"第 {scope.turn} 轮请求显式提高", run_id=rid)
+        self.tasks.event(rid, "turn_started", {
+            "conversation_id": scope.conversation_id, "turn": scope.turn, "kind": scope.kind,
+            "parent_run": scope.parent_run, "reused": len(scope.reuse),
+            "stale": scope.stale,
+            "ledger_before_turn": scope.ledger, "caps": scope.caps,
+            "message": "；".join(scope.notes) or "本轮作用域已校验；历史材料按授权复用，没有重新抓取"})
+        return rid
 
     def resume(self, rid):
         with self._lock:
@@ -242,6 +413,15 @@ class AgentRuntime:
         run = self.tasks.get(rid, internal=True)
         state, params = run["state"], run["params"]
         deadline = time.monotonic() + params["attempt_seconds"]
+        # The conversation cap is enforced live, not only at admission. A turn admitted with room to
+        # spare still has to stop at the ceiling, and the ceiling is read from this turn's immutable
+        # snapshot rather than from the conversation row, so a cap raised by a *later* request cannot
+        # retroactively widen a turn that is already running.
+        origin = run.get("origin") or {}
+        caps = origin.get("caps") or {}
+        before = origin.get("ledger_before_turn") or {}
+        session_model, session_tool = int(caps.get("max_session_model_calls") or 0), int(caps.get("max_session_tool_calls") or 0)
+        base_model, base_tool = int(before.get("model_calls") or 0), int(before.get("tool_calls") or 0)
         self.tasks.checkpoint(rid, state, "running")
         self.tasks.event(rid, "running", {"message": "agent 已启动：模型自主选择工具，所有写入需人工确认"})
 
@@ -252,14 +432,35 @@ class AgentRuntime:
                 raise Paused
             if time.monotonic() >= deadline:
                 raise BudgetStop("本次执行时间预算已用尽；已保留现有证据")
+            if session_model and base_model + state["model_calls"] >= session_model:
+                raise BudgetStop(f"会话累计模型调用已达上限 {base_model + state['model_calls']}/{session_model}；"
+                                 "本轮停止，证据保留。继续需要在新一轮请求里显式提高上限")
+            if session_tool and base_tool + state["tool_calls"] >= session_tool:
+                raise BudgetStop(f"会话累计工具调用已达上限 {base_tool + state['tool_calls']}/{session_tool}；"
+                                 "本轮停止，证据保留。继续需要在新一轮请求里显式提高上限")
 
         try:
             model = self.model_factory(config)
             while True:
                 boundary()
                 if state.get("report"):
+                    # Saved as a new version beside the earlier one, with the difference stated. The
+                    # previous turn's report is never edited, so a human revision or an approved import
+                    # from it survives whatever this turn concluded.
+                    state["report_delta"] = report_delta(
+                        self.tasks.previous_report(rid), state["report"],
+                        id_map={item["id"]: (item.get("reused_from") or {}).get("evidence_id") or item["id"]
+                                for item in self.tasks.evidence(rid)})
+                    delta = state["report_delta"]
                     self.tasks.checkpoint(rid, state, "completed")
-                    self.tasks.event(rid, "completed", {"message": "结构化报告已保存；证据编号有效不代表结论已由人工验证"})
+                    self.tasks.event(rid, "completed", {
+                        "message": "结构化报告已保存；证据编号有效不代表结论已由人工验证",
+                        "turn": (state.get("turn") or {}).get("turn", 1),
+                        "delta": {"against_run": delta["against_run"], "against_turn": delta["against_turn"],
+                                  "added": len(delta["added"]), "changed": len(delta["changed"]),
+                                  "dropped": len(delta["dropped"]),
+                                  "still_uncertain": len(delta["still_uncertain"]),
+                                  "resolved_from_uncertain": len(delta["resolved_from_uncertain"])}})
                     return
                 if state["pending"]:
                     call = state["pending"][0]

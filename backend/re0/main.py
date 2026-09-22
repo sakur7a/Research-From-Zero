@@ -78,9 +78,18 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None) -
     @app.middleware("http")
     async def local_security(request: Request, call_next):
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
-            if request.headers.get("x-re0-client") != "web":
-                return JSONResponse({"detail": "写入需要 X-Re0-Client: web 请求头"}, 403)
+            client = request.headers.get("x-re0-client")
             origin = request.headers.get("origin")
+            # `cli` is accepted for the local console entry points (`re0 session follow-up`), which
+            # drive the same service the browser does. A browser always names its origin on a
+            # cross-origin POST and sends `web` on a same-origin one, so a request claiming `cli`
+            # while carrying an Origin or Referer is not the console and is refused. This widens who
+            # may write to a loopback service that is already unauthenticated; it does not make that
+            # service safe to expose, and SECURITY.md still says not to.
+            if client == "cli" and (origin or request.headers.get("referer")):
+                return JSONResponse({"detail": "声明为 CLI 的请求不能带浏览器来源头"}, 403)
+            if client not in {"web", "cli"}:
+                return JSONResponse({"detail": "写入需要 X-Re0-Client: web 或 cli 请求头"}, 403)
             if origin:
                 try:
                     parsed = urlsplit(origin)

@@ -6,11 +6,14 @@ only dispatches to them, so no retrieval logic is duplicated here. The skill wra
 
 Two capabilities are kept apart on purpose, and `doctor` says which is which:
 
-* **No model needed** — `paper search` (five scholarly sources), `mcp` (local stdio tools) and
-  `skill` (package or install the skill directory). These work with no key at all.
-* **Needs a model key (BYOK)** — a standalone Re0 task that plans and calls tools. This module
-  never starts an LLM of its own: calling a command here does not nest a second agent, and
-  host-tool mode (an agent calls the MCP tools) stays distinct from standalone mode.
+* **No model needed** — `paper search` (five scholarly sources), `paper text` (one open-access
+  paper), `mcp` (local stdio tools), `skill` (package or install the skill directory) and the
+  read-only half of `session` (`list`, `show`, `delta`, `scope`). These work with no key at all.
+* **Needs a model key (BYOK)** — a standalone Re0 task that plans and calls tools, and therefore
+  `session follow-up` / `session retry`, which start one. This module never starts an LLM of its
+  own: those two post to the running local service, where the key already lives in memory, so
+  calling a command here does not nest a second agent, and host-tool mode (an agent calls the MCP
+  tools) stays distinct from standalone mode.
 
 `doctor` performs no network or paid request unless `--probe-network` is passed explicitly, so a
 routine check cannot spend money or trip a provider's rate limit.
@@ -45,7 +48,9 @@ def doctor(probe_network: bool = False) -> int:
     print(f"python: {sys.version.split()[0]} (this package needs >=3.11)")
     print(f"package: {Path(__file__).resolve().parent}")
     print()
-    print("mode: `paper search` and `mcp` need no model key; a standalone task does")
+    print("mode: `paper search`, `paper text`, `mcp`, `skill` and `session list/show/delta/scope`")
+    print("      need no model key; a standalone task does, and so do `session follow-up`/`retry`")
+    print("      (those two post to the running local service, where the key lives in memory)")
     print("      this CLI never starts an LLM of its own, so no command nests a second agent")
     print()
     print("credentials (names only; values are never read out):")
@@ -155,6 +160,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     subcommands.add_parser("mcp", help="serve the read-only tools over stdio (no model key needed)")
 
+    # Its own parser, reached by passthrough: `re0 session follow-up --help` must print the real
+    # flags rather than a thinner copy of them kept here.
+    subcommands.add_parser("session", add_help=False,
+                           help="inspect a research conversation, and continue one (no model key "
+                                "needed to look; starting a turn goes through the local service)")
+
     skill = subcommands.add_parser("skill",
                                    help="package or install the skill directory (no model key needed)")
     skill_actions = skill.add_subparsers(dest="action")
@@ -187,6 +198,11 @@ def main(argv=None) -> int:
     skill's own parser and prints the real flags rather than a second, thinner copy of them.
     """
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["session"]:
+        # Dispatched before this parser runs, so the session subcommands keep their own flags and
+        # their own help text instead of a second, thinner copy of them here.
+        from re0.session_cli import main as session_main
+        return session_main(argv[1:])
     passthrough: list = []
     if argv[:2] in (["paper", "search"], ["paper", "text"]):
         argv, passthrough = argv[:2], argv[2:]

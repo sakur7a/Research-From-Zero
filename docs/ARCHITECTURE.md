@@ -249,11 +249,44 @@ remain. The UI polls operational events; it does **not** stream token output or
 SSE in this version. Task exports and library exports are distinct; SQLite backup
 is the complete recovery method.
 
+## Continuing a conversation
+
+A **run** is one attempt. A **conversation** is the line of attempts that share evidence and one
+cumulative ledger, and each run carries `conversation_id`, `turn` and `kind` (`new`, `followup`,
+`retry`). The three kinds are distinct because they authorize different things: a follow-up names a
+new constraint and the evidence it reuses, while a retry repeats the parent's goal verbatim and so
+has no field through which new scope could arrive.
+
+`agent/session.py` holds the rules, and the API, the console and the web composer all call it — the
+page collects an authorization, it does not decide one. Scope is validated **before** the run exists,
+so a refusal leaves nothing half-created. Reuse reaches a turn by two routes only: an evidence id
+from the same conversation, or a content-addressed source id from an opt-in workspace. An id from
+another conversation is refused as out of scope rather than reported missing, because "not found"
+sends the caller looking for a typo where the real problem is authorization.
+
+Each turn stores an immutable `origin` snapshot — goal, model destination, permissions, allowed
+tools, budget and the ledger as it stood before the turn. No checkpoint rewrites it, so a later
+change to a budget or a permission cannot retroactively explain a turn that already ran. Nothing is
+inherited silently: library consent is granted per turn, and a destination that differs from the
+parent's needs an explicit confirmation.
+
+The ledger is **recomputed from the runs**, not incremented. That is the point: a counter that is
+added to somewhere can also be zeroed somewhere, and the guarantee this exists for is that it cannot.
+A follow-up therefore cannot escape a cap by being a new run. Caps are enforced live inside the
+worker as well as at admission, read from the turn's own snapshot so a cap raised by a later request
+cannot widen a turn already running.
+
+A new report is a new version beside the old one. `report_delta` matches findings by the evidence
+they rest on — mapped back through reuse, since reuse mints a fresh evidence id per turn — so a
+finding carried forward unchanged is not reported as one addition and one drop. The handover gives
+the next turn the parent's goal and report rather than its transcript, which reuses the existing
+compaction and `read_evidence` instead of building a second memory.
+
 ## Deliberately not implemented
 
-PDF/fulltext ingestion, arbitrary website fetching/browser automation, vector
-memory, theorem graphs, scheduled monitoring, Zotero live sync, remote code
-execution, multi-agent specialist teams, multi-user authentication, exact dollar
-accounting, model-specific reasoning protocols and a distributed task queue.
+Arbitrary website fetching/browser automation, vector memory, theorem graphs,
+scheduled monitoring, Zotero live sync, remote code execution, multi-agent
+specialist teams, multi-user authentication, exact dollar accounting,
+model-specific reasoning protocols and a distributed task queue.
 These should be added only against real evaluated workflows, not described as
 hidden existing capabilities. See ROADMAP.md for the staged direction.

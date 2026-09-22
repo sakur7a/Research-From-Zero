@@ -113,3 +113,91 @@ export function paperCard(evidence) {
     toolLabel: TOOL_LABELS[source.tool] || cardText(source.tool)
   };
 }
+
+// --- continuing a conversation (issue #9) -------------------------------------------------------
+// The web layer only collects an authorization and posts it. Which evidence may be reused, whether
+// the ledger has room and whether the model destination changed are all decided by the shared
+// service, so nothing here duplicates that logic or pre-judges its answer.
+export const TURN_LABELS = Object.freeze({new:'新研究', followup:'追问', retry:'重试'});
+export const RETRYABLE = Object.freeze(['failed','interrupted','budget_exhausted','cancelled']);
+// Only this many evidence cards are offered as checkboxes; the rest stay reusable through the API
+// and the console. A turn is a focused follow-up, not a re-import of the whole result set.
+export const REUSE_PICK_LIMIT = 12;
+export const FOLLOWUP_GOAL_MIN = 5;
+export const FOLLOWUP_GOAL_MAX = 6000;
+
+// A turn can be added only once the previous one has stopped: two turns at once would interleave
+// two ledgers over the same evidence.
+export const canFollowUp = run => Boolean(run && run.conversation_id && !activeRun(run));
+export const canRetry = run => Boolean(run && RETRYABLE.includes(run.status));
+
+export function turnLabel(run) {
+  if (!run) return '';
+  const kind = TURN_LABELS[run.kind] || run.kind || '新研究';
+  return `第 ${run.turn || 1} 轮 · ${kind}`;
+}
+
+export function ledgerLine(conversation) {
+  const ledger = (conversation && conversation.ledger) || {};
+  const caps = (conversation && conversation.caps) || {};
+  return `会话累计 模型 ${ledger.model_calls || 0}/${caps.max_session_model_calls ?? '?'} · `
+    + `工具 ${ledger.tool_calls || 0}/${caps.max_session_tool_calls ?? '?'} · ${ledger.turns || 0} 轮`;
+}
+
+export function reuseChoices(evidence, limit = REUSE_PICK_LIMIT) {
+  const all = Array.isArray(evidence) ? evidence : [];
+  return {choices: all.slice(0, limit), hidden: Math.max(0, all.length - limit)};
+}
+
+export function followupPayload(input, run, defaults) {
+  const goal = String((input && input.goal) || '').trim();
+  const source = input || {};
+  const normalized = normalizeDefaults(defaults);
+  const payload = {
+    parent_run: run.id,
+    goal,
+    reuse_evidence: (source.reuse || []).filter(Boolean),
+    authorize_spend: true,
+    consent_to_send: true,
+    use_library: Boolean(source.useLibrary),
+    trust_new_destination: Boolean(source.trustNewDestination),
+    idempotency_key: String(source.idempotencyKey || ''),
+    max_model_calls: normalized.max_model_calls,
+    max_tool_calls: normalized.max_tool_calls,
+    attempt_seconds: normalized.attempt_seconds
+  };
+  return payload;
+}
+
+// A follow-up that names no new condition is indistinguishable from "run the same thing again and
+// bill me for it", so the composer refuses it here rather than letting the server explain.
+export function followupProblem(payload) {
+  if (!payload || !payload.parent_run) return '缺少父任务';
+  const length = (payload.goal || '').length;
+  if (length < FOLLOWUP_GOAL_MIN) return `请写清本轮新增或变更的条件（至少 ${FOLLOWUP_GOAL_MIN} 字）`;
+  if (length > FOLLOWUP_GOAL_MAX) return `本轮目标过长（上限 ${FOLLOWUP_GOAL_MAX} 字）`;
+  return '';
+}
+
+export function deltaSummary(delta) {
+  if (!delta || !delta.against_run) return null;
+  const count = key => (Array.isArray(delta[key]) ? delta[key].length : 0);
+  return {
+    againstTurn: delta.against_turn || 0,
+    added: count('added'), changed: count('changed'), dropped: count('dropped'),
+    stillUncertain: count('still_uncertain'), resolved: count('resolved_from_uncertain'),
+    outcomeFrom: (delta.outcome || {}).previous || '', outcomeTo: (delta.outcome || {}).current || '',
+    note: delta.note || ''
+  };
+}
+
+// Deterministic on purpose: an unchanged form submitted twice yields the same key, so the service
+// returns the turn it already created instead of starting a second one. A timestamp here would make
+// the key unique per click and defeat the only thing it is for.
+export function idempotencyKeyFor(run, payload) {
+  const text = [run && run.id, String((payload && payload.goal) || '').trim(),
+    ((payload && payload.reuse_evidence) || []).slice().sort().join(',')].join('|');
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) hash = (hash * 31 + text.charCodeAt(index)) >>> 0;
+  return `web-${hash.toString(36)}`;
+}

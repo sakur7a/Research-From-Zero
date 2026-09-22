@@ -53,21 +53,41 @@ class ModelListRequest(StrictModel):
 BUDGET_FIELDS = ("max_model_calls", "max_tool_calls", "attempt_seconds", "use_library")
 
 
+class SessionCaps(StrictModel):
+    """Ceiling on a whole conversation, not on one turn.
+
+    A follow-up is a new run, so a per-run budget alone would let an endless chain of turns spend
+    without limit. The caps are cumulative across turns and can only be raised by an explicit
+    `raise_session_caps` on a later request, which is recorded in that turn's snapshot.
+    """
+
+    max_session_model_calls: int = Field(default=36, ge=4, le=200)
+    max_session_tool_calls: int = Field(default=80, ge=4, le=400)
+
+
 class TaskDefaults(StrictModel):
-    """Workspace-wide defaults for new tasks. Never holds credentials."""
+    """Workspace-wide defaults for new tasks. Never holds credentials.
+
+    These are *per-turn* budgets. The conversation-level ceiling lives in `SessionCaps` and is stored
+    under its own key, because the two answer different questions and a turn budget that silently
+    carried a session cap would let one field mean two things.
+    """
 
     max_model_calls: int = Field(default=12, ge=2, le=24)
     max_tool_calls: int = Field(default=20, ge=1, le=40)
     attempt_seconds: int = Field(default=360, ge=30, le=900)
     use_library: bool = False
 
-    def merged(self, task: "TaskInput") -> "TaskDefaults":
+    def merged(self, task) -> "TaskDefaults":
         """A task may omit budgets; the stored workspace default then applies.
 
         Explicit per-task values still win, so an existing client can keep
-        sending a narrower budget for one run.
+        sending a narrower budget for one run. `getattr` with a default because a
+        continuing turn (`RetryInput`) carries budgets but no library flag: that
+        one is inherited deliberately, and its absence must read as "not given".
         """
-        supplied = {name: getattr(task, name) for name in BUDGET_FIELDS if getattr(task, name) is not None}
+        supplied = {name: getattr(task, name, None) for name in BUDGET_FIELDS
+                    if getattr(task, name, None) is not None}
         return self.model_copy(update=supplied)
 
 
@@ -83,6 +103,63 @@ class TaskInput(StrictModel):
 
 class Approval(StrictModel):
     confirmed: Literal[True]
+
+
+class TurnBudget(StrictModel):
+    """The three per-turn knobs a follow-up or retry may set. Omitted means workspace default."""
+
+    max_model_calls: int | None = Field(default=None, ge=2, le=24)
+    max_tool_calls: int | None = Field(default=None, ge=1, le=40)
+    attempt_seconds: int | None = Field(default=None, ge=30, le=900)
+
+
+class FollowUpInput(TurnBudget):
+    """One more turn on work already done: a new constraint, not a new question.
+
+    Every field that widens what the turn may touch is explicit, because each one is a separate
+    authorization. Nothing is inherited silently from the parent turn — least of all `use_library`,
+    which sends local bibliography metadata to a model provider.
+    """
+
+    parent_run: str = Field(min_length=1, max_length=80)
+    goal: str = Field(min_length=5, max_length=6000,
+                      description="what this turn adds or changes, e.g. 只保留有训练代码的两篇，并补查它们的数据划分")
+    # Evidence ids from an earlier turn of the SAME conversation. An id from another conversation is
+    # refused rather than quietly ignored: reuse is scoped, not a general ability to cite any row.
+    reuse_evidence: list[str] = Field(default_factory=list, max_length=40)
+    # Content-addressed source ids from an opt-in workspace (see re0.workspace). This is the only
+    # route by which material recorded outside the conversation can enter it.
+    reuse_sources: list[str] = Field(default_factory=list, max_length=40)
+    workspace: str = Field(default="", max_length=400,
+                           description="directory of the workspace holding reuse_sources; required "
+                                       "if any are named")
+    use_library: bool | None = None
+    # Required on every continuing turn: a follow-up spends money, and spending is authorized per
+    # turn rather than once for the conversation.
+    authorize_spend: Literal[True]
+    consent_to_send: Literal[True]
+    # Only honoured when this turn's model destination differs from the parent's. Without it, old
+    # material would travel to a provider the user never agreed to send it to.
+    trust_new_destination: bool = False
+    raise_session_caps: SessionCaps | None = None
+    idempotency_key: str = Field(default="", max_length=120,
+                                 description="a repeated submit with the same key returns the run it "
+                                             "already created instead of starting a second turn")
+
+
+class RetryInput(TurnBudget):
+    """The same request again, as a new turn. Used when resume is unavailable or exhausted.
+
+    There is no `goal` field: a retry repeats the parent's goal verbatim, so it cannot smuggle in
+    new scope. New scope is a follow-up, and a follow-up has to name what it reuses.
+    """
+
+    parent_run: str = Field(min_length=1, max_length=80)
+    authorize_spend: Literal[True]
+    consent_to_send: Literal[True]
+    trust_new_destination: bool = False
+    raise_session_caps: SessionCaps | None = None
+    idempotency_key: str = Field(default="", max_length=120)
 
 
 class SearchArgs(StrictModel):

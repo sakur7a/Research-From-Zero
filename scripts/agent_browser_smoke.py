@@ -140,6 +140,40 @@ def run(output):
         page.wait_for_function("document.querySelector('#notice').textContent.includes('已有这篇论文')")
         assert len(client.get('/api/papers').json())==1
         checked.append('human_approval_idempotent_import')
+        # A continuing turn (issue #9). The composer stays collapsed until asked for, offers this
+        # run's own evidence for reuse, and its checkboxes are exactly what the request carries.
+        assert page.locator('.followup').count()==1
+        assert not page.evaluate("document.querySelector('.followup').open")
+        page.locator('.followup summary').click()
+        assert page.evaluate("document.querySelector('.followup').open")
+        assert '会话累计' in page.locator('.followup .subtle').first.inner_text()
+        # Both consent gates are required attributes, so the form itself stops an unauthorized submit.
+        assert page.locator('#followup-form [name=goal]').get_attribute('required') is not None
+        assert page.locator('#followup-form [name=authorize]').get_attribute('required') is not None
+        page.locator('#followup-form [name=goal]').fill('只保留有训练代码的两篇，并补查它们的数据划分')
+        page.locator('#followup-form .reuse input[type=checkbox]').first.check()
+        page.locator('#followup-form [name=authorize]').check()
+        page.screenshot(path=str(output/'agent-followup-composer.png'),full_page=True)
+        page.locator('#followup-form [type=submit]').click()
+        # Wait on the turn label, not on the status chip: run 1 already reads "报告已生成", so a
+        # status-only wait passes against the stale DOM before the new turn is rendered.
+        page.wait_for_function("document.querySelector('.run-controls span')?.textContent.includes('第 2 轮 · 追问')",timeout=20000)
+        assert '第 2 轮 · 追问' in page.locator('.run-controls span').first.inner_text()
+        history=client.get('/api/agent/runs').json()
+        assert len(history)==2,history
+        second=[row for row in history if row['turn']==2][0]
+        assert second['kind']=='followup'
+        assert second['conversation_id']==[row for row in history if row['turn']==1][0]['conversation_id']
+        detail=client.get('/api/agent/runs/'+second['id']).json()
+        # Reuse means the material was carried, not fetched again.
+        assert any(item.get('reused_from') for item in detail['evidence']),detail['evidence']
+        assert detail['report_delta']['against_turn']==1
+        assert detail['origin']['permissions']['reuse_count']==1
+        page.get_by_role('tab',name='研究报告').click()
+        page.get_by_role('heading',name=re.compile('与第 1 轮的差异')).wait_for()
+        assert '不表示上一轮结论被推翻' in page.locator('.report-delta').inner_text()
+        page.screenshot(path=str(output/'agent-report-delta.png'),full_page=True)
+        checked.append('followup_turn_reuses_evidence_and_states_its_delta')
         page.get_by_role('tab',name='研究报告').click()
         page.screenshot(path=str(output/'agent-report-fixture.png'),full_page=True)
         page.set_viewport_size({'width':390,'height':844})

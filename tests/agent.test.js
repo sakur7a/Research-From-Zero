@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {MODEL_OPTION_LIMIT,SHIPPED_DEFAULTS,activeRun,budgetSummary,canResume,consentText,eventText,modelOptionIds,normalizeDefaults,paperCard,shortUrl} from '../web/agent-core.js';
+import {MODEL_OPTION_LIMIT,REUSE_PICK_LIMIT,SHIPPED_DEFAULTS,activeRun,budgetSummary,canFollowUp,canRetry,canResume,consentText,deltaSummary,eventText,followupPayload,followupProblem,idempotencyKeyFor,ledgerLine,modelOptionIds,normalizeDefaults,paperCard,reuseChoices,shortUrl,turnLabel} from '../web/agent-core.js';
 import {e,link} from '../web/core.js';
 test('task lifecycle and resumability are explicit',()=>{
  assert(activeRun({status:'running'})); assert(!activeRun({status:'completed'}));
@@ -108,4 +108,66 @@ test('the publication label comes from the server rather than a second copy here
  assert.equal(fromServer.stateLabel,'有会议或期刊版本');
  // Older stored evidence has no label; showing the raw state is honest, inventing one is not.
  assert.equal(paperCard({paper:{},publication:{state:'under_review'}}).stateLabel,'under_review');
+});
+
+test('a continuing turn is offered only once the previous one has stopped',()=>{
+ assert(canFollowUp({status:'completed',conversation_id:'cv_1',turn:1}));
+ assert(canFollowUp({status:'budget_exhausted',conversation_id:'cv_1',turn:1}));
+ assert(!canFollowUp({status:'running',conversation_id:'cv_1',turn:1}));
+ // No conversation means nothing to continue: a run predating the migration must not offer one.
+ assert(!canFollowUp({status:'completed',turn:1}));
+ assert(canRetry({status:'failed'})); assert(canRetry({status:'budget_exhausted'}));
+ assert(!canRetry({status:'completed'})); assert(!canRetry({status:'running'}));
+});
+test('turn and ledger labels name the kind and never hide the cumulative total',()=>{
+ assert.equal(turnLabel({turn:2,kind:'followup'}),'第 2 轮 · 追问');
+ assert.equal(turnLabel({turn:1,kind:'new'}),'第 1 轮 · 新研究');
+ assert.equal(turnLabel({}),'第 1 轮 · 新研究');
+ const line=ledgerLine({ledger:{model_calls:6,tool_calls:9,turns:2},caps:{max_session_model_calls:36,max_session_tool_calls:80}});
+ assert.match(line,/模型 6\/36/); assert.match(line,/工具 9\/80/); assert.match(line,/2 轮/);
+ // A missing conversation still renders rather than throwing: the panel shows it before the fetch lands.
+ assert.match(ledgerLine(null),/模型 0\/\?/);
+});
+test('the reuse picker is bounded and says how much it withheld',()=>{
+ const evidence=Array.from({length:20},(_,i)=>({id:`ev_${i}`}));
+ const {choices,hidden}=reuseChoices(evidence,12);
+ assert.equal(choices.length,12); assert.equal(hidden,8);
+ assert.deepEqual(reuseChoices(undefined),{choices:[],hidden:0});
+});
+test('a follow-up payload carries every authorization and no invented one',()=>{
+ const payload=followupPayload({goal:' 只保留有训练代码的两篇 ',reuse:['ev_1','',null],useLibrary:true},
+   {id:'run-1'},{max_model_calls:8,max_tool_calls:12,attempt_seconds:300,use_library:false});
+ assert.equal(payload.parent_run,'run-1');
+ assert.equal(payload.goal,'只保留有训练代码的两篇');
+ assert.deepEqual(payload.reuse_evidence,['ev_1']);
+ assert.equal(payload.authorize_spend,true); assert.equal(payload.consent_to_send,true);
+ assert.equal(payload.use_library,true);
+ // Not inherited from the run's own defaults: the checkbox is the only source.
+ assert.equal(payload.trust_new_destination,false);
+ assert.equal(payload.max_model_calls,8);
+ assert.equal(followupProblem(payload),'');
+ assert.match(followupProblem(followupPayload({goal:'短'},{id:'r'},undefined)),/至少 5 字/);
+ assert.match(followupProblem(followupPayload({goal:'x'.repeat(6001)},{id:'r'},undefined)),/过长/);
+ assert.match(followupProblem({goal:'足够长的目标了',parent_run:''}),/缺少父任务/);
+});
+test('the idempotency key is stable for an unchanged form and differs for a changed one',()=>{
+ const run={id:'run-1'};
+ const base=followupPayload({goal:'只保留两篇',reuse:['ev_1','ev_2']},run,undefined);
+ const same=followupPayload({goal:'只保留两篇',reuse:['ev_2','ev_1']},run,undefined);
+ assert.equal(idempotencyKeyFor(run,base),idempotencyKeyFor(run,same));
+ const other=followupPayload({goal:'改查数据划分',reuse:['ev_1']},run,undefined);
+ assert.notEqual(idempotencyKeyFor(run,base),idempotencyKeyFor(run,other));
+ assert.notEqual(idempotencyKeyFor({id:'run-2'},base),idempotencyKeyFor(run,base));
+ assert.match(idempotencyKeyFor(run,base),/^web-[0-9a-z]+$/);
+});
+test('a report delta is summarized only when there is a previous turn to compare with',()=>{
+ assert.equal(deltaSummary(null),null);
+ assert.equal(deltaSummary({against_run:'',added:[{claim:'x'}]}),null);
+ const summary=deltaSummary({against_run:'r1',against_turn:1,added:[1,2],changed:[3],dropped:[],
+   still_uncertain:[4],resolved_from_uncertain:[],outcome:{previous:'findings',current:'insufficient_evidence'},
+   note:'dropped 只表示本轮没有再提'});
+ assert.equal(summary.againstTurn,1); assert.equal(summary.added,2); assert.equal(summary.changed,1);
+ assert.equal(summary.dropped,0); assert.equal(summary.stillUncertain,1);
+ assert.equal(summary.outcomeTo,'insufficient_evidence');
+ assert.match(summary.note,/本轮没有再提/);
 });

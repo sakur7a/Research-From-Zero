@@ -1,11 +1,14 @@
 import {e, link, timeLabel} from './core.js';
 import {initTheme} from './theme.js';
-import {RUN_LABELS, TOOL_LABELS, SHIPPED_DEFAULTS, activeRun, budgetSummary, canResume, consentText, eventText, modelOptionIds, normalizeDefaults, paperCard, shortUrl} from './agent-core.js';
+import {RUN_LABELS, TOOL_LABELS, SHIPPED_DEFAULTS, activeRun, budgetSummary, canFollowUp, canResume, canRetry, consentText, deltaSummary, eventText, followupPayload, followupProblem, idempotencyKeyFor, ledgerLine, modelOptionIds, normalizeDefaults, paperCard, reuseChoices, shortUrl, turnLabel} from './agent-core.js';
 
 initTheme();
 const workspace = document.querySelector('#workspace');
 const settings = document.querySelector('#settings');
 let config = {}, runs = [], current = null, events = [], tab = 'trace', epoch = 0, timer, toastTimer;
+// The conversation the open run belongs to: its cumulative ledger and caps. Fetched with the run so
+// the composer can show what a follow-up would be added to, rather than only what it may spend.
+let conversation = null;
 const examples = [
   ['文献发现', '找几篇支持约束条件的 Layout 生成论文，查找代码和权重，列出资源缺口，不要把未找到当作不存在。'],
   ['资源深查', '搜索图层分解与图层生成的论文，区分官方声明、代码、checkpoint 与数据集的实际线索，给出来源。'],
@@ -58,8 +61,9 @@ function runView() {
   const opened=[...document.querySelectorAll('#result-panel details[open]')].map(x=>x.closest('article')?.id);
   document.querySelector('#breadcrumb').textContent = '研究任务';
   workspace.innerHTML = `<section class="run-page"><div class="run-heading"><div><div class="eyebrow">RESEARCH TASK <span>${e(timeLabel(current.created_at))}</span></div><h1>${e(current.goal)}</h1></div><span class="status ${e(current.status)}">${e(RUN_LABELS[current.status])}</span></div>
-    <div class="run-controls"><span>${e(current.config.model)} · 模型 ${current.model_calls || 0}/${current.params.max_model_calls} · 工具 ${current.tool_calls || 0}/${current.params.max_tool_calls}</span><div>${activeRun(current) ? '<button class="danger" data-action="cancel">停止研究</button>' : ''}${canResume(current) ? '<button class="primary" data-action="resume">从检查点继续</button>' : ''}<a class="button" href="/api/agent/runs/${e(current.id)}/export" download>导出任务</a></div></div>
+    <div class="run-controls"><span>${e(turnLabel(current))} · ${e(current.config.model)} · 模型 ${current.model_calls || 0}/${current.params.max_model_calls} · 工具 ${current.tool_calls || 0}/${current.params.max_tool_calls}</span><div>${activeRun(current) ? '<button class="danger" data-action="cancel">停止研究</button>' : ''}${canResume(current) ? '<button class="primary" data-action="resume">从检查点继续</button>' : ''}<a class="button" href="/api/agent/runs/${e(current.id)}/export" download>导出任务</a>${current.conversation_id ? `<a class="button" href="/api/agent/conversations/${e(current.conversation_id)}/export" download>导出整个会话</a>` : ''}</div></div>
     ${current.error ? `<div class="error-panel">${e(current.error)}</div>` : ''}
+    ${canFollowUp(current) ? followupHtml() : ''}
     <div class="run-layout"><aside class="plan-panel"><div class="section-label">公开行动计划</div>${current.plan?.length ? `<ol>${current.plan.map(s=>`<li>${e(s)}</li>`).join('')}</ol>` : '<p class="subtle">agent 将在执行时制定计划。</p>'}<div class="plan-bottom">${current.evidence.length}<span>条来源证据</span></div><p class="subtle">计划由模型生成。执行记录来自实际工具调用，不展示模型私有思维。</p></aside>
       <section class="results"><div class="tabs" role="tablist">${[['trace','执行记录'],['report','研究报告'],['evidence',`来源证据 (${current.evidence.length})`]].map(([key,title])=>`<button role="tab" aria-selected="${tab===key}" data-tab="${key}" class="${tab===key?'active':''}">${title}</button>`).join('')}</div><div id="result-panel" role="tabpanel"></div></section></div>
     <p class="footnote">模型报告是待复核分析；引用编号存在，不代表引用内容已经支持全部结论。Token 数以提供商实际返回为准，不估算金额。</p></section>`;
@@ -103,6 +107,39 @@ function paperCardHtml(ev) {
 
 function evidenceCard(ev) { return ev.kind === 'paper' && ev.paper ? paperCardHtml(ev) : plainCardHtml(ev); }
 
+// A continuing turn is a new version, so the difference from the previous one is shown next to the
+// report rather than folded into it: the earlier report stays readable and exportable on its own.
+function deltaHtml(delta) {
+  const summary = deltaSummary(delta);
+  if (!summary) return '';
+  return `<section class="report-delta"><h3>与第 ${summary.againstTurn} 轮的差异</h3>
+    <p>新增 ${summary.added} · 改变 ${summary.changed} · 本轮未再提 ${summary.dropped} · 仍不确定 ${summary.stillUncertain} · 由不确定转为有结论 ${summary.resolved}</p>
+    <p>结论状态：${e(summary.outcomeFrom || '（无）')} → ${e(summary.outcomeTo)}</p>
+    <p class="subtle">${e(summary.note)}</p></section>`;
+}
+// The composer only collects an authorization. Whether the reuse is in scope, whether the ledger has
+// room and whether the model destination changed are all decided by the shared service, which is the
+// same code the console and the API run — so nothing here pre-judges the answer.
+function followupHtml() {
+  const {choices, hidden} = reuseChoices(current.evidence);
+  const defaults = normalizeDefaults(config.task_defaults);
+  return `<details class="followup"><summary>在这一轮上追问 / 补充约束（第 ${(current.turn || 1) + 1} 轮）</summary>
+    <form id="followup-form">
+      <label>本轮新增或变更的条件
+        <textarea name="goal" rows="3" maxlength="6000" required
+          placeholder="例：只保留有训练代码的两篇，并补查它们的数据划分"></textarea></label>
+      <fieldset><legend>复用已有证据（勾选的不会重新抓取）</legend>
+        ${choices.map(ev => `<label class="reuse"><input type="checkbox" name="reuse" value="${e(ev.id)}"> ${e((ev.paper && ev.paper.title) || ev.locator || ev.kind || ev.id)}</label>`).join('') || '<p class="subtle">这一轮没有可复用的证据。</p>'}
+        ${hidden ? `<p class="subtle">另有 ${hidden} 条未在这里列出；用 <code>re0 session scope</code> 或 API 指名。</p>` : ''}
+      </fieldset>
+      <label class="consent"><input type="checkbox" name="use_library"> 本轮授权发送本地文献库元数据（不从上一轮继承）</label>
+      <label class="consent"><input type="checkbox" name="trust_destination"> 本轮模型服务与上一轮不同，我确认把历史材料发往它</label>
+      <label class="consent"><input type="checkbox" name="authorize" required> 我确认这一轮会产生新的模型调用费用；会话累计额度不会因新建一轮而重置</label>
+      <p class="subtle">${e(ledgerLine(conversation))} · 本轮预算 模型 ${defaults.max_model_calls} / 工具 ${defaults.max_tool_calls}</p>
+      <div class="run-controls"><button class="primary" type="submit">发起追问</button>${canRetry(current) ? '<button class="button" type="button" data-action="retry">按原目标重试一轮</button>' : ''}</div>
+    </form></details>`;
+}
+
 function panel() {
   const node = document.querySelector('#result-panel');
   if (!node || !current) return;
@@ -110,7 +147,7 @@ function panel() {
     node.innerHTML = `<div class="trace">${events.length ? events.map(ev => `<article class="trace-row"><span class="trace-marker ${ev.kind==='tool_finished' && !ev.data.ok?'bad':''}"></span><div><small>${e(timeLabel(ev.at))} · ${e(ev.kind)}</small><p>${e(eventText(ev))}</p></div></article>`).join('') : '<p class="subtle">正在读取执行记录…</p>'}${activeRun(current)?'<div class="working"><span></span>正在执行；可离开此页面，任务由本地服务继续处理。</div>':''}</div>`;
   } else if (tab === 'report') {
     const r=current.report;
-    node.innerHTML = r ? `<article class="report"><div class="eyebrow">${r.outcome==='insufficient_evidence'?'EVIDENCE IS INCOMPLETE':'RESEARCH FINDINGS'} · 模型生成，待复核</div><h2>${e(r.title)}</h2><p class="report-summary">${e(r.summary)}</p><h3>发现与依据</h3>${r.findings.map((f,i)=>`<section class="finding"><small>${i+1} / ${{observed:'观察',inference:'推断',uncertain:'不确定'}[f.assessment]}</small><p>${e(f.claim)}</p><div class="citations">${f.evidence_ids.map(id=>`<button data-evidence="${e(id)}">${e(id)}</button>`).join('')}</div></section>`).join('') || '<p class="subtle">没有形成有充分依据的发现。</p>'}<h3>检查范围与剩余缺口</h3><ul>${r.limitations.map(x=>`<li>${e(x)}</li>`).join('')}</ul><div class="usage">提供商报告的 Token：${e(current.usage?.total_tokens || 0)}${current.usage?.unreported_calls ? `；${e(current.usage.unreported_calls)} 次调用未报告用量` : ''}</div></article>` : '<div class="empty-result"><h2>报告还未生成</h2><p>报告只有在 agent 提交结构化结果后出现。任务失败或达到预算，不会自动填充虚构结论。</p><button class="button" data-tab="evidence">查看已收集的证据</button></div>';
+    node.innerHTML = r ? `<article class="report"><div class="eyebrow">${r.outcome==='insufficient_evidence'?'EVIDENCE IS INCOMPLETE':'RESEARCH FINDINGS'} · 模型生成，待复核</div><h2>${e(r.title)}</h2><p class="report-summary">${e(r.summary)}</p><h3>发现与依据</h3>${r.findings.map((f,i)=>`<section class="finding"><small>${i+1} / ${{observed:'观察',inference:'推断',uncertain:'不确定'}[f.assessment]}</small><p>${e(f.claim)}</p><div class="citations">${f.evidence_ids.map(id=>`<button data-evidence="${e(id)}">${e(id)}</button>`).join('')}</div></section>`).join('') || '<p class="subtle">没有形成有充分依据的发现。</p>'}<h3>检查范围与剩余缺口</h3><ul>${r.limitations.map(x=>`<li>${e(x)}</li>`).join('')}</ul><div class="usage">提供商报告的 Token：${e(current.usage?.total_tokens || 0)}${current.usage?.unreported_calls ? `；${e(current.usage.unreported_calls)} 次调用未报告用量` : ''}</div>${deltaHtml(current.report_delta)}</article>` : '<div class="empty-result"><h2>报告还未生成</h2><p>报告只有在 agent 提交结构化结果后出现。任务失败或达到预算，不会自动填充虚构结论。</p><button class="button" data-tab="evidence">查看已收集的证据</button></div>';
   } else {
     node.innerHTML = `<div class="evidence-list">${current.evidence.length ? current.evidence.map(evidenceCard).join('') : '<div class="empty-result"><h2>尚无来源证据</h2><p>只有工具实际取得的材料才会出现在这里。</p></div>'}</div>`;
   }
@@ -123,7 +160,10 @@ async function selectRun(id) {
   try {
     const [r, ev] = await Promise.all([api('/runs/'+id),api('/runs/'+id+'/events')]);
     if (token!==epoch) return;
-    current=r; events=ev; runView(); poll(token);
+    current=r; events=ev;
+    conversation = r.conversation_id ? await api('/conversations/'+r.conversation_id) : null;
+    if (token!==epoch) return;
+    runView(); poll(token);
   } catch(err){notice(err.message);}
 }
 function poll(token) {
@@ -200,6 +240,7 @@ document.addEventListener('click', async event => {
       case 'test-model':button.disabled=true;await api('/config/test',{});notice('工具调用测试通过；不代表科研效果已评测。');button.disabled=false;break;
       case 'cancel':await api('/runs/'+current.id+'/cancel',{});notice('已请求停止，将在当前调用结束或超时后生效。');break;
       case 'resume':if(confirm('使用同一模型从检查点继续？可能再次产生调用费用，累计调用预算不重置。')){await api('/runs/'+current.id+'/resume',{confirmed:true});await selectRun(current.id);}break;
+      case 'retry':if(confirm('按上一轮的目标原文重试一轮？会新增模型调用费用，会话累计额度不重置。')){const r=await api('/retries',{parent_run:current.id,authorize_spend:true,consent_to_send:true,idempotency_key:`web-retry-${current.id}-${current.turn||1}`});await refreshHistory();await selectRun(r.id);}break;
     }
   } catch(err){button.disabled=false;notice(err.message);}
 });
@@ -214,7 +255,7 @@ document.addEventListener('change', event=>{
 // A toast left inside a closed dialog would sit in a display:none subtree.
 settings.addEventListener('close', noticeHome);
 document.addEventListener('submit', async event=>{
-  if(!['task-form','model-form','defaults-form'].includes(event.target.id))return;
+  if(!['task-form','model-form','defaults-form','followup-form'].includes(event.target.id))return;
   event.preventDefault();const form=event.target, data=new FormData(form), button=form.querySelector('[type=submit]');button.disabled=true;
   try {
     if(form.id==='model-form') {
@@ -223,6 +264,14 @@ document.addEventListener('submit', async event=>{
     } else if(form.id==='defaults-form') {
       config=await api('/defaults',{max_model_calls:Number(data.get('max_model_calls')),max_tool_calls:Number(data.get('max_tool_calls')),attempt_seconds:Number(data.get('attempt_seconds')),use_library:data.has('use_library')},'PUT');
       settings.close();sidebar();if(!current)home(document.querySelector('#goal')?.value || '');notice('任务默认值已保存；只影响之后新建的任务。');
+    } else if(form.id==='followup-form') {
+      const payload=followupPayload({goal:data.get('goal'),reuse:data.getAll('reuse'),useLibrary:data.has('use_library'),trustNewDestination:data.has('trust_destination')},current,config.task_defaults);
+      const problem=followupProblem(payload);
+      if(problem){notice(problem);return;}
+      payload.idempotency_key=idempotencyKeyFor(current,payload);
+      const r=await api('/followups',payload);
+      await refreshHistory();await selectRun(r.id);
+      notice('已发起新一轮。复用的证据没有重新抓取；本轮花费记在会话累计账本上。');
     } else {
       const defaults=normalizeDefaults(config.task_defaults);
       const r=await api('/runs',{goal:data.get('goal'),max_model_calls:defaults.max_model_calls,max_tool_calls:defaults.max_tool_calls,attempt_seconds:defaults.attempt_seconds,use_library:defaults.use_library,consent_to_send:data.has('consent_to_send')});

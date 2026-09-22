@@ -8,6 +8,13 @@ proxy. Host checks, JSON content type, same-origin checks and `X-Re0-Client` are
 CSRF/origin defenses, **not authorization**. Local software can still call the
 API. Run one process/worker per SQLite file.
 
+`X-Re0-Client` accepts `web` (the browser pages) and `cli` (the console entry
+points that drive the same service, `re0 session follow-up`/`retry`). A request
+claiming `cli` while carrying an `Origin` or `Referer` header is refused: a
+browser always names its origin on a cross-origin POST, so a page cannot borrow
+the console identity. This widens *who may write* to a loopback service that was
+already unauthenticated; it does not make that service safe to expose.
+
 ## Secrets and material flow
 
 Model settings entered in the browser are posted to the local backend and held
@@ -67,6 +74,17 @@ Stopping is cooperative: an ongoing API request may complete and incur cost.
 Timeouts apply at request/action boundaries; the task timer is not a hard global
 kill switch. Provider-reported usage is informational, not a guaranteed invoice.
 No automatic repeated paid retries, restart-resume or cross-provider failover.
+
+Continuing a conversation does not reset any of it. Model and tool counts are
+summed across every turn of a conversation and **recomputed from the runs**
+rather than incremented, so a follow-up cannot escape a cap by being a new run;
+the cap is enforced inside the turn as well as at admission. Raising a cap
+requires an explicit field on the request that needs it and is recorded in that
+turn's immutable snapshot. Spending is authorized per turn, library consent is
+re-asked per turn, and a model endpoint that differs from the parent's needs an
+explicit confirmation before any history is sent to it. An in-flight request may
+still be billed after a cancel, and a call whose provider did not report usage is
+counted separately as `unreported_calls` rather than assumed free.
 
 Task records and approved papers share the original SQLite file. Use
 `scripts/backup.py` rather than copying an active WAL database's main file alone.
