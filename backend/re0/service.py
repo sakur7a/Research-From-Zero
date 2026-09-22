@@ -4,13 +4,19 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import HTTPException
 from pydantic import ValidationError
 
 from .db import Database, encode
-from .models import PaperInput, ResourceInput, now
+from .models import PaperInput, ResourceAudit, ResourceInput, ResourceKind, now
+
+# A record is either something a check found or something a person confirmed. There is no third
+# kind: a model's reading of a check is stored as an observation with its inference inside it, not
+# as its own authority.
+RECORD_KINDS = ("observation", "confirmation")
 
 
 def paper_record(row) -> dict:
@@ -20,6 +26,45 @@ def paper_record(row) -> dict:
 
 def resource_record(row) -> dict:
     return {**json.loads(row["data"]), "id": row["id"], "paper_id": row["paper_id"], "created_at": row["created_at"]}
+
+
+def _cited(evidence: list) -> str:
+    """Flatten an audit's evidence into the one string a library resource record carries."""
+    return " | ".join(f"{item.locator}: {item.excerpt} ({item.source_url})"
+                      for item in evidence)[:4000]
+
+
+def validation_message(exc: ValidationError) -> str:
+    """The first reason a payload was refused, in the words the model wrote it in.
+
+    The app-wide validation handler replaces every message with a generic one, because
+    model-configuration payloads carry secrets and FastAPI echoes invalid input back. None of these
+    records hold a secret, and "the form was wrong" is no answer for a reader who was asked to
+    attach a source and did not.
+    """
+    (error,) = exc.errors()[:1]
+    text = str(error.get("msg") or "").removeprefix("Value error, ").strip()
+    return text[:300] or "输入格式或取值不符合要求"
+
+
+def resource_from_audit(audit: ResourceAudit) -> ResourceInput:
+    """A library resource from an audit row.
+
+    The two share a vocabulary on purpose — `attribution` and `ownership`, `author_declaration` and
+    `claim` — so this is a transcription rather than a re-judgement. Neither evidence field is
+    dropped, because `ResourceInput` refuses an attribution or a claim that has none.
+    """
+    tail = [part for part in urlsplit(audit.resource_url).path.split("/") if part]
+    return ResourceInput(
+        kind=ResourceKind(audit.resource_type),
+        label=("/".join(tail[-2:]) or audit.resource_url)[:200],
+        url=audit.resource_url,
+        ownership=audit.attribution,
+        ownership_evidence=_cited(audit.attribution_evidence),
+        claim=audit.author_declaration,
+        claim_evidence=_cited(audit.author_declaration_evidence),
+        applicable_version=audit.work_version,
+    )
 
 
 class Store:
@@ -95,17 +140,119 @@ class Store:
     def history(self, resource_id: str) -> list[dict]:
         self.get_resource(resource_id)
         with self.db.connect() as con:
-            return [{**json.loads(row["data"]), "id": row["id"]} for row in con.execute(
+            rows = [{**json.loads(row["data"]), "id": row["id"]} for row in con.execute(
                 "SELECT * FROM observations WHERE resource_id=? ORDER BY id DESC", (resource_id,))]
+        # A record written before kinds existed was written by the only writer there was: a check.
+        # Defaulting it to anything else would rewrite history rather than read it.
+        return [{"record_kind": "observation", **row} for row in rows]
 
-    def save_observation(self, resource_id: str, observation: dict):
+    def save_observation(self, resource_id: str, observation: dict, *, kind: str = "observation",
+                         origin: str = "check"):
+        """Append one immutable record, labelled with who is speaking.
+
+        A machine check and a human confirmation are different kinds of statement, and an
+        append-only table with nothing on the row to tell them apart is how a guess gets read back
+        later as an observation. `origin` separates a check this service performed from one a user
+        imported from elsewhere, which this process never verified.
+        """
+        if kind not in RECORD_KINDS:
+            raise HTTPException(422, f"记录类型只能是 {' 或 '.join(RECORD_KINDS)}")
+        record = {**observation, "record_kind": kind, "record_origin": origin, "recorded_at": now()}
         try:
             with self.db.connect() as con:
                 con.execute("INSERT INTO observations(resource_id,data,checked_at) VALUES (?,?,?)",
-                            (resource_id, encode(observation), observation["checked_at"]))
+                            (resource_id, encode(record), record.get("checked_at") or now()))
         except sqlite3.IntegrityError as exc:
             raise HTTPException(409, "检查期间资源已被删除，结果未写入其他资源") from exc
         return self.history(resource_id)[0]
+
+    def confirm_resource(self, resource_id: str, revision: ResourceAudit) -> dict:
+        """A human confirmation, stored as its own record beside the observations it revises.
+
+        This is the only writer that may carry a settled attribution or a version judgement, and the
+        model behind it refuses both without a source. Nothing a model or an external host returned
+        reaches here: a `confirmed: true` inside a tool result is a string in some payload, not a
+        user's approval, and there is no argument that turns one into the other.
+        """
+        resource = self.get_resource(resource_id)
+        if resource["url"] != revision.resource_url:
+            raise HTTPException(422, "确认的内容必须对应这个资源的链接")
+        return self.save_observation(resource_id, revision.model_dump(mode="json"),
+                                     kind="confirmation", origin="user")
+
+    def import_audits(self, items: list[dict], dry_run: bool = True) -> dict:
+        """Link approved papers and their resource audits into the library.
+
+        Idempotent by identifier, by resource URL and by audit fingerprint, and it never updates a
+        paper that is already here: an existing record carries the reader's own notes, and an
+        import that overwrote them would be a loss nobody asked for. Only source-derived metadata is
+        accepted, so an approval cannot be used to invent a paper.
+        """
+        if len(items) > 200:
+            raise HTTPException(422, "单次最多导入 200 篇论文的审计结果")
+        prepared, errors = [], []
+        for index, item in enumerate(items):
+            try:
+                if not isinstance(item, dict):
+                    raise ValueError("每条记录必须是 JSON 对象")
+                paper = PaperInput.model_validate(item.get("paper") or {})
+                audits = [ResourceAudit.model_validate(row) for row in (item.get("audits") or [])]
+                if not audits:
+                    raise ValueError("没有可导入的审计记录")
+                prepared.append((index, paper, audits))
+            except (ValidationError, ValueError, TypeError) as exc:
+                reason = validation_message(exc) if isinstance(exc, ValidationError) else str(exc)
+                errors.append({"index": index, "message": reason or "审计记录格式错误"})
+        created, linked, skipped = [], [], []
+        if not dry_run:
+            for index, paper, audits in prepared:
+                linkable = [row for row in audits if row.resource_type != "unknown"]
+                for row in audits:
+                    if row.resource_type == "unknown":
+                        # An unsupported link was never checked, so there is nothing to link.
+                        skipped.append({"index": index, "url": row.resource_url,
+                                        "reason": "链接类型不受支持，未产生审计结论"})
+                if not linkable:
+                    # Nothing to link, so nothing to create. A paper this import cannot attach a
+                    # single resource to is a record nobody asked the library to hold.
+                    continue
+                paper_id, was_new = self._paper_for_import(paper)
+                if was_new:
+                    created.append({"index": index, "paper_id": paper_id, "title": paper.title})
+                known = {item["url"]: item["id"] for item in self.get_paper(paper_id)["resources"]}
+                for audit in linkable:
+                    resource_id = known.get(audit.resource_url)
+                    if resource_id is None:
+                        resource_id = self.create_resource(paper_id, resource_from_audit(audit))["id"]
+                        known[audit.resource_url] = resource_id
+                    fingerprint = (audit.checked_at, audit.revision, audit.status)
+                    if any((row.get("checked_at"), row.get("revision"), row.get("status")) == fingerprint
+                           for row in self.history(resource_id)):
+                        skipped.append({"index": index, "url": audit.resource_url,
+                                        "reason": "同一次检查已导入过"})
+                        continue
+                    self.save_observation(resource_id, audit.model_dump(mode="json"),
+                                          kind="observation", origin="import")
+                    linked.append({"index": index, "paper_id": paper_id,
+                                   "resource_id": resource_id, "url": audit.resource_url,
+                                   "status": audit.status})
+        return {"dry_run": dry_run, "ready": len(prepared), "errors": errors, "skipped": skipped,
+                "created": created, "linked": linked,
+                "preview": [{"index": index, "title": paper.title,
+                             "resources": [row.resource_url for row in audits]}
+                            for index, paper, audits in prepared[:20]],
+                "note": "导入只建立关联，不修改已存在论文的笔记或字段；确认归属是另一条记录。"}
+
+    def _paper_for_import(self, paper: PaperInput) -> tuple:
+        """Find the paper by identifier, or create it. An existing one is returned untouched."""
+        arxiv = re.sub(r"v\d+$", "", paper.arxiv_id)
+        with self.db.connect() as con:
+            row = con.execute(
+                "SELECT id FROM papers WHERE (doi != '' AND doi=?) OR (arxiv_base != '' AND arxiv_base=?)",
+                (paper.doi, arxiv)).fetchone()
+        if row:
+            return row[0], False
+        return self.create_paper(paper)["id"], True
 
     def delete_resource(self, resource_id: str):
         with self.db.connect() as con:

@@ -17,15 +17,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 from pathlib import Path
 
+from re0 import resource_audit, resource_matrix, result_model
 from re0.agent.tools import ResearchTools
 from re0.env_file import load
-from re0.literature import PUBLICATION_CAVEAT, PUBLICATION_LABELS, artifact_urls
-from re0 import result_model
-from re0.providers import ProviderError, check_resource
+from re0.literature import PUBLICATION_CAVEAT, PUBLICATION_LABELS
+from re0.models import AUDIT_LABELS, COMPONENT_LABELS
+from re0.providers import ProviderError
 
 # `./.env` is the caller's own working directory and `~/.re0/.env` is this product's, so both
 # stay defaults. Another product's file is NOT searched implicitly: reading whatever account that
@@ -131,99 +131,6 @@ def links_for(paper: dict) -> list:
     return links
 
 
-PROJECT_NAME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:[-_.][A-Za-z0-9]+)*")
-
-
-def short_name(title: str) -> str:
-    """The project name a paper titles itself with: the part before a colon or dash.
-
-    "RevealLayer: Disentangling Hidden and Visible Layers…" -> "RevealLayer", which is also the
-    repository name. A sentence-like head is rejected rather than searched, because searching a
-    sentence returns noise.
-    """
-    head = re.split(r"[:\u2014\u2013]|\s-\s", title, maxsplit=1)[0].strip().strip('"\'\u201c\u201d')
-    if PROJECT_NAME_PATTERN.fullmatch(head) and 3 <= len(head) <= 40:
-        return head
-    return ""
-
-
-def _normalise(value: str) -> str:
-    return re.sub(r"[-_.]", "", (value or "").lower())
-
-
-def candidate_origin(label: str, content: str, title: str, name: str) -> tuple:
-    """Rank a name match by how much evidence it carries, because a fuzzy search returns noise.
-
-    A description that repeats the paper title is the strongest cheap signal of ownership, an
-    identifier whose last segment equals the project name comes next, and a shared word alone is
-    the weakest — `Stability-AI/Stable-Layers` and `nathannlu/aperture` can both come back from
-    one query, and the reader needs to see which is which. None of it proves authorship.
-    """
-    body = content or ""
-    try:
-        payload = json.loads(body)
-    except ValueError:
-        payload = {}
-    head = " ".join(title.split()[:4]).lower()
-    if head and head in body.lower():
-        return label + "·描述与论文标题相符", 3
-    identifier = str(payload.get("full_name") or payload.get("id") or "")
-    if _normalise(identifier.split("/")[-1]) == _normalise(name):
-        return label + "·标识名与项目名一致", 2
-    return label + "·仅名称匹配", 1
-
-
-def artifact_candidates(tools, name: str, title: str, per_kind: int, failures: list) -> list:
-    """Search GitHub and the Hugging Face Hub by the paper's project name.
-
-    Name matching never establishes authorship, which is why everything here is reported as
-    unverified. But a paper whose metadata carries no link very often does have a released
-    artifact, and searching is the only way to surface it: the alternative is reporting nothing.
-    """
-    found = []
-    for tool, extra, label in (("search_repositories", {}, "GitHub 名称检索"),
-                               ("search_hub", {"kind": "models"}, "HF models 名称检索"),
-                               ("search_hub", {"kind": "datasets"}, "HF datasets 名称检索")):
-        result, last = None, None
-        for attempt in range(2):
-            try:
-                result = tools.execute(tool, {"query": name, "limit": per_kind, **extra})
-                break
-            except (ProviderError, ValueError) as exc:
-                last = exc
-        if result is None:
-            failures.append(f"{label}: {last}")
-            continue
-        for document in result.get("documents", []):
-            origin, rank = candidate_origin(label, document.get("content", ""), title, name)
-            found.append({"url": document["source_url"], "origin": origin, "rank": rank})
-    # Strongest evidence first, so a fuzzy hit cannot sit above the likely official repository.
-    return sorted(found, key=lambda entry: -entry["rank"])
-
-
-def verify_candidate(url: str) -> None:
-    """Run Re0's bounded resource check on one candidate link.
-
-    This is the answer to the two cases a link alone cannot distinguish: a repository
-    that exists but is empty, and a link that no longer resolves. The status vocabulary
-    is deliberately blunt — an unanswered request is reported as unverified, never as
-    "not released" — so the output stays comparable between papers.
-    """
-    try:
-        observation = check_resource(url)
-    except Exception:
-        # Never relay a raw traceback; an exception is not evidence about the resource.
-        print(f"     → {url}\n       verification did not complete (unexpected error); unverified")
-        return
-    print(f"     → {url}")
-    print(f"       status {observation.status} · depth {observation.depth} · provider {observation.provider}")
-    print(f"       {observation.summary[:300]}")
-    if observation.indicators:
-        print("       candidate files: " + ", ".join(f"{kind}={len(hits)}" for kind, hits in observation.indicators.items()))
-    for limitation in observation.limitations[:2]:
-        print(f"       limit: {limitation}")
-
-
 SHOWN_INSTITUTIONS = 3
 
 
@@ -269,14 +176,101 @@ def failure_hint(source: str) -> str:
     return f"  ← 未配置 {' 或 '.join(names)}：{reason}"
 
 
-def print_document(index: int, document: dict, raw: bool, verify_budget: int,
-                   tools=None, find_budget: int = 0) -> tuple:
-    """Print one result. Returns `(verified, searched)` for the two budgets.
+def audit_lines(row: dict) -> list:
+    """One audit row as text. Every value comes off the row, so the terminal cannot say something
+    the JSON does not."""
+    if row["status"] == "not_checked":
+        # Still listed: an unverified candidate is not a failed one. Keyed off the state, not the
+        # depth — a check that ran and failed reached no depth either, and printing that as "未核验"
+        # would report an attempt nobody needs to retry as one nobody made.
+        reason = "检查未完成" if row.get("provider_status") == "check_error" else "未核验"
+        return [f"     开源候选（{row['candidate_origin']}，{reason}）: {row['resource_url']}"]
+    provider = row["provider"] or "未知"
+    # The provider's own status is shown only when it says something ours does not: a 404 and a
+    # 429 both land on `access_failed`, and the difference is the whole point of keeping it.
+    extra = row.get("provider_status") or ""
+    provider_note = f"；提供商状态 {extra}" if extra and extra != row["status"] else ""
+    lines = [f"     → {row['resource_url']}",
+             f"       状态 {AUDIT_LABELS[row['status']]}（{row['status']}）{provider_note}"
+             f" · 深度 {row['verification_depth']} · 提供商 {provider}"]
+    if row.get("summary"):
+        lines.append(f"       {row['summary'][:300]}")
+    lines.append("       资源类别: " + ", ".join(
+        f"{name}={COMPONENT_LABELS[finding['state']]}" for name, finding in row["coverage"].items()))
+    if row.get("licences"):
+        lines.append("       许可证（来源声明，不是使用权限结论）: "
+                     + ", ".join(f"{name}={value}" for name, value in row["licences"].items()))
+    if row.get("version_match") != "unknown":
+        lines.append(f"       论文/资源版本: {row['version_match']}（{row['version_evidence'][:120]}）")
+    lines.extend(f"       limit: {text}" for text in row["limitations"][:3])
+    return lines
 
-    Candidates come from two places and are verified from one budget: links the authors put in
-    the abstract, which are declarations, and links found by searching GitHub and the Hugging Face
-    Hub for the paper's project name, which are name matches. The first are listed first because
-    they are the stronger claim, but neither is a verification.
+
+def no_candidate_line(state: str, detail: dict) -> str:
+    """Printed even when nothing was found, so an absence reads as a finding rather than an
+    omission — and so "nobody searched" never looks like "searched and found nothing"."""
+    name = detail.get("project_name") or ""
+    if state == "skipped":
+        return ("     开源线索: 摘要中未提及链接，标题里也没有可检索的项目名（形如「Name: ...」）")
+    if detail.get("failures"):
+        return (f"     开源线索: 摘要中未提及链接；按项目名 '{name}' 的检索未完成（原因见下），"
+                "这不代表没有开源，重跑一次通常即可")
+    if state == "searched":
+        return f"     开源线索: 摘要与元数据均无链接，按项目名 '{name}' 检索 GitHub/HF 也无结果"
+    reason = detail.get("reason_not_run") or "disabled"
+    return (f"     开源线索: 摘要中未提及链接；按项目名 '{name}' 的 GitHub/HF 检索未开启"
+            f"（原因 {reason}；用 --find-artifacts N，默认开 10 篇）")
+
+
+def print_audit(document: dict) -> None:
+    rows = document.get("resource_audits") or []
+    detail = document.get("artifact_search_detail") or {}
+    for row in rows:
+        print("\n".join(audit_lines(row)))
+    if not rows:
+        print(no_candidate_line(document.get("artifact_search", "not-run"), detail))
+    # After the "原因见下" line, so the reasons are where the text says they are.
+    for failure in detail.get("failures") or []:
+        print(f"     名称检索未完成: {failure}")
+    unchecked = sum(1 for row in rows if row["status"] == "not_checked")
+    if unchecked:
+        print(f"     ↑ 另有 {unchecked} 条未核验；提高 --verify 可继续核验")
+
+
+def print_audit_coverage(coverage: dict) -> None:
+    """The run's own denominators.
+
+    "0 verified" is either "nothing to verify" or "the budget ran out", and only the second is a
+    gap, so every count here is printed next to what it is out of.
+    """
+    search, candidates = coverage["name_search"], coverage["candidates"]
+    states = search["states"]
+    print(f"\n开源审计覆盖（分母 {search['denominator']} 篇）："
+          f"检索完成 {states['searched']} · 部分完成 {states['partial']} · 全部失败 {states['failed']}"
+          f" · 无项目名可检索 {states['skipped']} · 未检索 {states['not-run']}"
+          f"（名称检索预算 {search['budget']}，已用 {search['spent']}）")
+    if states["not-run"] and search["spent"] >= search["budget"] > 0:
+        print("  ← 未检索的论文是预算用尽所致，不是没有开源；--find-artifacts 可调大"
+              "（GitHub 搜索限 10 次/分钟）。")
+    print(f"候选 {candidates['found']} 个（作者自述 {candidates['declared']}，"
+          f"名称匹配 {candidates['name_matched']}）；已核验 {candidates['verified']}，"
+          f"未核验 {candidates['unchecked']}（核验预算 {candidates['budget']}，"
+          f"剩余 {candidates['remaining']}）")
+    described = " · ".join(f"{AUDIT_LABELS[state]} {count}"
+                           for state, count in coverage["audits"].items() if count)
+    if described:
+        print("审计结论分布: " + described)
+    if coverage["failures"]:
+        print(f"名称检索失败 {len(coverage['failures'])} 次（明细见对应论文行；"
+              "失败不是「没有结果」）")
+    print("候选是名称匹配而非作者身份证明；未核验与核验失败都不表示资源未开放。")
+
+
+def print_document(index: int, document: dict, raw: bool) -> None:
+    """Render one result. Fetches nothing.
+
+    Discovery and verification already ran in `resource_audit`, so what is printed here and what
+    `--json` writes come from the same object and cannot describe one run two ways.
     """
     paper = document["paper"]
     tag = "[survey] " if is_survey(paper["title"]) else ""
@@ -288,49 +282,12 @@ def print_document(index: int, document: dict, raw: bool, verify_budget: int,
     for label, url in links_for(paper):
         print(f"     {label}: {url}")
     print(f"     来源: {document['locator']}")
-
-    candidates = [(url, "摘要中自述") for url in artifact_urls(paper.get("abstract", ""))]
-    name = short_name(paper["title"])
-    searched = 0
-    failures: list = []
-    if tools is not None and find_budget > 0 and name:
-        searched = 1
-        candidates += [(c["url"], c["origin"])
-                       for c in artifact_candidates(tools, name, paper["title"], 3, failures)]
-    # Carried into --json as well as printed: a report built from the JSON used to lose every
-    # candidate this skill had found, which made the feature look absent.
-    document["artifact_candidates"] = [{"url": url, "origin": origin} for url, origin in candidates]
-    document["artifact_search"] = "searched" if searched else ("skipped" if not name else "not-run")
-    used = 0
-    for url, origin in candidates:
-        if used >= verify_budget:
-            # Still shown, just not fetched: an unverified link is not a failed one.
-            print(f"     开源候选（{origin}，未核验）: {url}")
-            continue
-        used += 1
-        verify_candidate(url)
-    for failure in failures:
-        print(f"     名称检索未完成: {failure}")
-    if not candidates:
-        # Printed even when empty, so its absence reads as a finding rather than an omission.
-        if not name:
-            print("     开源线索: 摘要中未提及链接，标题里也没有可检索的项目名（形如「Name: ...」）")
-        elif failures:
-            print(f"     开源线索: 摘要中未提及链接；按项目名 '{name}' 的检索未完成（原因见下），"
-                  "这不代表没有开源，重跑一次通常即可")
-        elif searched:
-            print(f"     开源线索: 摘要与元数据均无链接，按项目名 '{name}' 检索 GitHub/HF 也无结果")
-        else:
-            print(f"     开源线索: 摘要中未提及链接；按项目名 '{name}' 的 GitHub/HF 检索未开启"
-                  "（用 --find-artifacts N，默认开 10 篇）")
-    elif used < len(candidates):
-        print(f"     ↑ 另有 {len(candidates) - used} 条未核验；提高 --verify 可继续核验")
+    print_audit(document)
     if raw:
         print(document["content"])
     elif paper.get("abstract"):
         print("     abstract: " + paper["abstract"][:EXCERPT_CHARS]
               + ("…" if len(paper["abstract"]) > EXCERPT_CHARS else ""))
-    return used, searched
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -374,6 +331,13 @@ def build_parser() -> argparse.ArgumentParser:
                              "about four GitHub CORE requests, whose anonymous limit is 60/hour; the "
                              "search endpoint used by --find-artifacts is limited to 10/minute. Set "
                              "GITHUB_TOKEN to raise both. Unchecked candidates are still listed.")
+    parser.add_argument("--resource-matrix", default=None, metavar="PREFIX",
+                        help="write the resource matrix beside this prefix as PREFIX.json, PREFIX.md "
+                             "and PREFIX.csv: one row per resource candidate, with its audit state, "
+                             "per-class coverage, licence declarations and limits. Useful for "
+                             "choosing a baseline across 2-6 papers. The CSV escapes cells a "
+                             "spreadsheet would run as a formula, and only http(s) links are "
+                             "written. Nothing is verified again to build it.")
     return parser
 
 
@@ -437,19 +401,14 @@ def main(argv=None) -> int:
               "widen the query, change the year window, or recheck a source named above.")
         return 0
 
-    verify_left, find_left = args.verify, args.find_artifacts
+    budget = resource_audit.Budget(find=args.find_artifacts, verify=args.verify)
     for index, document in enumerate(documents, start=1):
-        used_verify, searched = print_document(index, document, args.raw, verify_left, tools, find_left)
-        verify_left -= used_verify
-        find_left -= searched
-    if args.find_artifacts and len(documents) > args.find_artifacts:
-        print(f"\n名称检索只覆盖了前 {args.find_artifacts} 篇（--find-artifacts 可调大，GitHub 搜索限 10 次/分钟）。")
-    searched_count = sum(1 for document in documents if document.get("artifact_search") == "searched")
-    found_count = sum(len(document.get("artifact_candidates") or []) for document in documents)
-    if args.find_artifacts:
-        print(f"\n开源检索：已按项目名检索 {searched_count} 篇，得到 {found_count} 个候选"
-              f"（共 {len(documents)} 篇；只有标题形如「Name: ...」的论文有项目名可检索）。"
-              "候选是名称匹配而非作者身份证明。")
+        # Audited before it is printed, so the terminal and --json read the same object.
+        resource_audit.audit_document(document, tools, budget)
+        print_document(index, document, args.raw)
+    # The run's own coverage, with denominators: a count without one reads as a result.
+    result["audit"] = resource_audit.run_coverage(documents, budget)
+    print_audit_coverage(result["audit"])
     if args.json_path:
         # The same versioned structure the MCP surface returns, so the two machine-readable exits
         # cannot describe the same call differently.
@@ -458,7 +417,12 @@ def main(argv=None) -> int:
                                         encoding="utf-8")
         print(f"完整结果已写入 {args.json_path}"
               f"（schema_version {structure['schema_version']}；文档正文在 documents[].body.excerpt，"
-              "每篇的 artifact_candidates 与 artifact_search 都在）")
+              "每篇的 resource_audits、artifact_candidates 与 artifact_search 都在，"
+              "本次审计覆盖在 audit）")
+    if args.resource_matrix:
+        written = resource_matrix.write(args.resource_matrix, documents, result["audit"])
+        print("资源矩阵已写入 " + "、".join(str(path) for path in written)
+              + "（每行一个资源候选；CSV 已对公式前缀转义）")
     if any((document.get("publication") or {}).get("state") == "preprint" for document in documents):
         print("\n关于发表状态：" + PUBLICATION_CAVEAT)
     print("\nThese are bibliographic records, not full text. Confirm anything load-bearing "

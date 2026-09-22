@@ -18,9 +18,11 @@ SCHEMA_VERSION = "1"
 BODY_EXCERPT_CHARS = 4000
 
 PAYLOAD_FIELDS = ("scope", "query", "note", "sources_queried", "source_counts", "source_failures",
-                  "incomplete_results", "duplicates_merged", "dropped_out_of_range", "documents")
+                  "incomplete_results", "duplicates_merged", "dropped_out_of_range", "documents",
+                  "audit")
 DOCUMENT_FIELDS = ("source_url", "kind", "locator", "content", "paper", "publication",
                    "preprint_also", "institutions", "artifact_candidates", "artifact_search",
+                   "artifact_search_detail", "artifact_outcome", "resource_audits",
                    "sources", "retrieved_at", "tool", "evidence_ids")
 
 
@@ -65,6 +67,11 @@ def normalize(payload: dict, *, body_chars: int = BODY_EXCERPT_CHARS) -> dict:
         "duplicates_merged": payload.get("duplicates_merged"),
         "dropped_out_of_range": payload.get("dropped_out_of_range"),
     }
+    if payload.get("audit"):
+        # Resource-audit coverage sits beside retrieval coverage rather than inside it: one says
+        # which services answered, the other says which papers were searched and which candidates
+        # were actually checked. Each carries the denominator its counts are out of.
+        result["audit"] = payload["audit"]
     result["documents"] = [normalize_document(item, body_chars=body_chars) for item in documents]
     excerpted = sum(1 for item in result["documents"] if item["body"]["truncated"])
     result["truncation"] = {

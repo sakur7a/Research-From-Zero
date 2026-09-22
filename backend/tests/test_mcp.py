@@ -282,3 +282,30 @@ def test_a_named_workspace_records_each_source_and_hands_back_its_id(tmp_path):
     assert workspace.identifiers() == [identifier]
     # The id lives in the structured form, not only in prose.
     assert "source_id" not in answer["result"]["content"][0]["text"]
+
+
+def test_no_tool_call_can_approve_what_a_user_has_not_approved():
+    """An external host returning `confirmed: true` is a string in a payload, not an approval.
+
+    The write paths are HTTP routes behind the client header; the tool surface is read-only. So
+    there is no argument an agent can pass that reaches a confirmation or a library import, and a
+    host that claims the user agreed has claimed something this server never asked it to carry.
+    """
+    from re0.agent.tools import TOOL_TYPES
+
+    assert all(name.startswith(("search_", "resolve_", "inspect_", "read_"))
+               or name in {"update_plan", "finish_report"} for name in TOOL_TYPES)
+    exposed = set(mcp_server.exposed_names(web_enabled=True))
+    tools = ResearchTools(None)
+    for name in ("confirm_resource", "import_audits", "import_paper", "save_observation",
+                 "create_resource"):
+        assert name not in exposed
+        try:
+            tools.execute(name, {"confirmed": True})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{name} was callable")
+        text, structured, failed = mcp_server.call_tool(tools, name, {"confirmed": True},
+                                                        web_enabled=False)
+        assert failed and structured is None and "does not expose" in text

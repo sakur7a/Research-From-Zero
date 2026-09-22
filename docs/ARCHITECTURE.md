@@ -43,9 +43,12 @@ web/agent.html + agent.js        web/index.html + app.js
 | `agent/runtime.py` | Model/tool iteration, budget reservation, cancellation, checkpoint/recovery, context bounds, report validation |
 | `agent/api.py` | UI-facing task/config endpoints, no credentials or internal messages in reads/exports |
 | `mcp_server.py` | MCP-over-stdio retrieval surface; reuses the same tool contracts and opens no database |
-| `skill_search.py` | The literature-search capability itself: query, merge, render, verify. Both entry points below call it, so there is no second copy of the logic |
+| `skill_search.py` | The literature-search capability's own surface: query, merge, render, report coverage. Both entry points below call it, so there is no second copy of the logic. It renders what `resource_audit.py` already fetched and decided |
 | `cli.py` | Thin console entry points (`re0 paper search`, `re0 doctor`, `re0 mcp`). Dispatches only; starts no LLM, and `doctor` probes the network only when asked |
-| `workspace.py` | The opt-in source store behind `--workspace`: content-addressed ids over a source's identity only, snapshots of tool results, and an import that previews, stays idempotent and refuses a bundle from another workspace |
+| `resource_audit.py` | Candidate discovery and the field-level resource audit, as data rather than as print statements. Owns the two shared budgets, the audit states and the per-artifact-class coverage; every affirmative conclusion carries the source it rests on |
+| `resource_matrix.py` | Three renderings of one row list (JSON, Markdown, CSV) for comparing 2–6 papers, plus the importable approval payload. Re-renders, never re-checks; escapes spreadsheet formulas and writes only http(s) links |
+| `workspace.py` | The opt-in source store behind `--workspace`: content-addressed ids over a source's identity only, snapshots of tool results, and an import that previews, stays idempotent and refuses a bundle from another workspace. An audit travels beside the identity, never inside it, so re-checking a repository does not mint a second source |
+| `service.py` | The library: papers, resources and an append-only observation history. Each record is labelled `observation` or `confirmation`, so a check and a human revision of it stay separately retrievable |
 | `result_model.py` | The versioned result shape (`schema_version`) that every exit shares. Unknown fields ride along under `unrecognised` instead of vanishing, and a bounded body states `content_chars`/`excerpt_chars`/`truncated` so a cut body cannot look like a short one |
 | `web/agent-core.js` | Pure status/tool presentation logic, independently tested |
 | `web/agent.js` | Task composer, model settings, polling trace, report and evidence views |

@@ -95,6 +95,155 @@ def test_check_cache_and_append_only_history(client):
     assert history[1]["status"] == "access_failed"
 
 
+AUDIT_ROW = {
+    "paper_title": "LayerKit: A Study",
+    "work_identifier": "2401.00001",
+    "work_version": "arXiv 2401.00001",
+    "resource_url": "https://github.com/lab/layerkit",
+    "resource_type": "code",
+    "candidate_origin": "摘要中自述",
+    "author_declaration": "released",
+    "author_declaration_evidence": [{"source_url": "https://arxiv.org/abs/2401.00001",
+                                     "locator": "论文摘要", "excerpt": "Code is at the repository.",
+                                     "category": "author_declaration"}],
+    "status": "metadata_readable",
+    "provider_status": "metadata_accessible",
+    "provider": "github",
+    "summary": "仓库元数据可访问。",
+    "access": "open",
+    "scope": "默认分支文件树",
+    "revision": "a" * 40,
+    "checked_at": "2026-09-22T00:00:00+00:00",
+    "verification_depth": "file_listing",
+    "coverage": {"code_training": {"state": "present", "paths": ["train.py"],
+                                   "sources": ["https://github.com/lab/layerkit/blob/"
+                                               + "a" * 40 + "/train.py"]}},
+    "licences": {"code": "apache-2.0"},
+    "limitations": ["仅检查文件名。"],
+}
+AUDIT_ITEM = {"paper": {"title": "LayerKit: A Study", "arxiv_id": "2401.00001", "authors": ["A"]},
+              "audits": [AUDIT_ROW]}
+
+
+def test_a_check_stores_the_field_level_audit_beside_the_raw_observation(client):
+    """The library's history has to answer "which artifact classes does this resource cover", not
+    only "what did the provider say". Both are stored, and the older fields keep their meaning."""
+    p = paper(client)
+    r = resource(client, p["id"], url="https://example.org/not-a-provider")
+    observation = client.post(f"/api/resources/{r['id']}/check", json={}).json()["observation"]
+    assert observation["status"] == "unsupported"
+    audit = observation["resource_audit"]
+    assert audit["status"] == "unsupported" and audit["verification_depth"] == "not_checked"
+    # An unsupported link was never checked, so it claims nothing about any artifact class.
+    assert {name: item["state"] for name, item in audit["coverage"].items()} == {
+        name: "unknown" for name in audit["coverage"]}
+    assert observation["record_kind"] == "observation"
+
+
+def test_a_human_confirmation_is_its_own_record_and_never_rewrites_the_observation(client):
+    p = paper(client)
+    # An unsupported link, so the check stores an observation without any network request.
+    r = resource(client, p["id"])
+    client.post(f"/api/resources/{r['id']}/check", json={})
+    revised = {**AUDIT_ROW, "resource_url": r["url"], "attribution": "official",
+               "attribution_evidence": [{"source_url": "https://arxiv.org/abs/2401.00001",
+                                         "locator": "论文第 3 页", "excerpt": "代码发布于该地址。"}]}
+    created = client.post(f"/api/resources/{r['id']}/confirmations", json=revised)
+    assert created.status_code == 201, created.text
+    history = client.get(f"/api/resources/{r['id']}/observations").json()
+    kinds = [row["record_kind"] for row in history]
+    # The confirmation is appended; the check it revises is still there to be read back.
+    assert kinds == ["confirmation", "observation"]
+    assert history[0]["attribution"] == "official" and history[0]["record_origin"] == "user"
+    assert history[1]["resource_audit"]["attribution"] == "unconfirmed"
+    assert history[1]["record_origin"] == "check"
+
+
+def test_a_confirmation_without_a_source_or_about_another_resource_is_refused(client):
+    p = paper(client)
+    r = resource(client, p["id"], url="https://github.com/lab/layerkit")
+    # Settling an attribution is exactly the claim that needs a source behind it, and the refusal
+    # says so: the reader was asked for evidence and did not attach any.
+    bare = client.post(f"/api/resources/{r['id']}/confirmations",
+                       json={**AUDIT_ROW, "attribution": "official"})
+    assert bare.status_code == 422 and "交叉证据" in bare.json()["detail"]
+    elsewhere = client.post(f"/api/resources/{r['id']}/confirmations",
+                            json={**AUDIT_ROW, "resource_url": "https://github.com/other/repo"})
+    assert elsewhere.status_code == 422 and "对应这个资源" in elsewhere.json()["detail"]
+    assert client.get(f"/api/resources/{r['id']}/observations").json() == []
+
+
+def test_an_audit_import_previews_then_links_idempotently_without_touching_notes(client):
+    existing = paper(client, arxiv_id="2401.00001", notes="我自己的笔记")
+    preview = client.post("/api/import/resource-audits", json={"items": [AUDIT_ITEM]})
+    assert preview.status_code == 200
+    body = preview.json()
+    assert body["dry_run"] is True and body["ready"] == 1 and body["linked"] == []
+    assert body["preview"][0]["resources"] == ["https://github.com/lab/layerkit"]
+
+    applied = client.post("/api/import/resource-audits",
+                          json={"items": [AUDIT_ITEM], "dry_run": False}).json()
+    # The paper already existed, so it is linked rather than recreated, and the notes survive.
+    assert applied["created"] == []
+    (link,) = applied["linked"]
+    assert link["paper_id"] == existing["id"]
+    assert client.get(f"/api/papers/{existing['id']}").json()["notes"] == "我自己的笔记"
+
+    stored = client.get(f"/api/papers/{existing['id']}").json()
+    (imported,) = stored["resources"]
+    assert imported["url"] == "https://github.com/lab/layerkit"
+    # The audit's declaration is transcribed, not re-judged: same vocabulary, evidence kept.
+    assert imported["claim"] == "released" and "论文摘要" in imported["claim_evidence"]
+    assert imported["ownership"] == "unconfirmed"
+    (observation,) = client.get(f"/api/resources/{imported['id']}/observations").json()
+    assert observation["record_origin"] == "import" and observation["record_kind"] == "observation"
+
+    again = client.post("/api/import/resource-audits",
+                        json={"items": [AUDIT_ITEM], "dry_run": False}).json()
+    # One resource, one observation: a second approval of the same check adds nothing.
+    assert again["linked"] == [] and len(again["skipped"]) == 1
+    assert "已导入过" in again["skipped"][0]["reason"]
+    assert len(client.get(f"/api/papers/{existing['id']}").json()["resources"]) == 1
+    assert len(client.get(f"/api/resources/{imported['id']}/observations").json()) == 1
+
+
+def test_an_import_refuses_a_record_no_source_supports(client):
+    # An audit with no rows, a paper with no title, and an attribution with no evidence are all
+    # refusals rather than invented library records.
+    response = client.post("/api/import/resource-audits", json={"items": [
+        {"paper": {"title": "No audits"}, "audits": []},
+        {"paper": {"title": ""}, "audits": [AUDIT_ROW]},
+        {"paper": {"title": "Settled"}, "audits": [{**AUDIT_ROW, "attribution": "official"}]},
+        {"paper": {"title": "Unsupported link"},
+         "audits": [{**AUDIT_ROW, "resource_url": "https://zenodo.org/records/1",
+                     "resource_type": "unknown"}]},
+    ], "dry_run": False})
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["errors"]) == 3 and body["ready"] == 1
+    # The fourth parses but its link was never checkable, so it is reported and creates nothing:
+    # an import that cannot attach a resource must not leave a bare paper behind.
+    assert body["created"] == [] and body["linked"] == []
+    assert body["skipped"] == [{"index": 3, "url": "https://zenodo.org/records/1",
+                                "reason": "链接类型不受支持，未产生审计结论"}]
+    assert client.get("/api/papers").json() == []
+
+
+def test_an_observation_recorded_before_records_were_labelled_still_reads_back(client):
+    """v0.2 data has no `record_kind`, and it was all written by the only writer that existed."""
+    p = paper(client)
+    r = resource(client, p["id"])
+    store = client.app.state.store
+    with store.db.connect() as con:
+        con.execute("INSERT INTO observations(resource_id,data,checked_at) VALUES (?,?,?)",
+                    (r["id"], json.dumps({"status": "metadata_accessible",
+                                          "checked_at": "2026-01-01T00:00:00+00:00"}),
+                     "2026-01-01T00:00:00+00:00"))
+    (row,) = client.get(f"/api/resources/{r['id']}/observations").json()
+    assert row["status"] == "metadata_accessible"
+    assert row["record_kind"] == "observation"
+
+
 def test_cascading_resource_and_observation_deletion(client):
     p = paper(client)
     r = resource(client, p["id"])

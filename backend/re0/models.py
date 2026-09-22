@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Literal
 from urllib.parse import urlsplit, urlunsplit, unquote
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -162,3 +163,161 @@ class Observation(StrictModel):
     discovered: list[dict[str, str]] = Field(default_factory=list)
     license_id: str = ""
     content_sha256: str = ""
+    # Kept beside `status` because the two answer different questions. A 404, a 429 and a timeout
+    # all collapse into an indeterminate status, and reading any of them as "not released" is the
+    # mistake this field exists to make checkable.
+    http_status: int | None = Field(default=None, ge=100, le=599)
+
+
+# The audit vocabulary is deliberately coarse and closed. Every state answers "what did the check
+# establish", never "does the resource exist": `access_failed` and `not_found_in_scope` are both
+# statements about the check, and reading either as "not open source" is the mistake this exists to
+# prevent. The provider's own status is kept beside it, so a 404 and a 429 stay distinguishable.
+AUDIT_STATES = ("not_checked", "candidate_located", "metadata_readable", "access_required",
+                "partially_available", "access_failed", "not_found_in_scope", "unsupported")
+AUDIT_LABELS = {
+    "not_checked": "未检查",
+    "candidate_located": "候选已定位",
+    "metadata_readable": "元数据可读",
+    "access_required": "需申请",
+    "partially_available": "部分可用",
+    "access_failed": "访问失败",
+    "not_found_in_scope": "检查范围内未找到",
+    "unsupported": "不支持",
+}
+
+# Per-artifact-class coverage. `not_applicable` and `unknown` are different answers and are kept
+# apart: "this paper needs no checkpoint" is a finding, "we could not tell" is a gap.
+AUDIT_COMPONENTS = ("code_training", "code_inference", "code_evaluation", "checkpoint",
+                    "dataset", "data_split", "preprocessing", "environment")
+COMPONENT_STATES = ("present", "absent_in_scope", "not_applicable", "unknown",
+                    "requires_access", "check_failed")
+COMPONENT_LABELS = {
+    "present": "有候选",
+    "absent_in_scope": "检查范围内未见",
+    "not_applicable": "不适用",
+    "unknown": "未知",
+    "requires_access": "需申请",
+    "check_failed": "检查未完成",
+}
+# Which artifact classes a declared licence is read for. Each is stored as its own claim from its
+# own source; nothing here concludes anything about permission to use.
+LICENCE_COMPONENTS = ("code", "checkpoint", "dataset")
+
+VERIFICATION_DEPTHS = ("not_checked", "metadata_only", "file_listing", "content_read")
+
+
+class ComponentFinding(StrictModel):
+    """One artifact class inside one resource, and where that answer came from.
+
+    A state with no source is not an audit result, so the affirmative ones are required to carry
+    one: `present` points at the file, and `absent_in_scope` points at the listing that was searched
+    — because "not in this listing" is only meaningful next to the listing.
+    """
+
+    state: Literal["present", "absent_in_scope", "not_applicable", "unknown",
+                   "requires_access", "check_failed"]
+    paths: list[str] = Field(default_factory=list, max_length=4)
+    sources: list[str] = Field(default_factory=list, max_length=4)
+
+    @field_validator("paths", "sources")
+    @classmethod
+    def bounded(cls, values):
+        if any(len(item) > 600 for item in values):
+            raise ValueError("路径或来源链接过长")
+        return values
+
+    @model_validator(mode="after")
+    def claims_carry_a_source(self):
+        if self.state in {"present", "absent_in_scope"} and not self.sources:
+            raise ValueError(f"「{COMPONENT_LABELS[self.state]}」需要附可跳转的来源")
+        return self
+
+
+class ResourceAudit(StrictModel):
+    """One resource candidate for one paper, audited field by field.
+
+    A row is an *observation about a check*, not a verdict about a resource. Everything affirmative
+    has to point at a source; everything else stays `unknown` rather than being rounded down to a
+    negative, because a negative here reads as "the authors did not release it".
+    """
+
+    paper_title: str = Field(min_length=1, max_length=600)
+    work_identifier: str = Field(default="", max_length=300)
+    work_version: str = Field(default="", max_length=200)
+    resource_url: str = Field(min_length=1, max_length=2000)
+    resource_type: Literal["code", "checkpoint", "dataset", "evaluation", "environment",
+                           "demo", "unknown"] = "unknown"
+    candidate_origin: str = Field(default="", max_length=300)
+    # A name match is a candidate. `official` needs cross-evidence a reader can open.
+    attribution: Literal["unconfirmed", "official", "third_party"] = "unconfirmed"
+    attribution_evidence: list[Evidence] = Field(default_factory=list, max_length=8)
+    author_declaration: Literal["undeclared", "promised", "released"] = "undeclared"
+    author_declaration_evidence: list[Evidence] = Field(default_factory=list, max_length=8)
+    status: Literal["not_checked", "candidate_located", "metadata_readable", "access_required",
+                    "partially_available", "access_failed", "not_found_in_scope", "unsupported"]
+    provider_status: str = Field(default="", max_length=120)
+    provider: str = Field(default="", max_length=60)
+    summary: str = Field(default="", max_length=1000)
+    # Whether a reader can obtain the resource. There is no "failed" value: a check that did not
+    # complete leaves this unknown, and claiming an access failure would be a second guess about a
+    # resource nobody reached.
+    access: Literal["open", "requires_application", "not_applicable", "unknown"] = "unknown"
+    scope: str = Field(default="", max_length=600)
+    revision: str = Field(default="", max_length=120)
+    checked_at: str = Field(default="", max_length=60)
+    verification_depth: Literal["not_checked", "metadata_only", "file_listing",
+                                "content_read"] = "not_checked"
+    coverage: dict[str, ComponentFinding] = Field(default_factory=dict)
+    evidence: list[Evidence] = Field(default_factory=list, max_length=8)
+    licences: dict[str, str] = Field(default_factory=dict)
+    version_match: Literal["matched", "mismatched", "unknown"] = "unknown"
+    version_evidence: str = Field(default="", max_length=2000)
+    limitations: list[str] = Field(default_factory=list, max_length=20)
+
+    _url = field_validator("resource_url")(safe_url)
+
+    @field_validator("coverage")
+    @classmethod
+    def known_components(cls, value):
+        unknown = sorted(set(value) - set(AUDIT_COMPONENTS))
+        if unknown:
+            raise ValueError(f"未知的资源类别：{'、'.join(unknown)}")
+        return value
+
+    @field_validator("licences")
+    @classmethod
+    def known_licence_components(cls, value):
+        unknown = sorted(set(value) - set(LICENCE_COMPONENTS))
+        if unknown:
+            raise ValueError(f"许可证只能按 {'、'.join(LICENCE_COMPONENTS)} 记录")
+        if any(len(item) > 200 for item in value.values()):
+            raise ValueError("许可证标识过长")
+        return value
+
+    @field_validator("limitations")
+    @classmethod
+    def bounded_limitations(cls, value):
+        if any(not item.strip() or len(item) > 1000 for item in value):
+            raise ValueError("限制说明须为 1–1000 字符")
+        return value
+
+    @model_validator(mode="after")
+    def affirmative_claims_need_a_source(self):
+        """The same rule `ResourceInput` already enforces, applied to the audit row."""
+        if self.attribution != "unconfirmed" and not self.attribution_evidence:
+            raise ValueError("标记官方或第三方归属时请附可定位的交叉证据")
+        if self.author_declaration != "undeclared" and not self.author_declaration_evidence:
+            raise ValueError("记录作者发布声明时请附原文出处")
+        if self.version_match != "unknown" and not self.version_evidence:
+            raise ValueError("判断论文与资源版本是否对应时请附依据")
+        return self
+
+    @property
+    def label(self) -> str:
+        return AUDIT_LABELS[self.status]
+
+    def unresolved(self) -> list[str]:
+        """Components this row could not answer, named — so a gap is not read as an absence."""
+        return [name for name, finding in self.coverage.items()
+                if finding.state in {"unknown", "check_failed"}]

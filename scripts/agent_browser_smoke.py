@@ -38,15 +38,15 @@ def run(output):
             response=client.request(options.get('method','GET'),path,headers=options.get('headers'),content=options.get('body'))
             return {'status':response.status_code,'body':response.text}
         page.expose_function('re0TestRequest',bridge)
-        html=(ROOT/'web/agent.html').read_text()
+        html=(ROOT/'web/agent.html').read_text(encoding="utf-8")
         html=re.sub(r'<link[^>]+>','',html)
         html=re.sub(r'<script[^>]*>.*?</script>','',html,flags=re.S)
-        html=html.replace('</head>','<style>'+(ROOT/'web/theme.css').read_text()+'\n'+(ROOT/'web/agent.css').read_text()+'</style></head>')
+        html=html.replace('</head>','<style>'+(ROOT/'web/theme.css').read_text(encoding="utf-8")+'\n'+(ROOT/'web/agent.css').read_text(encoding="utf-8")+'</style></head>')
         page.set_content(html)
         page.evaluate('''()=>{window.fetch=async(path,options={})=>{const r=await window.re0TestRequest(path,{method:options.method||'GET',headers:options.headers||{},body:options.body});return new Response(r.body,{status:r.status,headers:{'Content-Type':'application/json'}});};}''')
         js=[]
         for name in ['core.js','agent-core.js','theme.js','agent.js']:
-            text=(ROOT/'web'/name).read_text()
+            text=(ROOT/'web'/name).read_text(encoding="utf-8")
             text=re.sub(r'^import .*?;\n','',text,flags=re.M)
             text=re.sub(r'\bexport (?=(?:async )?(?:function|const|let|class))','',text)
             js.append(text)
@@ -155,7 +155,7 @@ def run(output):
         assert not errors,errors
         # 先落盘/打印报告再关闭浏览器:个别环境在浏览器进程回收阶段会中断,结果不应丢失。
         result={'mode':'offline Chromium + real TestClient + fixture HTTP; no live model','passed':checked,'browser_errors':errors}
-        (output/'agent-browser-report.json').write_text(json.dumps(result,indent=2,ensure_ascii=False))
+        (output/'agent-browser-report.json').write_text(json.dumps(result,indent=2,ensure_ascii=False), encoding="utf-8")
         print(json.dumps(result,ensure_ascii=False,indent=2))
         browser.close()
 

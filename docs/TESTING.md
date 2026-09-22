@@ -574,3 +574,68 @@ MCP 的 `structuredContent` **都写到这一份**；摘要**从结构渲染**�
 **#3 未完成项**：skill 打包分发（把 skill 目录作为包数据交付 + `re0 skill install --target`
 带预览/冲突提示/不覆盖）、SKILL.md 按 Agent Skills 规范拆 `references/`、
 以及"至少一个实际宿主按 #1 记录安装与调用结果"（依赖 #1 的宿主确认）。
+
+## 2026-09-23（Issue #6：资源审计闭环）
+
+### 本地实际执行
+
+环境：Windows，本仓库新建的 `.venv`（Python 3.12.10，`pip install -e '.[test]'`，另装 `playwright`
+以跑浏览器 smoke）。**CI 矩阵是 3.11/3.13，本机 3.12 不在其中**，所以本地绿不等于 CI 绿。
+
+- `python -m pytest` → **224 passed**（本轮前基线 189）。
+- `npm test` → **31 pass**（基线 30）；`npm run check` 通过。
+- `scripts/browser_smoke.py` → 10 步全过、`page_errors: []`。
+- `scripts/agent_browser_smoke.py` → 10 步全过、`browser_errors: []`（含
+  `human_approval_idempotent_import`、`paper_evidence_renders_as_a_two_column_card`）。
+- `scripts/http_smoke.py` → 路由 200，guards `missing-client-header:403 / no-model:422 /
+  cross-origin:403`，`tasks_created: 0`。
+
+**顺带修掉一个让上述 smoke 在本机根本跑不起来的 bug**：三个脚本用 `read_text()` / `write_text()`
+不带 encoding，在 GBK locale 下读 UTF-8 的 `web/theme.css` 直接 `UnicodeDecodeError`。AGENTS.md 要求
+UI 改动必须跑这两个浏览器脚本，所以这不是可选清理。8 处全部改为显式 `encoding="utf-8"`，
+之后**不加 `PYTHONUTF8=1` 也能跑通**（已复验）。
+
+### 真实来源实测（无模型、无 `GITHUB_TOKEN`，匿名额度）
+
+三次真实运行，全部只打公开学术/资源接口：
+
+1. `--query "LoRA low-rank adaptation of large language models" --sources openalex --max-papers 2
+   --find-artifacts 1 --verify 1`。**这一次抓到了两个 fixture 没抓到的 bug**（见下）。
+2. `--queries "LoRA low-rank adaptation|RevealLayer image decomposition" --sources openalex,arxiv
+   --max-papers 4 --find-artifacts 3 --verify 2 --json --resource-matrix`：12 篇。
+   - GitHub 核验成功两例：`microsoft/LoRA` → `partially_available`，扫描到 1189 个文件条目，
+     `checkpoint=有候选` 指向 `examples/NLU/roberta_base_lora_mnli.bin` 等**钉在 commit
+     `c4593f0` 上的链接**，`licences.code=MIT`，`author_declaration=released` 且证据是摘要原句
+     "We release a package that facilitates the integration of LoRA with PyTorch models…"；
+     `pUmpKin-Co/MTL-LoRA` → `metadata_readable`，223 个文件条目。
+   - **adapter 规则在真实仓库上命中**：`microsoft/LoRA` 的权重文件名带 `lora`，因此状态从
+     `metadata_readable` 降为 `partially_available`，并写明"通常需要对应的基础模型"。
+     这不是为测试造的情形。
+   - **`huggingface.co` 在本机不可达**（6 次端点失败），3 篇论文因此是 `partial` 而不是
+     `searched`，失败清单进了 `artifact_search_detail.failures` 和 `audit.failures`。
+   - 覆盖分母（真实输出）：分母 12 篇，检索完成 0 / 部分完成 3 / 全部失败 0 / 无项目名 5 /
+     未检索 4，名称检索预算 3 已用 3；候选 12（作者自述 3、名称匹配 9），已核验 2、未核验 10。
+3. 修完之后复跑 `microsoft/LoRA`：结论一致，且 adapter 这条限制现在排在打印的第一条
+   （此前被三条方法学样板条款挤到第 4 位，而 CLI 只打印前 2 条）。
+
+### 真实运行抓到、fixture 没抓到的两个 bug
+
+- **跑过但失败的检查被当成"没人检查过"。** 失败的检查没有任何 depth，而"是否核验过"是按
+  `verification_depth` 判断的，于是一行 `status=access_failed` 的记录在汇总里被算成未核验、
+  在终端被打印成"未核验"。改为按 `status` 判断，并加回归测试。
+- **没有项目名的论文白占名称检索预算。** `--find-artifacts 3` 实际检索不足 3 篇，而被跳过的那篇
+  还被告知"预算用尽"——为一个本来就不可能发生的检索给出了一个关于花钱的理由。现在只有标题里
+  真有项目名时才消耗预算。
+
+### 尚未验证
+
+- **`huggingface.co` 全程不可达**，所以 `access_required`／gated、Hub 名称检索、Hub 数据集的
+  许可证归属**只有 fixture 覆盖，没有真实服务实测**。恢复网络后需补测。
+- **没有配 `GITHUB_TOKEN`**，认证额度（5000/小时）与搜索 30/分钟路径未实测。
+- **没有跑真实模型**：本轮不回答"agent 会不会正确使用这套状态词表"，那是 #7 的评测通道。
+- **确认与导入两条路由只用 FastAPI TestClient 测过，没有浏览器 UI**，因为还没有 UI（属 #14）。
+- **`version_match` 在自动路径下永远是 `unknown`**：没有任何机制建立论文版本与资源版本的对应，
+  这是未实现的判断，不是通过的测试。`coverage` 的 `not_applicable`（如"这篇论文不需要
+  checkpoint"）同样**只能由人工确认写入**，自动路径不会产生它。
+- 官方归属在自动路径下永远是 `unconfirmed`，**包括 `microsoft/LoRA` 这种一眼可见的官方仓库**；
+  晋升为 `official` 需要人工确认并附可定位交叉证据，本轮没有做过一次真实晋升。

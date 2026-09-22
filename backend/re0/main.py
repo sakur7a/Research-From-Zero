@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .agent.api import agent_router
@@ -20,9 +20,10 @@ from .agent.runtime import AgentRuntime
 from .agent.model import ModelError
 from . import __version__
 from .db import Database
-from .models import MetadataRequest, PaperInput, ResourceInput, TopicInput
+from .models import MetadataRequest, PaperInput, ResourceAudit, ResourceInput, TopicInput
 from .providers import ProviderError, check_resource, resolve_metadata
-from .service import Store, bibtex_export
+from .resource_audit import audit_from_observation
+from .service import Store, bibtex_export, validation_message
 
 ROOT = Path(__file__).resolve().parents[2]
 WEB = ROOT / "web"
@@ -31,6 +32,15 @@ WEB = ROOT / "web"
 class CslImport(BaseModel):
     model_config = ConfigDict(extra="forbid")
     items: list[dict] = Field(max_length=500)
+    dry_run: bool = True
+
+
+class AuditImport(BaseModel):
+    """A preview by default, like the CSL import: an approval writes to the library, so the caller
+    sees what it would link before it does."""
+
+    model_config = ConfigDict(extra="forbid")
+    items: list[dict] = Field(max_length=200)
     dry_run: bool = True
 
 
@@ -137,6 +147,20 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None) -
     def observations(resource_id: str):
         return store.history(resource_id)
 
+    @app.post("/api/resources/{resource_id}/confirmations", status_code=201)
+    def confirm(resource_id: str, revision: dict):
+        # A person confirming what a check found. Stored beside the observations rather than over
+        # them, so the machine's reading and the human's stay separately retrievable.
+        #
+        # Validated here instead of by the request parser, so the refusal can say which source was
+        # missing: the app-wide handler hides every validation message because model-configuration
+        # payloads carry secrets, and this body carries none.
+        try:
+            audit = ResourceAudit.model_validate(revision)
+        except ValidationError as exc:
+            raise HTTPException(422, validation_message(exc)) from exc
+        return store.confirm_resource(resource_id, audit)
+
     @app.delete("/api/resources/{resource_id}", status_code=204)
     def delete_resource(resource_id: str):
         store.delete_resource(resource_id)
@@ -160,8 +184,18 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None) -
                 age = (datetime.now(timezone.utc) - datetime.fromisoformat(history[0]["checked_at"])).total_seconds()
                 if age < 60:
                     return {"cached": True, "observation": history[0]}
-            observation = check_resource(resource["url"], transport).model_dump(mode="json")
+            checked = check_resource(resource["url"], transport)
+            observation = checked.model_dump(mode="json")
             observation["paper_version_snapshot"] = {"arxiv_id": paper["arxiv_id"], "version_label": paper["version_label"], "doi": paper["doi"]}
+            # The field-level reading travels with the raw check, so the library's history can
+            # answer "which artifact classes does this resource cover" and not only "what did the
+            # provider say". Additive: the fields already stored keep their meaning.
+            observation["resource_audit"] = audit_from_observation(
+                resource["url"], checked,
+                candidate={"url": resource["url"], "origin": "库内资源"},
+                paper={"title": paper["title"], "abstract": "", "arxiv_id": paper["arxiv_id"],
+                       "doi": paper["doi"]},
+                publication={"venue": paper.get("venue", "")}).model_dump(mode="json")
             return {"cached": False, "observation": store.save_observation(resource_id, observation)}
         finally:
             with active_guard:
@@ -190,6 +224,10 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None) -
     @app.post("/api/import/csl")
     def import_csl(data: CslImport):
         return store.import_csl(data.items, data.dry_run)
+
+    @app.post("/api/import/resource-audits")
+    def import_resource_audits(data: AuditImport):
+        return store.import_audits(data.items, data.dry_run)
 
     @app.get("/api/export")
     def export(format: str = Query("json", pattern="^(json|bibtex)$")):

@@ -83,6 +83,18 @@ test('a card never invents an abstract, a link, a year or a coverage claim',()=>
  assert.equal(paperCard(undefined).title,'未命名论文');
 });
 
+test('a search that did not finish is not labelled as one that was never run',()=>{
+ // Both are gaps, but only one is a rate limit the reader can fix by re-running. Calling either
+ // "未做开源检索" would report a failure as a choice.
+ assert.match(paperCard({artifact_search:'partial',paper:{}}).artifactCoverage,/只完成了一部分/);
+ assert.match(paperCard({artifact_search:'failed',paper:{}}).artifactCoverage,/不代表没有开源/);
+ assert.doesNotMatch(paperCard({artifact_search:'partial',paper:{}}).artifactCoverage,/未做开源检索/);
+ assert.doesNotMatch(paperCard({artifact_search:'failed',paper:{}}).artifactCoverage,/未做开源检索/);
+ // A completed search still says nothing, and an unknown state falls back rather than inventing one.
+ assert.equal(paperCard({artifact_search:'searched',paper:{}}).artifactCoverage,'');
+ assert.match(paperCard({artifact_search:'some_future_state',paper:{}}).artifactCoverage,/未做开源检索/);
+});
+
 test('artifact links are shortened for display but still validated before rendering',()=>{
  assert.equal(shortUrl('https://github.com/360CVGroup/RevealLayer'),'github.com/360CVGroup/RevealLayer');
  assert.equal(shortUrl('https://huggingface.co/datasets/qihoo360/RevealLayer-100K/'),'huggingface.co/datasets/qihoo360/RevealLayer-100K');

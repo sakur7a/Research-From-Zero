@@ -12,12 +12,13 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
+from re0 import resource_audit
 from re0.agent.schemas import PaperSearchArgs
 from re0.agent.tools import ResearchTools
 from re0.env_file import load, parse
 from re0.literature import (arxiv_id_from_doi, artifact_urls, classify_venue, finalize_publication,
                             in_year_range, merge_records, paper_keys, paper_record)
-from re0.models import Observation, PaperInput
+from re0.models import Evidence, Observation, PaperInput
 from re0.providers import ProviderError
 
 OPENALEX = {
@@ -326,9 +327,18 @@ def load_skill_wrapper():
 
 
 def observation():
+    """A check as `github_check` really returns it: the file tree is itself evidence, so an
+    audit conclusion can point at the listing it came from."""
+    sha = "a" * 40
     return Observation(status="metadata_accessible", summary="仓库元数据可访问；扫描到 5 个文件条目。",
                        provider="github", depth="file_listing", scope="仅限公开元数据接口",
-                       indicators={"training": ["train.py"]}, limitations=["仅检查默认分支文件名。"])
+                       revision=sha, indicators={"training": ["train.py"]},
+                       evidence=[Evidence(source_url=f"https://github.com/a/b/tree/{sha}",
+                                          locator="GitHub Git Trees API", excerpt=f"commit={sha}"),
+                                 Evidence(source_url=f"https://github.com/a/b/blob/{sha}/train.py",
+                                          locator="train.py", excerpt="文件树中的候选路径：train.py",
+                                          category="file_name_candidate")],
+                       limitations=["仅检查默认分支文件名。"])
 
 
 def skill_document(title, abstract):
@@ -348,17 +358,29 @@ def test_open_source_candidates_reach_the_document_so_json_cannot_lose_them(caps
         {"source_url": "https://github.com/360CVGroup/RevealLayer",
          "content": '{"full_name": "360CVGroup/RevealLayer"}'}]})
     document = skill_document(REVEAL_LAYER, "an abstract that carries no link at all")
-    module.print_document(1, document, False, 0, tools, 1)
+    resource_audit.audit_document(document, tools, resource_audit.Budget(find=1))
+    module.print_document(1, document, False)
     capsys.readouterr()
     assert document["artifact_search"] == "searched"
     assert document["artifact_candidates"] == [
         {"url": "https://github.com/360CVGroup/RevealLayer",
          "origin": "GitHub 名称检索·标识名与项目名一致"}]
+    # An unverified candidate is still a row: dropping it would make "not checked" read as "checked
+    # and found wanting", which is the confusion the audit states exist to prevent.
+    assert document["artifact_outcome"] == "candidate_located"
+    (row,) = document["resource_audits"]
+    assert row["status"] == "not_checked" and row["verification_depth"] == "not_checked"
     # And the paper's own declared link is carried too, marked by where it came from.
     declared = skill_document("Other: A Paper", "Code at https://github.com/lab/other")
-    module.print_document(1, declared, False, 0, None, 0)
+    resource_audit.audit_document(declared, None, resource_audit.Budget())
+    module.print_document(1, declared, False)
     capsys.readouterr()
     assert declared["artifact_candidates"] == [{"url": "https://github.com/lab/other", "origin": "摘要中自述"}]
+    # The authors pointing at their own repository is a declaration with a source, so it is recorded
+    # as one rather than as a bare flag.
+    (claim,) = declared["resource_audits"]
+    assert claim["author_declaration"] == "released"
+    assert claim["author_declaration_evidence"][0]["excerpt"] == "Code at https://github.com/lab/other"
 
 
 def test_the_standing_rules_are_written_into_the_project_guidance():
@@ -454,33 +476,50 @@ def test_a_venue_hint_is_prepended_and_stays_optional():
 def test_the_verification_budget_is_global_and_unchecked_links_are_still_listed(monkeypatch, capsys):
     module = load_skill_module()
     checked = []
-    monkeypatch.setattr(module, "check_resource", lambda url: checked.append(url) or observation())
+    monkeypatch.setattr(resource_audit, "check_resource",
+                        lambda url, transport=None: checked.append(url) or observation())
     documents = [skill_document("First", "Code at https://github.com/a/b"),
                  skill_document("Second", "Code at https://github.com/c/d")]
-    verify_left = 1
+    budget = resource_audit.Budget(verify=1)
     for index, document in enumerate(documents, start=1):
-        used, _ = module.print_document(index, document, False, verify_left, None, 0)
-        verify_left -= used
+        resource_audit.audit_document(document, None, budget)
+        module.print_document(index, document, False)
     # The cap is global, not per paper: one check across two papers, never two.
     assert checked == ["https://github.com/a/b"]
+    assert budget.verify_left == 0
     printed = capsys.readouterr().out
-    assert "status metadata_accessible" in printed and "candidate files: training=1" in printed
+    # Both vocabularies survive: our state, and the provider status it was derived from. A 404 and
+    # a 429 both land on `access_failed`, so dropping the provider's own value loses the difference.
+    assert "状态 元数据可读（metadata_readable）；提供商状态 metadata_accessible" in printed
+    assert "code_training=有候选" in printed
     # A link left unchecked is reported as a candidate, never as a failure.
     assert "开源候选（摘要中自述，未核验）: https://github.com/c/d" in printed
+    # And the run reports its own denominator, so "1 verified" cannot be read as "1 exists".
+    coverage = resource_audit.run_coverage(documents, budget)
+    assert coverage["candidates"]["found"] == 2 and coverage["candidates"]["verified"] == 1
+    assert coverage["candidates"]["unchecked"] == 1 and coverage["candidates"]["budget"] == 1
+    assert coverage["audits"]["metadata_readable"] == 1 and coverage["audits"]["not_checked"] == 1
 
 
 def test_a_check_that_raises_is_reported_as_unverified_not_as_absent(monkeypatch, capsys):
     module = load_skill_module()
 
-    def explode(url):
+    def explode(url, transport=None):
         raise RuntimeError("boom: /Users/someone/secret/path")
 
-    monkeypatch.setattr(module, "check_resource", explode)
-    module.print_document(1, skill_document("First", "Code at https://github.com/a/b"), False, 1)
+    monkeypatch.setattr(resource_audit, "check_resource", explode)
+    document = skill_document("First", "Code at https://github.com/a/b")
+    resource_audit.audit_document(document, None, resource_audit.Budget(verify=1))
+    module.print_document(1, document, False)
     printed = capsys.readouterr().out
-    assert "unverified" in printed
+    assert "检查未完成" in printed
     # No traceback and no internal path in the output.
     assert "boom" not in printed and "Traceback" not in printed and "secret" not in printed
+    # The data says the same thing: an exception is not an access failure of the resource, and it
+    # is not "checked and absent" either. `provider_status` keeps the two reasons apart.
+    (row,) = document["resource_audits"]
+    assert row["status"] == "not_checked" and row["provider_status"] == "check_error"
+    assert row["coverage"]["checkpoint"]["state"] == "unknown"
 
 
 def test_env_file_parsing_is_conservative(tmp_path):
@@ -572,16 +611,14 @@ REVEAL_LAYER = ("RevealLayer: Disentangling Hidden and Visible Layers via "
 
 
 def test_short_name_reads_the_project_name_a_paper_titles_itself_with():
-    module = load_skill_module()
-    assert module.short_name(REVEAL_LAYER) == "RevealLayer"
-    assert module.short_name("Stable-Layers: Fine-Tuning Image Layer Decomposition Models") == "Stable-Layers"
-    assert module.short_name("UniWorld-Design: From Pixel Generation to Layer-Native Design") == "UniWorld-Design"
+    assert resource_audit.short_name(REVEAL_LAYER) == "RevealLayer"
+    assert resource_audit.short_name("Stable-Layers: Fine-Tuning Image Layer Decomposition Models") == "Stable-Layers"
+    assert resource_audit.short_name("UniWorld-Design: From Pixel Generation to Layer-Native Design") == "UniWorld-Design"
     # A sentence-like head is refused: searching a sentence only returns noise.
-    assert module.short_name("Referring Layer Decomposition") == ""
+    assert resource_audit.short_name("Referring Layer Decomposition") == ""
 
 
 def test_a_name_search_returns_candidates_with_a_confidence_marker():
-    module = load_skill_module()
     tools = StubTools({
         ("search_repositories", None): [{
             "source_url": "https://github.com/360CVGroup/RevealLayer",
@@ -591,19 +628,18 @@ def test_a_name_search_returns_candidates_with_a_confidence_marker():
             "content": '{"id": "qihoo360/RevealLayer"}'}],
         ("search_hub", "datasets"): [],
     })
-    failures = []
-    found = module.artifact_candidates(tools, "RevealLayer", REVEAL_LAYER, 3, failures)
-    assert [candidate["url"] for candidate in found] == [
+    found = resource_audit.discover(skill_document(REVEAL_LAYER, "no link here"), tools)
+    assert [candidate["url"] for candidate in found["candidates"]] == [
         "https://github.com/360CVGroup/RevealLayer", "https://huggingface.co/qihoo360/RevealLayer"]
     # A description that repeats the paper title is the strongest cheap signal; an identifier
     # ending in the project name is next. Neither proves authorship.
-    assert "描述与论文标题相符" in found[0]["origin"]
-    assert "标识名与项目名一致" in found[1]["origin"]
-    assert failures == []
+    assert "描述与论文标题相符" in found["candidates"][0]["origin"]
+    assert "标识名与项目名一致" in found["candidates"][1]["origin"]
+    assert found["failures"] == [] and found["state"] == "searched"
+    assert found["project_name"] == "RevealLayer"
 
 
 def test_a_fuzzy_name_match_is_marked_weak_and_sorted_last():
-    module = load_skill_module()
     # One query for "Stable-Layers" really does return these two, and the reader has to be able
     # to tell them apart from the official repository in the same list.
     tools = StubTools({
@@ -618,12 +654,15 @@ def test_a_fuzzy_name_match_is_marked_weak_and_sorted_last():
         ("search_hub", "models"): [],
         ("search_hub", "datasets"): [],
     })
-    found = module.artifact_candidates(
-        tools, "Stable-Layers", "Stable-Layers: Fine-Tuning Image Layer Decomposition Models", 3, [])
+    document = skill_document("Stable-Layers: Fine-Tuning Image Layer Decomposition Models", "")
+    found = resource_audit.discover(document, tools)
     # The likely official repository is first even though the search returned it second.
-    assert found[0]["url"] == "https://github.com/Stability-AI/Stable-Layers"
-    assert "标识名与项目名一致" in found[0]["origin"]
-    assert all("仅名称匹配" in candidate["origin"] for candidate in found[1:])
+    assert found["candidates"][0]["url"] == "https://github.com/Stability-AI/Stable-Layers"
+    assert "标识名与项目名一致" in found["candidates"][0]["origin"]
+    assert all("仅名称匹配" in candidate["origin"] for candidate in found["candidates"][1:])
+    # And a name match never becomes an attribution on its own.
+    resource_audit.audit_document(document, tools, resource_audit.Budget(find=1))
+    assert all(row["attribution"] == "unconfirmed" for row in document["resource_audits"])
 
 
 def test_a_failed_name_search_is_retried_and_never_reported_as_no_result(capsys):
@@ -637,31 +676,44 @@ def test_a_failed_name_search_is_retried_and_never_reported_as_no_result(capsys)
 
     document = skill_document("RevealLayer: Disentangling Hidden and Visible Layers",
                               "an abstract that carries no link at all")
-    module.print_document(1, document, False, 0, Flaky(), 1)
+    resource_audit.audit_document(document, Flaky(), resource_audit.Budget(find=1))
+    module.print_document(1, document, False)
     printed = capsys.readouterr().out
     # A failure must not be reported as "found nothing": those are different claims.
     assert "检索未完成" in printed and "这不代表没有开源" in printed
     assert "也无结果" not in printed
     # Two attempts per endpoint, three endpoints.
     assert len(calls) == 6
+    # The failure list reaches the document, so the JSON exit cannot lose it: without it a
+    # total failure was indistinguishable from a search that completed and found nothing.
+    assert document["artifact_search"] == "failed"
+    assert len(document["artifact_search_detail"]["failures"]) == 3
+    assert [item["ok"] for item in document["artifact_search_detail"]["endpoints"]] == [False] * 3
+    assert document["artifact_outcome"] == "access_failed"
 
 
 def test_a_disabled_name_search_is_not_reported_as_one_that_found_nothing(capsys):
     module = load_skill_module()
     document = skill_document(REVEAL_LAYER, "an abstract that carries no link at all")
-    module.print_document(1, document, False, 0, StubTools({}), 0)
+    resource_audit.audit_document(document, StubTools({}), resource_audit.Budget(find=0))
+    module.print_document(1, document, False)
     printed = capsys.readouterr().out
     assert "检索未开启" in printed
     assert "也无结果" not in printed
+    assert document["artifact_search"] == "not-run"
+    assert document["artifact_search_detail"]["reason_not_run"] == "disabled"
 
 
 def test_the_artifact_line_prints_even_when_the_abstract_has_no_link(capsys):
     module = load_skill_module()
     document = skill_document("No links at all", "We release nothing in this paper.")
-    module.print_document(1, document, False, 0)
+    resource_audit.audit_document(document, StubTools({}), resource_audit.Budget(find=1))
+    module.print_document(1, document, False)
     printed = capsys.readouterr().out
     # An absent artifact module has to read as a finding, not as an omission.
     assert "开源线索: 摘要中未提及" in printed
+    assert document["artifact_search"] == "skipped"
+    assert document["artifact_outcome"] == "not_checked"
 
 def test_the_cli_is_reachable_without_installing_a_console_script():
     """The console script only exists after an install, and an install needs a build backend. A
@@ -681,6 +733,7 @@ def test_the_documented_flag_contract_matches_the_parser():
     and `--sources` was described as accepting a comma-separated subset while the code refuses more
     than one."""
     from re0 import skill_search
+    from re0.agent.tools import TOOL_TYPES
     parser = skill_search.build_parser()
     options = {action.dest: action for action in parser._actions}
     assert options["find_artifacts"].default == 10
@@ -703,6 +756,24 @@ def test_the_documented_flag_contract_matches_the_parser():
         assert "0\u20135，默认 0" not in prose
     assert "默认对前 10 篇生效" in readme
     assert "first 10 papers" in skill
+
+    # The audit surfaces. A rule that only reaches the CLI is invisible to the agent inside the
+    # product, and a stale state table is worse than none: it reads as authority.
+    assert "--resource-matrix" in help_text
+    for prose in (readme, skill):
+        assert "--resource-matrix" in prose
+        # The vocabulary has to be spelled out wherever a reader decides what a status means.
+        for state in ("not_found_in_scope", "access_required", "partially_available"):
+            assert state in prose, f"a reader of this surface cannot interpret {state}"
+        # And the two answers that must never be collapsed into one.
+        assert "not_applicable" in prose and "unknown" in prose
+    # The old vocabulary described the provider rather than the check; a table still keyed on it
+    # would tell a reader that a 404 is "indeterminate" and an empty repository is a file count.
+    assert "candidate files: training=" not in skill
+
+    description = TOOL_TYPES["inspect_resource"][1]
+    assert "not_found_in_scope" in description and "provider_status" in description
+    assert "adapter" in description and "attribution" in description
 
 
 def test_the_console_entry_point_keeps_no_model_and_byok_modes_apart(capsys):

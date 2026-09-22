@@ -147,18 +147,43 @@ python skills/re0-paper-search/scripts/paper_search.py \
 
 第一层永远生效：给出上面的链接，并把**作者自己在摘要里写的** code／data 链接抽出来，标为「开源线索（摘要中自述，未核验）」。
 
-第二层是 `--verify N`（0–8，默认 0）：对前 N 个候选链接跑 Re0 已有的**有界资源核验**，把结果显示在该论文下面：
+第二层是 `--verify N`（0–8，默认 0）：对前 N 个候选链接跑 Re0 已有的**有界资源核验**，并把结果作为**字段级审计记录**写进 `--json`（`documents[].resource_audits`），而不只是打印一段摘要。下面是 2026-09-22 对 `microsoft/LoRA` 的一次真实运行（匿名额度，未配 `GITHUB_TOKEN`）：
 
 ```
      → https://github.com/microsoft/LoRA
-       status metadata_accessible · depth file_listing · provider github
+       状态 部分可用（partially_available）；提供商状态 metadata_accessible · 深度 file_listing · 提供商 github
        仓库元数据可访问；扫描到 1189 个文件条目，功能与可复现性尚未验证。
-       candidate files: training=12, inference=1, evaluation=12, weights=2, data=1, environment=12
+       资源类别: code_training=有候选, code_inference=有候选, code_evaluation=有候选, checkpoint=有候选,
+                 dataset=有候选, data_split=有候选, preprocessing=有候选, environment=有候选
+       许可证（来源声明，不是使用权限结论）: code=MIT
+       limit: 检测到 adapter/LoRA 形式的权重候选（examples/NLU/roberta_base_lora_mnli.bin、
+              examples/NLU/roberta_large_lora_mnli.bin），通常需要对应的基础模型才能使用；本次未验证该对应关系。
+       limit: 未建立论文版本与资源版本的对应关系；version_match=unknown 表示未判断，不表示不匹配。
 ```
 
-这正好补上"光看链接判断不了"的两种情况：**链接真实但仓库是空的** → 文件条目数接近 0 且无候选文件；**链接打开 404** → `indeterminate`，文案是"可能不存在、已移动或无访问权限"，**不是"不存在"**。每种结果都带"失败或未支持不等于资源未开放"。
+这一行里值得注意的三件事，都是**真实输出**而不是设计意图：状态是 `partially_available` 而不是 `metadata_readable`，因为权重候选的文件名标着 `lora`——**adapter 不是能直接跑的 checkpoint**，缺的那一半（基础模型）文件名里没写；`checkpoint=有候选` 的每个结论在 JSON 里都带**钉在 commit `c4593f0` 上的文件链接**，所以"有候选"可以被打开验证；而 `attribution` 仍然是 `unconfirmed`——**哪怕这是 microsoft/LoRA**，因为名称与作者页面之外没有交叉证据，晋升为官方归属是人工确认的事。
 
-**为什么默认不核验**：一次核验约 4 个 GitHub 请求，匿名额度约每小时 60 次，所以 `--verify` 默认 0、上限 8，并且会**显示还有几条未核验**；**未被核验的链接仍按候选打印、不会显示成失败**。要查更多请配 `GITHUB_TOKEN`。**没有用 subagent** —— subagent 给你一段描述，这个检查给你一个能横向比较的状态，且不会把请求失败说成"没开源"。要看得更深，用仓库里已有的 `search_repositories`／`search_hub`／`inspect_resource`／`read_repository_file`／`search_release_discussions`（走 MCP 或任务），不在 skill 里另搭流水线。
+**审计状态是一个封闭词表，而且描述的是「这次检查看到了什么」，不是「资源存不存在」**：`not_checked` 未检查、`candidate_located` 候选已定位、`metadata_readable` 元数据可读、`access_required` 需申请、`partially_available` 部分可用、`access_failed` 访问失败、`not_found_in_scope` 检查范围内未找到、`unsupported` 不支持。提供商自己的状态（HTTP 码、`gated`、`empty_repository`）保留在 `provider_status` 里，所以 **404 与 429 不会混成一件事**，超时也不会被读成"没开源"。
+
+**八类资源分别记录**（训练/推理/评测代码、checkpoint、数据集、数据划分、预处理、环境），每类取值 `present` 有候选 / `absent_in_scope` 检查范围内未见 / `not_applicable` 不适用 / `unknown` 未知 / `requires_access` 需申请 / `check_failed` 检查未完成。**「不适用」和「未知」是两种答案，不会合并**：前者是"这篇论文不需要 checkpoint"，后者是"这次没查出来"。每个肯定结论都带**可跳转的来源**（钉在具体 commit 上的文件链接）；模型拒绝写入一个没有来源的 `present`。
+
+这正好补上"光看链接判断不了"的几种情况：**链接真实但仓库是空的** → GitHub 明确回答"仓库无提交"，状态是 `not_found_in_scope` 而**不是**访问失败；**链接打开 404** → `access_failed` + `provider_status: HTTP 404`，文案是"可能不存在、已移动或无访问权限"；**只有推理代码** → `code_inference=有候选` 而 `code_training=检查范围内未见`；**权重是 adapter/LoRA** → 降级为 `partially_available`，并写明"通常需要对应的基础模型"；**数据需申请** → `access_required`，八类全部 `requires_access`；**文件树被截断** → 缺席项一律降级为 `unknown`，因为提供商自己说了清单不完整。
+
+**`--resource-matrix PREFIX` 把 2–6 篇论文的审计并成一张表**，同时写 `PREFIX.json`、`PREFIX.md`、`PREFIX.csv`：每行一个资源候选，带状态、八类覆盖、许可证声明、**「不可直接比较的条件」**和可跳转来源。CSV 对 `=` `+` `-` `@` 开头的单元格做转义（这些字符串来自外部服务，而电子表格会把它们当公式执行），链接只写 http(s)。**没有候选的论文也占一行**，并且带上它自己的状态——否则"检索失败"和"检索过但没有"会在表里长得一样。`PREFIX.json` 里还有一段 `approval`，是同一批结果的可导入载荷：`POST /api/import/resource-audits` 接受它，**默认只预览**。
+
+**为什么默认不核验**：一次核验约 4 个 GitHub 请求，匿名额度约每小时 60 次，所以 `--verify` 默认 0、上限 8，并且会**显示还有几条未核验**；**未被核验的链接仍按候选打印、仍写成 `not_checked` 的审计行，不会显示成失败**。要查更多请配 `GITHUB_TOKEN`。名称检索与核验预算都是**整轮共享**的（不是每篇一份），运行结束会打印覆盖分母 —— 下面是同一次真实运行的结尾（两个查询、12 篇、`--find-artifacts 3 --verify 2`，当时 huggingface.co 在本机不可达）：
+
+```
+开源审计覆盖（分母 12 篇）：检索完成 0 · 部分完成 3 · 全部失败 0 · 无项目名可检索 5 · 未检索 4（名称检索预算 3，已用 3）
+  ← 未检索的论文是预算用尽所致，不是没有开源；--find-artifacts 可调大（GitHub 搜索限 10 次/分钟）。
+候选 12 个（作者自述 3，名称匹配 9）；已核验 2，未核验 10（核验预算 2，剩余 0）
+审计结论分布: 未检查 10 · 元数据可读 1 · 部分可用 1
+名称检索失败 6 次（明细见对应论文行；失败不是「没有结果」）
+```
+
+**没有分母的计数会被当成结论**："核验了 0 个"到底是"没有可核验的"还是"预算用完了"，只有分母能区分；"检索完成 0"配上"部分完成 3"才说明是 Hub 不可达而不是没有开源。**没有用 subagent** —— subagent 给你一段描述，这个检查给你一个能横向比较的状态，且不会把请求失败说成"没开源"。要看得更深，用仓库里已有的 `search_repositories`／`search_hub`／`inspect_resource`／`read_repository_file`／`search_release_discussions`（走 MCP 或任务），不在 skill 里另搭流水线。`inspect_resource` 现在也返回同一套审计行，所以 MCP 客户端和 skill 读到的是同一种词表。
+
+**归属和版本对应关系不会自动判定。** 名称相符（哪怕仓库名与项目名完全一致）只是候选，`attribution` 始终是 `unconfirmed`；`version_match` 始终是 `unknown`，因为元数据层面无法确认某个 checkpoint 对应论文的哪个版本。两者都由**人工确认**改写：`POST /api/resources/{id}/confirmations` 把确认作为**另一种记录**追加到该资源的历史里（`record_kind: confirmation`，机器检查是 `observation`），不覆盖原观察；**没有可定位依据就拒绝写入**。外部宿主在工具结果里写的 `confirmed: true` 不算审批 —— 工具面是只读的，没有任何参数能到达写路径。
 
 **召回的上限是页大小**：`--max-papers` 默认 20、工具上限 25。**没有源返回的论文就无法被合并、更正或统计**，所以列表太薄时先调大它。**但要注意代价**：这些源按自己的相关性排序，**本工具不做重排**，所以页越大头部越杂（实测 `layer decomposition` 这种两词查询会把数学和金融论文排到前面）。**召回靠页大小，精确度靠查询词** —— 用目标文献真正在用的词（`image layer decomposition RGBA`），并且**跑多个短查询而不是一个长句**：arXiv 和 Semantic Scholar 对空格分隔的词是受限匹配，长句返回的反而可能**更少**。
 

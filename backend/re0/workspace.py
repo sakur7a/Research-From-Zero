@@ -30,6 +30,9 @@ SCHEMA_VERSION = "1"
 ID_PATTERN = re.compile(r"^src_[0-9a-f]{16}$")
 WORKSPACE_MARKER = ".re0-workspace.json"
 MAX_SOURCE_BYTES = 256 * 1024
+# An audit row carries the sources its conclusions rest on, so a document can legitimately arrive
+# with more beside it than its body alone. The body bound is unchanged; this is room for the check.
+MAX_AUDIT_BYTES = 64 * 1024
 MAX_BUNDLE_SOURCES = 2000
 # A source is material a tool returned. Anything else is refused rather than recorded.
 TRUSTED_ORIGINS = frozenset({"tool"})
@@ -48,6 +51,12 @@ def _canonical(payload: dict) -> str:
 # mint a second id and the workspace would quietly fill with near-duplicates.
 IDENTITY_FIELDS = ("source_url", "locator", "kind", "content", "paper", "publication",
                    "preprint_also", "institutions", "artifact_candidates", "artifact_search")
+# Carried beside the identity, never inside it. A resource audit is a check performed at a time, so
+# hashing it would make the same repository a different source every time it was re-checked.
+RECORDED_FIELDS = IDENTITY_FIELDS + ("artifact_search_detail", "artifact_outcome", "resource_audits")
+# Truncated on the way in; everything else recorded is copied as it arrived.
+BOUNDED_FIELDS = ("source_url", "locator", "kind", "content")
+COPIED_FIELDS = tuple(name for name in RECORDED_FIELDS if name not in BOUNDED_FIELDS)
 
 
 def _identity(payload: dict) -> dict:
@@ -130,11 +139,10 @@ class Workspace:
             "kind": str(document.get("kind", "source"))[:64],
             "content": str(document.get("content", ""))[:MAX_SOURCE_BYTES],
         }
-        for key in ("paper", "publication", "preprint_also", "institutions",
-                    "artifact_candidates", "artifact_search"):
+        for key in COPIED_FIELDS:
             if document.get(key) is not None:
                 payload[key] = document[key]
-        if len(_canonical(payload).encode("utf-8")) > MAX_SOURCE_BYTES + 8192:
+        if len(_canonical(payload).encode("utf-8")) > MAX_SOURCE_BYTES + MAX_AUDIT_BYTES:
             raise WorkspaceError("the source is larger than this workspace will store")
         identifier = source_id(payload)
         path = self._snapshot_path(identifier)

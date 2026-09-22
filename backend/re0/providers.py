@@ -127,9 +127,16 @@ def repository_identity(url: str) -> tuple[str, str, str]:
     raise ProviderError("此版本只自动检查 GitHub 仓库首页及 Hugging Face 模型/数据集首页；其他链接仅保存", "unsupported")
 
 
+DATA_SUFFIXES = {".parquet", ".arrow", ".csv", ".jsonl", ".h5", ".hdf5"}
+# A split is named by a *data* file, never by a script: `tests/test_train.py` says nothing about
+# which split a dataset ships, while `data/train.parquet` does.
+SPLIT_WORDS = re.compile(r"(?:^|[^a-z])(train|val|valid|validation|dev|test|eval|split)(?:[^a-z]|$)")
+
+
 def classify_files(paths: list[str]) -> dict[str, list[str]]:
     """Filename heuristics only. A hit is a candidate, never a functional verdict."""
-    result = {k: [] for k in ("training", "inference", "evaluation", "weights", "data", "environment")}
+    result = {k: [] for k in ("training", "inference", "evaluation", "weights", "data",
+                              "environment", "split", "preprocessing")}
     for path in paths:
         name = PurePosixPath(path).name.lower()
         suffix = PurePosixPath(name).suffix
@@ -140,10 +147,14 @@ def classify_files(paths: list[str]) -> dict[str, list[str]]:
             result["inference"].append(path)
         if is_code and re.search(r"(^|[_-])(eval|evaluate|evaluation|benchmark)([_\-.]|$)", name):
             result["evaluation"].append(path)
+        if is_code and re.search(r"(^|[_-])(preprocess|preprocessing|prepare|prepare_data)([_\-.]|$)", name):
+            result["preprocessing"].append(path)
         if suffix in {".safetensors", ".pt", ".pth", ".ckpt", ".bin", ".onnx"}:
             result["weights"].append(path)
-        if suffix in {".parquet", ".arrow", ".csv", ".jsonl", ".h5", ".hdf5"}:
+        if suffix in DATA_SUFFIXES:
             result["data"].append(path)
+            if SPLIT_WORDS.search(PurePosixPath(path).as_posix().lower()):
+                result["split"].append(path)
         if name in {"requirements.txt", "pyproject.toml", "environment.yml", "environment.yaml", "dockerfile", "uv.lock", "poetry.lock"}:
             result["environment"].append(path)
     return {k: v[:12] for k, v in result.items()}
@@ -153,8 +164,21 @@ def github_check(client: ProviderClient, identity: str) -> Observation:
     api = f"https://api.github.com/repos/{identity}"
     home = f"https://github.com/{identity}"
     metadata = client.json(api)
-    if not isinstance(metadata, dict) or not metadata.get("default_branch"):
-        raise ProviderError("仓库元数据缺少默认分支")
+    if not isinstance(metadata, dict):
+        raise ProviderError("仓库元数据格式无效")
+    if not metadata.get("default_branch"):
+        # An empty repository is an answer, not a failure: GitHub responded, and what it said is
+        # that there is no branch to list. Folding this into an access error would report a
+        # repository that plainly exists as one nobody could reach.
+        declared = (metadata.get("license") or {}).get("spdx_id", "")
+        return Observation(status="empty_repository", provider="github", depth="metadata_only",
+                           summary="仓库存在但没有任何提交，没有可列出的文件。", scope="仓库元数据",
+                           evidence=[Evidence(source_url=home, locator="GitHub Repos API",
+                                              excerpt=f"default_branch={metadata.get('default_branch')}；仓库无提交",
+                                              category="provider_metadata")],
+                           limitations=["仓库为空；未检查文件、Release 或 README。",
+                                        "空仓库不等于作者没有在其他位置发布资源。"],
+                           license_id="" if declared in {"NOASSERTION", "OTHER"} else declared)
     # Ref is resolved to a commit first, so all file evidence remains pinned.
     commit = client.json(f"{api}/commits/{quote(metadata['default_branch'], safe='')}")
     sha = commit.get("sha", "")
@@ -281,6 +305,7 @@ def check_resource(url: str, transport: httpx.BaseTransport | None = None) -> Ob
         reason = str(exc) if isinstance(exc, ProviderError) else "提供商响应格式异常；没有据此认定资源不存在"
         return Observation(status=exc.status if isinstance(exc, ProviderError) else "indeterminate", provider=provider,
                            summary=reason, scope="仅限允许提供商的公开元数据接口", depth="not_verified",
+                           http_status=exc.http_status if isinstance(exc, ProviderError) else None,
                            evidence=[Evidence(source_url=url, locator="请求结果", excerpt=reason, category="check_outcome")],
                            limitations=["本次没有完成内容验证；失败或未支持不等于资源未开放。"])
     finally:

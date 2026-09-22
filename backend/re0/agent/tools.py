@@ -17,6 +17,7 @@ from ..literature import (CONNECTORS, PUBLICATION_LABELS, arxiv_id_from_doi, cla
 from ..models import PaperInput, normalize_arxiv
 from ..providers import (ProviderClient, ProviderError, check_resource, resolve_metadata,
                          repository_identity, _arxiv_lock)
+from ..resource_audit import audit_from_observation
 from .schemas import (PAPER_SOURCES, SearchArgs, PaperSearchArgs, ResolveArgs, ResourceArgs,
                       HubSearchArgs, FileArgs, EvidenceReadArgs, PlanArgs, Report)
 
@@ -30,7 +31,7 @@ TOOL_TYPES = {
     "resolve_paper": (ResolveArgs, "Resolve a DOI/arXiv identifier to source-derived paper metadata."),
     "search_repositories": (SearchArgs, "Search public GitHub repositories. Name matches do NOT establish official authorship."),
     "search_hub": (HubSearchArgs, "Search Hugging Face models/datasets. Returns candidates, NOT verified paper-resource relationships."),
-    "inspect_resource": (ResourceArgs, "Inspect a GitHub repository root or Hugging Face model/dataset. Files, release metadata and resource links; no code execution or downloads."),
+    "inspect_resource": (ResourceArgs, "Inspect a GitHub repository root or Hugging Face model/dataset. Files, release metadata and resource links; no code execution or downloads. The checked document also carries a field-level `resource_audits` row in the shared audit vocabulary. `status` is one of not_checked / candidate_located / metadata_readable / access_required / partially_available / access_failed / not_found_in_scope / unsupported, and the provider's own HTTP or provider status is kept beside it in `provider_status`, so a 404 stays distinguishable from a 429. `coverage` reports each artifact class separately — training, inference, evaluation, checkpoint, dataset, split, preprocessing, environment — as present / absent_in_scope / not_applicable / unknown / requires_access / check_failed, each with the source it rests on; `not_applicable` (this work needs no checkpoint) and `unknown` (this check could not tell) are different answers and are never collapsed. Read every state as a statement about THIS check, not about whether the authors released something: access_failed and not_found_in_scope are not 'not open source'. `present` is a filename candidate rather than a working artifact, adapter/LoRA weights are flagged as needing a base model, `version_match` stays unknown because nothing here establishes that a resource corresponds to the paper's version, and `attribution` stays unconfirmed because a name match is not authorship. Licences are stored per artifact class as the declaration a source made, not as a conclusion about permission to use."),
     "read_repository_file": (FileArgs, "Read a bounded text/code file from a GitHub repository, pinned to a resolved commit; never execute it."),
     "read_evidence": (EvidenceReadArgs, "Read back a bounded slice of an evidence body already stored for THIS task. The conversation only keeps a short excerpt, so call this when you need more of a source you already retrieved; use offset to continue."),
     "search_release_discussions": (SearchArgs, "Search GitHub issues/PRs for release/checkpoint discussions. Include repo:owner/name in query. Discussion is a declaration, not a verified release."),
@@ -347,12 +348,23 @@ class ResearchTools:
             client.close()
 
     def inspect_resource(self, args):
-        observation = check_resource(args.url, self.transport).model_dump(mode="json")
-        return {"documents": [doc(args.url, json.dumps({k: v for k, v in observation.items() if k != "evidence"}, ensure_ascii=False),
-                                         kind="resource_check", locator="bounded provider inspection"),
-                *[doc(x["source_url"], x["excerpt"], locator=x["locator"]) for x in observation["evidence"][:7]]],
-                "scope": observation["scope"], "status": observation["status"],
-                "limitations": observation["limitations"], "discovered": observation["discovered"]}
+        observation = check_resource(args.url, self.transport)
+        # One check, two shapes. The observation is what the provider returned; the audit is the
+        # field-level reading of it, in the same vocabulary every other exit uses, so a caller
+        # comparing resources does not have to re-derive the states from a prose summary.
+        audit = audit_from_observation(args.url, observation, candidate={"url": args.url},
+                                       paper={}, publication={})
+        payload = observation.model_dump(mode="json")
+        check = doc(args.url,
+                    json.dumps({k: v for k, v in payload.items() if k != "evidence"},
+                               ensure_ascii=False),
+                    kind="resource_check", locator="bounded provider inspection")
+        check["resource_audits"] = [audit.model_dump(mode="json")]
+        check["artifact_outcome"] = audit.status
+        return {"documents": [check,
+                *[doc(x["source_url"], x["excerpt"], locator=x["locator"]) for x in payload["evidence"][:7]]],
+                "scope": payload["scope"], "status": payload["status"],
+                "limitations": payload["limitations"], "discovered": payload["discovered"]}
 
     def read_repository_file(self, args):
         provider, _, identity = repository_identity("https://github.com/" + args.repository)

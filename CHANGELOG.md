@@ -2,6 +2,70 @@
 
 ## Unreleased
 
+### A resource audit with states that describe the check, not the resource (#6)
+
+- Add `backend/re0/resource_audit.py` and `ResourceAudit` in `models.py`. Discovery, verification and
+  printing used to be one function, and two of the three were lost on the way out because a print
+  statement is not a record: a name search whose endpoints failed was reported to the terminal and
+  never attached to the document, and a `--verify` result never entered `--json` at all. Both are now
+  fields on the document, carried by the shared result contract into the CLI JSON, the MCP
+  `structuredContent`, a workspace snapshot and the matrix. `print_document` renders and fetches
+  nothing.
+- **The audit vocabulary describes what the check established, never whether the authors released
+  something**: `not_checked`, `candidate_located`, `metadata_readable`, `access_required`,
+  `partially_available`, `access_failed`, `not_found_in_scope`, `unsupported`. The provider's own
+  answer is kept beside it in `provider_status` — `HTTP 404`, `HTTP 429`, `gated`,
+  `empty_repository` — so a dead link and a rate limit cannot collapse into one sentence. That
+  needed a new field on `Observation`: it was discarding the HTTP code and keeping only
+  `indeterminate`.
+- **Eight artifact classes are recorded separately** (training/inference/evaluation code, checkpoint,
+  dataset, split, preprocessing, environment), each as `present`, `absent_in_scope`,
+  `not_applicable`, `unknown`, `requires_access` or `check_failed`. `not_applicable` and `unknown`
+  are kept apart because "this work needs no checkpoint" is a finding and "this check could not tell"
+  is a gap. A `present` or an `absent_in_scope` **must carry a source** — the model refuses one that
+  does not — so every affirmative conclusion can be opened, pinned to a commit.
+- `artifact_search` now distinguishes `searched`, `partial`, `failed`, `skipped` and `not-run`, with
+  the per-endpoint attempts, the failure list and the reason nothing ran
+  (`disabled` or `budget`) in `artifact_search_detail`. Before, `searched` was written the moment the
+  search started, so "GitHub answered, both Hub endpoints were rate-limited" came back looking like a
+  completed search that found nothing.
+- Add `--resource-matrix PREFIX`, writing `.json`, `.md` and `.csv` from the rows already in the
+  result — it re-renders and never re-checks. Each row carries a `blockers` column restating why it is
+  not a drop-in baseline, a paper with no candidate still gets a row (otherwise "searched and found
+  nothing" and "the search failed" look identical in the one artifact a reader compares from), cells
+  a spreadsheet would run as a formula are escaped, and only http(s) links are written.
+- Fix two bugs a real run caught that no fixture did. A check that ran and failed reaches no depth,
+  and keying the "was this verified" question off `verification_depth` reported an attempted
+  verification as one nobody made — the row said `access_failed` while the summary counted it
+  unverified and the terminal printed 未核验. And a paper whose title has no project name was spending
+  a name-search slot, so `--find-artifacts 3` searched fewer than three papers and blamed the budget
+  for a search that was never possible. Both are now keyed off the right field and pinned.
+- An **empty repository is a finding, not an access failure**. GitHub answers that there are no
+  commits, which is different from not answering, and folding the two together reported a repository
+  that plainly exists as one nobody could reach. It is now `not_found_in_scope` with
+  `provider_status: empty_repository`.
+- Incompleteness is now two kinds. A **truncated listing** downgrades every absence to `unknown`,
+  because the provider said the listing was incomplete; a README that 404s does not, because it says
+  nothing about which files the repository holds. Treating both as incompleteness downgraded every
+  repository without a README.
+- `inspect_resource` returns the same audit row, so the in-task model and an MCP client read one
+  vocabulary instead of deriving states from a prose summary. Its tool description carries the rules,
+  because that description is the only surface either of them reads.
+- Library records are now labelled: `record_kind` is `observation` for a check (performed here or
+  imported) and `confirmation` for a human revision, appended beside the observation rather than over
+  it. `POST /api/resources/{id}/confirmations` refuses a settled attribution or version judgement with
+  no source, and refuses one about a different resource. Rows written before records were labelled
+  read back as the observations they always were. A model's inference is **not** a third kind of
+  resource record: it lives in the task report's findings, where `assessment` already separates
+  observed, inference and uncertain.
+- `POST /api/import/resource-audits` links approved papers and their audits into the library,
+  previewing unless `dry_run: false`. It is idempotent by identifier, by resource URL and by audit
+  fingerprint, never updates a paper that already exists (an existing record carries the reader's
+  notes), and refuses to create a paper it cannot attach a resource to. The matrix JSON carries the
+  importable payload in its `approval` block, so approving does not mean transcribing.
+- **A `confirmed: true` in a tool result is not an approval.** The tool surface is read-only and no
+  argument reaches a write path, which is now a test rather than an intention.
+
 ### Several queries in one budgeted call, and a coverage model (#5)
 
 - `search_papers` accepts `queries` (up to 5) and a `sources` subset beside the existing single

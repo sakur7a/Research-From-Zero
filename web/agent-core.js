@@ -61,12 +61,19 @@ export function shortUrl(url) {
     return path || String(url).slice(0, 80);
   } catch { return String(url ?? '').slice(0, 80); }
 }
+// `partial` and `failed` are not "no search happened": a search ran and did not finish. Labelling
+// either as 未做开源检索 would hide a rate limit behind what reads as a deliberate choice, and the
+// reader would move on instead of re-running.
+const COVERAGE_NOTES = {
+  searched: '',
+  skipped: '标题里没有可检索的项目名，本次未做开源检索',
+  partial: '名称检索只完成了一部分（有来源未应答），开源情况不完整，可重跑',
+  failed: '名称检索未能完成，开源情况未查；这不代表没有开源',
+  'not-run': '本次未做开源检索，开源情况未查'
+};
 export function artifactCoverage(evidence) {
   const search = evidence && evidence.artifact_search;
-  if (search === 'searched') return '';
-  return search === 'skipped'
-    ? '标题里没有可检索的项目名，本次未做开源检索'
-    : '本次未做开源检索，开源情况未查';
+  return Object.hasOwn(COVERAGE_NOTES, search) ? COVERAGE_NOTES[search] : COVERAGE_NOTES['not-run'];
 }
 export function paperCard(evidence) {
   const source = evidence && typeof evidence === 'object' ? evidence : {};

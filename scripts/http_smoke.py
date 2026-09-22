@@ -63,7 +63,7 @@ def run(output: Path):
               'paths': results, 'guards': ['missing-client-header:403', 'no-model:422', 'cross-origin:403'],
               'tasks_created': 0}
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(result, ensure_ascii=False, indent=2))
+    output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

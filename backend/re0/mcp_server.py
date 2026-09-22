@@ -41,6 +41,8 @@ SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26")
 DOCUMENT_EXCERPT_CHARS = 1500
 STRUCTURED_BODY_CHARS = 4000
 ARTIFACT_LINES = 3
+# An audit row is longer than a candidate line, so fewer of them are worth an agent's context.
+AUDIT_LINES = 2
 # Meaningless without a Re0 task, or gated on per-task user consent.
 EXCLUDED = frozenset({"update_plan", "finish_report", "read_evidence", "search_library"})
 JSON_OBJECT_LIMIT = 4 * 1024 * 1024
@@ -56,6 +58,49 @@ def catalog(*, web_enabled: bool) -> list[dict]:
     return [{"name": name, "description": TOOL_TYPES[name][1],
              "inputSchema": TOOL_TYPES[name][0].model_json_schema()}
             for name in exposed_names(web_enabled=web_enabled)]
+
+
+def audit_lines(item: dict) -> list:
+    """The field-level audit, bounded.
+
+    A summary that names a state without naming what the state is about invites exactly the
+    misreading the vocabulary exists to prevent, so each line keeps the provider's own status, the
+    depth, and the classes that were *not* resolved.
+    """
+    audits = item.get("resource_audits") or []
+    lines = []
+    for audit in audits[:AUDIT_LINES]:
+        coverage = audit.get("coverage") or {}
+        states = {name: (finding or {}).get("state", "unknown") for name, finding in coverage.items()}
+        groups = {}
+        for name, state in states.items():
+            groups.setdefault(state, []).append(name)
+        lines.append(f"    resource audit: {audit.get('status')}"
+                     + (f" (provider status {audit['provider_status']})"
+                        if audit.get("provider_status") else "")
+                     + f" · depth {audit.get('verification_depth')}"
+                     + f" · access {audit.get('access')} · {audit.get('resource_url', '')}")
+        for state in ("present", "absent_in_scope", "requires_access", "unknown", "check_failed",
+                      "not_applicable"):
+            if groups.get(state):
+                # "present" is a filename candidate; saying so here costs one clause and stops the
+                # line reading as a working artifact.
+                note = " (filename candidates, not verified)" if state == "present" else ""
+                lines.append(f"      {state}{note}: " + ", ".join(sorted(groups[state])))
+        attribution = audit.get("attribution", "unconfirmed")
+        extras = [f"attribution {attribution}", f"version_match {audit.get('version_match', 'unknown')}"]
+        licences = audit.get("licences") or {}
+        if licences:
+            extras.append("licence declared: "
+                          + ", ".join(f"{name}={value}" for name, value in licences.items()))
+        if audit.get("author_declaration") != "undeclared":
+            extras.append(f"author declaration: {audit['author_declaration']}")
+        lines.append("      " + " · ".join(extras))
+        for limitation in (audit.get("limitations") or [])[:1]:
+            lines.append(f"      limit: {limitation}")
+    if len(audits) > AUDIT_LINES:
+        lines.append(f"    (+{len(audits) - AUDIT_LINES} more resource audits in structuredContent)")
+    return lines
 
 
 def render(structure: dict) -> str:
@@ -108,6 +153,13 @@ def render(structure: dict) -> str:
             # "there is no released code".
             lines.append("    artifact candidates: none "
                          f"(name search: {item.get('artifact_search') or 'not-run'})")
+        detail = item.get("artifact_search_detail") or {}
+        for failure in (detail.get("failures") or [])[:ARTIFACT_LINES]:
+            # A name search that did not complete is not a search that found nothing.
+            lines.append(f"    name search did not complete: {failure}")
+        if detail.get("reason_not_run"):
+            lines.append(f"    name search not run: {detail['reason_not_run']}")
+        lines.extend(audit_lines(item))
         body = item.get("body") or {}
         full = body.get("excerpt") or ""
         excerpt = full[:DOCUMENT_EXCERPT_CHARS]

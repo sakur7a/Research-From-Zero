@@ -47,3 +47,40 @@ def test_invalid_source_cleans_partial_backup(tmp_path):
     with pytest.raises(sqlite3.DatabaseError):
         backup_database(source, target)
     assert not target.exists()
+
+
+def test_audit_records_survive_a_backup_and_restore_cycle(tmp_path):
+    """Issue #6's data has to come back readable, and it does so without a migration.
+
+    The audit and the human confirmation both live inside the existing `observations.data` blob, so
+    this is a test that no schema change was needed — not a claim that one was handled.
+    """
+    from re0.db import Database
+    from re0.models import PaperInput, ResourceAudit, ResourceInput
+    from re0.service import Store
+
+    source, restored_path = tmp_path / "live.sqlite3", tmp_path / "restored.sqlite3"
+    store = Store(Database(str(source)))
+    paper = store.create_paper(PaperInput(title="LayerKit: A Study", arxiv_id="2401.00001",
+                                          notes="我自己的笔记"))
+    resource = store.create_resource(paper["id"], ResourceInput(
+        kind="code", label="lab/layerkit", url="https://github.com/lab/layerkit"))
+    observation = store.save_observation(resource["id"], {
+        "status": "metadata_accessible", "checked_at": "2026-09-22T15:46:49+00:00",
+        "resource_audit": {"status": "metadata_readable", "revision": "a" * 40}})
+    confirmation = store.confirm_resource(resource["id"], ResourceAudit.model_validate({
+        "paper_title": "LayerKit: A Study", "resource_url": "https://github.com/lab/layerkit",
+        "status": "metadata_readable", "attribution": "official",
+        "attribution_evidence": [{"source_url": "https://arxiv.org/abs/2401.00001",
+                                  "locator": "论文第 3 页", "excerpt": "代码发布于 lab/layerkit。"}]}))
+    assert observation["record_kind"] == "observation"
+    assert confirmation["record_kind"] == "confirmation"
+
+    backup_database(source, restored_path)
+    after = Store(Database(str(restored_path)))
+    history = after.history(resource["id"])
+    assert [row["record_kind"] for row in history] == ["confirmation", "observation"]
+    assert history[0]["attribution"] == "official"
+    assert history[1]["resource_audit"]["revision"] == "a" * 40
+    # The reader's notes are what an import or a restore must never cost them.
+    assert after.get_paper(paper["id"])["notes"] == "我自己的笔记"

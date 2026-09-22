@@ -43,7 +43,7 @@ def run(output_dir: Path):
             response = client.request(options.get("method", "GET"), path, headers=options.get("headers"), content=options.get("body"))
             return {"status": response.status_code, "body": response.text}
         page.expose_function("re0TestRequest", request_bridge)
-        css = (ROOT/"web/theme.css").read_text()+"\n"+(ROOT/"web/styles.css").read_text()
+        css = (ROOT/"web/theme.css").read_text(encoding="utf-8")+"\n"+(ROOT/"web/styles.css").read_text(encoding="utf-8")
         page.set_content('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>'+css+'</style></head><body><div id="app"></div><div id="overlays"></div><div id="toasts" role="status" aria-live="polite"></div></body></html>')
         page.evaluate('''() => { window.fetch = async (path, options = {}) => {
           const result = await window.re0TestRequest(path, {method:options.method||'GET',headers:options.headers||{},body:options.body});
@@ -51,7 +51,7 @@ def run(output_dir: Path):
         }; }''')
         js = []
         for name in ["icons.js", "core.js", "api.js", "theme.js", "app.js"]:
-            text = (ROOT/"web"/name).read_text()
+            text = (ROOT/"web"/name).read_text(encoding="utf-8")
             text = re.sub(r"^import .*?;\n", "", text, flags=re.M)
             text = re.sub(r"\bexport (?=(?:async )?(?:function|const|let|class))", "", text)
             js.append(text)
@@ -154,7 +154,7 @@ def run(output_dir: Path):
         assert not errors, errors
         # 先落盘/打印报告再关闭浏览器:个别环境在浏览器进程回收阶段会中断,结果不应丢失。
         report={'mode':'offline Chromium DOM + real FastAPI TestClient bridge','browser_network_tested':False,'external_network_tested':False,'completed':completed,'page_errors':errors}
-        (output_dir/'browser-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
+        (output_dir/'browser-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2), encoding="utf-8")
         print(json.dumps(report,ensure_ascii=False,indent=2))
         browser.close()
 
