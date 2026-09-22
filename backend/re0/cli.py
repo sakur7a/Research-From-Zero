@@ -147,6 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     paper = subcommands.add_parser("paper", help="literature retrieval (no model key needed)")
     paper_actions = paper.add_subparsers(dest="action")
     paper_actions.add_parser("search", help="search five scholarly sources and merge them")
+    paper_actions.add_parser("text", help="read one open-access paper's full text, with locators")
 
     doctor_parser = subcommands.add_parser("doctor", help="report what can run without spending")
     doctor_parser.add_argument("--probe-network", action="store_true",
@@ -187,8 +188,8 @@ def main(argv=None) -> int:
     """
     argv = list(sys.argv[1:] if argv is None else argv)
     passthrough: list = []
-    if argv[:2] == ["paper", "search"]:
-        argv, passthrough = ["paper", "search"], argv[2:]
+    if argv[:2] in (["paper", "search"], ["paper", "text"]):
+        argv, passthrough = argv[:2], argv[2:]
     parser = build_parser()
     if not argv:
         parser.print_help()
@@ -204,6 +205,9 @@ def main(argv=None) -> int:
     if arguments.command == "paper" and arguments.action == "search":
         from re0.skill_search import main as search_main
         return search_main(passthrough)
+    if arguments.command == "paper" and arguments.action == "text":
+        from re0.fulltext_cli import main as text_main
+        return text_main(passthrough)
     if arguments.command == "mcp":
         from re0.mcp_server import main as mcp_main
         mcp_main()

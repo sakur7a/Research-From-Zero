@@ -241,6 +241,22 @@ all of it. Nothing was summarised away — each file is the section that used to
 
 ## Related entry points
 
+A retrieval result is a bibliographic record, never full text. When the question is what a paper
+says about *its own* released code, weights or data, its experimental setup, or the limits its
+authors wrote down, the answer is usually only in the body:
+
+```bash
+re0 paper text 2312.00286v1 --toc              # contents and chunk locators, no text
+re0 paper text 2024.acl-long.1 --locator p.3   # one bounded slice
+```
+
+It takes an arXiv or ACL Anthology identifier and has **no `url` argument** — the destination is
+built from the identifier against a fixed allowlist, so a link inside a paper cannot redirect the
+reader, and a DOI is refused rather than resolved into a paywall. Locators come from the bytes that
+were read, so re-reading the same version gives the same locators. References and appendices are
+marked `back_matter`: a repository cited there is somebody else's. There is no OCR — a scanned PDF
+is reported as `scan_only` with its page count instead of being guessed at.
+
 - `python -m re0.mcp_server` exposes the same retrieval as MCP tools for any MCP client.
 - Inside Re0's own task runs, every returned record becomes stored evidence with an ID
   that a report must cite. This skill is a retrieval endpoint and creates no evidence

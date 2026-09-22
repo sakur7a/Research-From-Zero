@@ -20,6 +20,14 @@ BODY_EXCERPT_CHARS = 4000
 PAYLOAD_FIELDS = ("scope", "query", "queries", "note", "sources_queried", "source_counts",
                   "source_failures", "incomplete_results", "duplicates_merged",
                   "dropped_out_of_range", "coverage", "documents", "audit")
+# A full-text read is not a retrieval result: it has one source, one version and one parser rather
+# than a merged candidate list. It gets its own block in the same versioned structure, so the shape
+# stays described instead of a whole feature arriving as `unrecognised`.
+FULLTEXT_FIELDS = ("identifier", "source", "version", "state", "detail", "content_type", "parser",
+                   "parser_version", "source_url", "final_url", "fetched_at", "bytes_read", "hops",
+                   "content_sha256", "resolver_notes", "blocks", "chars", "toc", "attempts",
+                   "parse_quality",
+                   "chunks", "chunk_count", "slice", "stored", "limitations", "untrusted_note")
 DOCUMENT_FIELDS = ("source_url", "kind", "locator", "content", "paper", "publication",
                    "preprint_also", "institutions", "artifact_candidates", "artifact_search",
                    "artifact_search_detail", "artifact_outcome", "resource_audits",
@@ -80,7 +88,11 @@ def normalize(payload: dict, *, body_chars: int = BODY_EXCERPT_CHARS) -> dict:
         "note": ("document bodies are excerpts; content_chars gives the true length, so a short "
                  "body is not a cut one" if excerpted else "no document body was cut"),
     }
-    extra = {key: value for key, value in payload.items() if key not in PAYLOAD_FIELDS}
+    described = set(PAYLOAD_FIELDS)
+    if "chunk_count" in payload or "parser_version" in payload:
+        result["fulltext"] = {key: payload[key] for key in FULLTEXT_FIELDS if key in payload}
+        described |= set(FULLTEXT_FIELDS)
+    extra = {key: value for key, value in payload.items() if key not in described}
     if extra:
         result["unrecognised"] = extra
     return result

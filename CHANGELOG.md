@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+### Full-text reading with paragraph and page locators (#8)
+
+- Add `backend/re0/safe_fetch.py` and `backend/re0/fulltext.py`, the tool `fetch_paper_text`, the CLI
+  `re0 paper text`, and an optional `fulltext` extra (`pypdf==6.1.1`, BSD-3-Clause, pure Python).
+- **There is no `url` argument.** The tool takes an arXiv or ACL Anthology *identifier* and builds the
+  address itself against a fixed allowlist (`arxiv.org`, `export.arxiv.org`, `aclanthology.org`), so
+  text inside a paper cannot aim the reader anywhere. A DOI is refused outright: resolving one leads
+  to a publisher that may be paywalled, and this routes around no paywall.
+- Every redirect hop is re-validated — scheme, port, no embedded credentials, allowlist, and a
+  resolved-address check on *all* records a name returns, not the first. Loopback, private,
+  link-local (where cloud metadata lives), multicast and reserved addresses are refused, as are
+  redirect loops, more than five hops, a body over 8 MiB counted *after* decompression, and a
+  content type that is not the one asked for. No credential or cookie is ever attached.
+- Locators are derived from the bytes read — a section-and-paragraph ordinal for HTML, a page number
+  for PDF — so re-reading the same version returns the same locators and a citation stays checkable.
+  The response carries the version, fetch time, parser name, `content_sha256` and `parse_quality`.
+- Only one bounded slice is returned; the rest are listed by locator and stored as chunks in the
+  workspace when the caller named one. A model is never handed the whole paper.
+- References, acknowledgements and appendices are marked `back_matter`, so a link in a bibliography is
+  not attributed to the paper being read. No OCR, ever: a scanned PDF is `scan_only` with the page
+  count, a corrupt one is `unsupported_format`, and a missing backend is `parser_missing` with the
+  install command and its licence.
+- **Two defects found only by reading real documents.** (1) A single `<input>` in arXiv's page
+  furniture — a void element, so it has no end tag — left a counter-based reader permanently "inside
+  a skipped element", and 532 kB came back as one 79-character block. Void elements are now never
+  pushed, chrome is parsed and dropped block by block rather than hard-skipped, and a
+  section/article/h1 inside chrome breaks out of it and says so. (2) pypdf's `extraction_mode="layout"`
+  returned **1 character** for a page where plain mode returned 4568, so each page now keeps
+  whichever mode extracted more and the mix is reported. A safety net remains: a document over 20 kB
+  that yields under 2% of its length is reported as `under_extracted` and the state becomes
+  `partial`, because "the parser found nothing" must never read as "the paper says nothing".
+- Retrieval is untrusted-content aware: script bodies are skipped, inline instructions carry no
+  authority, and the payload says so.
+- One environment finding worth recording: on a network whose DNS answers through a local
+  interceptor, `arxiv.org` resolved to `198.18.1.3` and `fdfe:dcba:9876::f9`, both non-public, and
+  the guard refused — correctly, and uselessly. `RE0_ALLOW_LOCAL_RESOLVER=1` opts in explicitly and
+  the addresses connected to are then recorded in the result.
+
 ### The skill ships as package data, and installs with a preview (#3)
 
 - Add `backend/re0/skill_package.py` and `re0 skill show | package | install`. The skill directory is

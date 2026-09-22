@@ -103,12 +103,58 @@ def audit_lines(item: dict) -> list:
     return lines
 
 
+def render_fulltext(text: dict) -> str:
+    """A full-text read rendered from the same structure the JSON carries.
+
+    It states what was read, what was not, and why, before any of the text: a slice that arrives
+    without its state reads as the whole paper.
+    """
+    lines = [f"full text: {text.get('identifier', '')} [{text.get('state', '')}]"]
+    lines.append(f"    version: {text.get('version', '')}  parser: {text.get('parser', '')} "
+                 f"(parser_version {text.get('parser_version', '')})")
+    lines.append(f"    from: {text.get('final_url') or text.get('source_url', '')}")
+    lines.append(f"    fetched_at: {text.get('fetched_at', '')}  bytes: {text.get('bytes_read', 0)}  "
+                 f"sha256: {str(text.get('content_sha256', ''))[:16]}")
+    if text.get("detail"):
+        lines.append(f"    detail: {text['detail']}")
+    lines.append(f"    blocks: {text.get('blocks', 0)}  chars: {text.get('chars', 0)}  "
+                 f"parse_quality: {text.get('parse_quality', '')}")
+    for attempt in (text.get("attempts") or [])[:4]:
+        lines.append(f"    attempt: {attempt.get('kind')} {attempt.get('url')} -> "
+                     f"{attempt.get('state')}" + (f" ({attempt.get('detail')})"
+                                                  if attempt.get("detail") else ""))
+    for entry in (text.get("toc") or [])[:12]:
+        lines.append(f"    toc: {entry.get('locator')} {entry.get('title')}"
+                     + ("  [back matter]" if entry.get("back_matter") else ""))
+    chunks = text.get("chunks") or []
+    if chunks:
+        lines.append(f"    chunks: {text.get('chunk_count', len(chunks))} "
+                     f"(first {min(len(chunks), 8)} locators: "
+                     + ", ".join(str(chunk.get("locator")) for chunk in chunks[:8]) + ")")
+    slice_ = text.get("slice")
+    if slice_:
+        lines.append(f"    slice {slice_.get('locator')} ({slice_.get('chars')} chars"
+                     + (", truncated" if slice_.get("truncated") else "") + "):")
+        lines.append("      " + str(slice_.get("text", "")).replace("\n", "\n      "))
+    stored = text.get("stored") or {}
+    if stored.get("chunks"):
+        lines.append(f"    stored: {stored['chunks']} chunks in workspace "
+                     f"{stored.get('workspace_id', '')}")
+    for note in (text.get("limitations") or [])[:6]:
+        lines.append(f"    limit: {note}")
+    if text.get("untrusted_note"):
+        lines.append(f"    untrusted: {text['untrusted_note']}")
+    return "\n".join(lines)
+
+
 def render(structure: dict) -> str:
     """Readable text, built from the structured result rather than from the raw payload.
 
     Bounded on purpose, because the caller is an agent. Everything the summary leaves out is still
     in `structuredContent`, and the summary says when that is the case instead of looking complete.
     """
+    if structure.get("fulltext"):
+        return render_fulltext(structure["fulltext"])
     lines = []
     for key in ("scope", "query", "note"):
         if structure.get(key):
@@ -188,7 +234,7 @@ def call_tool(tools: ResearchTools, name: str, arguments: dict, *, web_enabled: 
     if name not in exposed_names(web_enabled=web_enabled):
         return f"Re0 does not expose this tool here: {name}", None, True
     try:
-        payload = tools.execute(name, arguments or {})
+        payload = tools.execute(name, arguments or {}, workspace=workspace)
         structure = result_model.normalize(payload, body_chars=STRUCTURED_BODY_CHARS)
     except ValidationError as exc:
         # Report which fields are wrong, not a pydantic traceback.

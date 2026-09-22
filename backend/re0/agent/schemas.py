@@ -145,6 +145,25 @@ class PaperSearchArgs(SearchArgs):
             (list(PAPER_SOURCES) if self.source == "all" else [self.source])
 
 
+class FullTextArgs(StrictModel):
+    """A paper to read, named by identifier.
+
+    There is no `url` field on purpose. The destination is built from a normalised identifier and a
+    fixed allowlist, so a document that contains a link cannot make this tool fetch it: an
+    arbitrary-URL reader reachable by a model is an SSRF surface and a paywall route at once.
+    """
+    identifier: str = Field(min_length=3, max_length=120,
+                            description="arXiv ID such as 2312.00286v1, or an ACL Anthology ID such "
+                                        "as 2024.acl-long.1 or P18-1001. A DOI is refused: resolving "
+                                        "one leads to a publisher, which may be paywalled.")
+    locator: str = Field(default="", max_length=80,
+                         description="which chunk to return, e.g. 'p.4' or '§3¶12'. Empty means the "
+                                     "first. Only one bounded slice comes back; the rest are listed "
+                                     "by locator.")
+    slice_chars: int = Field(default=4000, ge=200, le=12000,
+                             description="ceiling on the returned slice, not on what was read")
+
+
 class ResolveArgs(StrictModel):
     identifier: str = Field(min_length=3, max_length=300)
 

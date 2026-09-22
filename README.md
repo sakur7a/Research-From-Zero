@@ -247,6 +247,33 @@ python skills/re0-paper-search/scripts/paper_search.py --query "diffusion waterm
 
 OpenAlex 这条路 **2026-09-22 已联网验证**：先用 `/sources?filter=display_name.search:NAME` 把名字解析成稳定的 source ID，再按 `primary_location.source.id` 过滤（`mode=strict`）。**但严格过滤只覆盖解析到的那些 source**，而 OpenAlex 把一个会议系列拆成按届的多条记录 —— 实测搜 `CVPR` 只返回一条 `2022 IEEE/CVF …(CVPR)`。所以解析到的名字一定会打印出来，让读者看见范围被收窄到了哪一届；解析不到就退回查询提示并标 `resolve_failed`，此时结果**更宽而不是更窄**，也没有静默丢记录。Semantic Scholar 的 `venue=` 参数有文档但至今没验证成功（2026-09-22 再次被 HTTP 429 限流），所以仍然只作提示（`mode=hint`）；DBLP 对非浏览器客户端返回反爬挑战页而不是 JSON，不可用；arXiv／Crossref／OpenReview 这里没有 venue 参数。**多接一个源并不能解决剩下的缺口** —— 五个源已经包含数亿条会议记录，缺的是"某一届到底收了哪些"这种问法。
 
+### 读全文：`re0 paper text`
+
+检索给的是书目记录和摘要，不是全文。**资源声明、实验设置、作者自己写的局限，通常只在正文里。**
+
+```bash
+re0 paper text 2312.00286v1 --toc              # 目录 + 每个分块的 locator，不打印正文
+re0 paper text 2024.acl-long.1 --locator p.3   # 只读第 3 页那一段
+re0 paper text 2312.00286v1 --workspace .data/ws --json out.json
+```
+
+只接受 **arXiv ID** 和 **ACL Anthology ID**，**没有 url 参数** —— 地址由标识符按固定白名单（`arxiv.org`、
+`aclanthology.org`）拼出来，所以论文正文里的链接没法把这个读取器指到别处。**DOI 会被拒绝**：解析 DOI 会跳到
+出版商，那里可能是付费墙，本工具不绕过。每次跳转都重新校验（协议、端口、白名单、以及域名解析出的**每一个**
+地址必须是公网地址），回环／私网／链路本地（云元数据地址就在那一段）／组播／保留地址一律拒绝，重定向回环、
+超过 5 跳、解压后超过 8 MiB、内容类型不符也一律拒绝，并且**从不附带任何凭据或 Cookie**。
+
+locator 是从读到的字节推出来的：HTML 是"第几节第几段"，PDF 是页码，所以**同一版本再读一次，locator 不变**，
+引用可复核；返回里带着版本、抓取时间、解析器名、`content_sha256` 和 `parse_quality`。**一次只返回一个有界切片**，
+其余以 locator 列出，正文按块存进 workspace（`--workspace`，可选）；模型不会拿到整篇论文。参考文献／致谢／附录
+里的块标 `back_matter` —— 那里提到的工作是别人的，不会自动归给本论文。**不做 OCR**：扫描版 PDF 报 `scan_only`
+并给出页数，损坏的报 `unsupported_format`，没装 PDF 依赖报 `parser_missing` 并给出安装命令和许可证；
+免费解析失败**不会**自动改走收费模型。
+
+> **本机网络的坑**：如果所在网络的 DNS 走本机透明代理（实测 `arxiv.org` 被解析到 `198.18.1.3` 和
+> `fdfe:dcba:9876::f9`），公网地址校验会拒绝连接 —— 这是对的默认行为，但会让全文读取完全不可用。
+> 设 `RE0_ALLOW_LOCAL_RESOLVER=1` 显式放行，结果里会记录实际连到了哪些地址。
+
 **召回上限现在是"每页条数 × 页数"**：`--max-papers` 是**每页**上限（默认 20、工具上限 25），`--max-pages`（默认 1，最大 10）继续往后翻页。只有 OpenAlex 和 Semantic Scholar 的游标有公开文档，其余三个源只读一页，并在 `coverage.pagination` 里写 `stop_reason=not_supported`，**不假装查全**。`--max-requests`（默认 40）是整次调用跨所有源和查询的总请求上限；预算用完会如实报出来，**不会变成"没有结果"**。`--refresh` 强制重新取而不复用 TTL 内的缓存；缓存按**已配置的凭据种类**分作用域，匿名调用取到的结果绝不会给带凭据的调用复用，反之亦然，作用域里只有凭据的种类名，没有凭据本身。
 
 设计取舍写在 `skills/re0-paper-search/SKILL.md` 里，其中三条值得单独说明：

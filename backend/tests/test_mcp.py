@@ -17,7 +17,10 @@ from re0.agent.tools import ResearchTools
 ATOM = b'''<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>http://arxiv.org/abs/2501.12345v2</id><title>Fixture Layout Paper</title><summary>TEST FIXTURE: a layout study. This is not a real paper claim.</summary><published>2025-01-21T00:00:00Z</published><author><name>Test Author</name></author></entry></feed>'''
 
 EXPECTED_TOOLS = ["search_papers", "resolve_paper", "search_repositories", "search_hub",
-                  "inspect_resource", "read_repository_file", "search_release_discussions"]
+                  "inspect_resource", "read_repository_file", "search_release_discussions",
+                  # Reads one open-access paper. Read-only like the rest: it takes an identifier,
+                  # never a URL, and writes only into a workspace the caller named.
+                  "fetch_paper_text"]
 
 
 HANDSHAKE = {"jsonrpc": "2.0", "id": 0, "method": "initialize",
@@ -138,8 +141,12 @@ class StubTools:
 
     def __init__(self, payload):
         self.payload = payload
+        # Records what each call was handed, so a test can prove a full-text chunk landed in the
+        # caller's session rather than in some tools-wide default.
+        self.workspaces = []
 
-    def execute(self, name, arguments):
+    def execute(self, name, arguments, *, workspace=None):
+        self.workspaces.append(workspace)
         return self.payload
 
 
@@ -293,7 +300,10 @@ def test_no_tool_call_can_approve_what_a_user_has_not_approved():
     """
     from re0.agent.tools import TOOL_TYPES
 
-    assert all(name.startswith(("search_", "resolve_", "inspect_", "read_"))
+    # The prefixes are the read-only verbs. `fetch_` is here because `fetch_paper_text` reads one
+    # open-access paper: it takes an identifier rather than a URL, so there is no destination for a
+    # payload to steer it to, and its only write is into a workspace the caller named.
+    assert all(name.startswith(("search_", "resolve_", "inspect_", "read_", "fetch_"))
                or name in {"update_plan", "finish_report"} for name in TOOL_TYPES)
     exposed = set(mcp_server.exposed_names(web_enabled=True))
     tools = ResearchTools(None)

@@ -21,6 +21,11 @@ re0 = "re0.cli:main"
 
 [project.optional-dependencies]
 test = ["pytest==9.0.2"]
+# PDF text extraction. Optional on purpose: an HTML-only read needs nothing beyond the standard
+# library, and a PDF backend should be a choice the installer makes rather than a dependency every
+# user inherits. pypdf is BSD-3-Clause and pure Python, so it adds no compiled extension. Without
+# it a PDF is reported as parser_missing, with the install command, and is never OCR-ed instead.
+fulltext = ["pypdf==6.1.1"]
 
 [tool.setuptools.packages.find]
 where = ["backend"]
