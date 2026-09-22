@@ -1,0 +1,117 @@
+{
+  "task_set_version": "1",
+  "created": "2026-09-22",
+  "reviewed_by": "repository owner (labels marked human) — machine-filled fields say so explicitly",
+  "rules": [
+    "Every expectation is either machine-checkable ('retrieval') or states that it needs a human ('human').",
+    "A task whose channel is 'live' and whose credentials are absent is BLOCKED, never passed.",
+    "No label may assert official authorship unless a human recorded the check and its scope.",
+    "An unfound identifier is a coverage gap, not evidence of absence: expectations says which."
+  ],
+  "tasks": [
+    {
+      "id": "reveallayer-paper-and-repo",
+      "channel": "connector",
+      "kind": "given_paper_and_repo",
+      "input": {
+        "paper": {"title": "RevealLayer: Disentangling Hidden and Visible Layers via Occlusion-Aware Image Decomposition", "arxiv_id": "2605.11818"},
+        "resources": ["https://github.com/360CVGroup/RevealLayer", "https://huggingface.co/datasets/qihoo360/RevealLayer-100K"]
+      },
+      "expectations": [
+        {"check": "retrieval", "type": "identifier_resolves", "value": "arXiv:2605.11818", "note": "the paper must be resolvable by id"},
+        {"check": "retrieval", "type": "resource_status_in", "value": "https://github.com/360CVGroup/RevealLayer", "allowed": ["metadata_accessible"], "note": "metadata readable is not a download"},
+        {"check": "retrieval", "type": "indicator_present", "value": "https://github.com/360CVGroup/RevealLayer", "indicator": "training", "note": "a file-name candidate, not proof the training code runs"},
+        {"check": "human", "type": "no_official_claim", "note": "name match and a matching description do not establish authorship"}
+      ],
+      "labels": [
+        {"subject": "https://github.com/360CVGroup/RevealLayer", "verdict": "unknown",
+         "reason": "no human has confirmed the repository and the paper share an author; the name and description match, which is a candidate signal only",
+         "by": "machine", "at": "2026-09-22", "scope": "repository name and description"},
+        {"subject": "https://huggingface.co/datasets/qihoo360/RevealLayer-100K", "verdict": "unknown",
+         "reason": "the dataset id shares the paper name; the paper_relationship field from the Hub search is 'unverified' by construction",
+         "by": "machine", "at": "2026-09-22", "scope": "Hub search result"}
+      ]
+    },
+    {
+      "id": "stable-layers-paper-and-repo",
+      "channel": "connector",
+      "kind": "given_paper_and_repo",
+      "input": {
+        "paper": {"title": "Stable-Layers: Fine-Tuning Image Layer Decomposition Models with VLM-Scored Reinforcement Learning", "arxiv_id": "2605.30257"},
+        "resources": ["https://github.com/Stability-AI/Stable-Layers"]
+      },
+      "expectations": [
+        {"check": "retrieval", "type": "identifier_resolves", "value": "arXiv:2605.30257"},
+        {"check": "retrieval", "type": "resource_status_in", "value": "https://github.com/Stability-AI/Stable-Layers", "allowed": ["metadata_accessible", "indeterminate"], "note": "indeterminate means the check did not complete, which is not absence"},
+        {"check": "retrieval", "type": "not_claimed_released", "note": "a repository existing is not a released checkpoint"},
+        {"check": "human", "type": "no_official_claim"}
+      ],
+      "labels": [
+        {"subject": "https://github.com/Stability-AI/Stable-Layers", "verdict": "unknown",
+         "reason": "the identifier ends with the paper's project name, which is why it sorted first; authorship unchecked",
+         "by": "machine", "at": "2026-09-22", "scope": "repository identifier"}
+      ]
+    },
+    {
+      "id": "recall-reveallayer",
+      "channel": "connector",
+      "kind": "constrained_selection",
+      "input": {"query": "occlusion aware image decomposition", "start_year": 2025, "limit": 25, "source": "openalex"},
+      "expectations": [
+        {"check": "retrieval", "type": "found_identifiers", "value": ["arXiv:2605.11818"], "note": "a recall case: one paper, so a miss is a coverage hole rather than absence"}
+      ],
+      "labels": []
+    },
+    {
+      "id": "recall-stable-layers",
+      "channel": "connector",
+      "kind": "constrained_selection",
+      "input": {"query": "layer decomposition", "start_year": 2025, "limit": 25, "source": "openalex"},
+      "expectations": [
+        {"check": "retrieval", "type": "found_identifiers", "value": ["arXiv:2605.30257"],
+         "note": "observed 2026-09-22: NOT among the openalex top-25 for 'layer decomposition', while it appeared in an arXiv-sourced run. A miss here is a coverage limit for this query and source, which is what the case now measures"}
+      ],
+      "labels": []
+    },
+    {
+      "id": "recall-unworld-design",
+      "channel": "connector",
+      "kind": "constrained_selection",
+      "input": {"query": "layer-native design", "start_year": 2025, "limit": 25, "source": "openalex"},
+      "expectations": [
+        {"check": "retrieval", "type": "found_identifiers", "value": ["arXiv:2608.03971"],
+         "note": "needed a different phrasing than 'layer decomposition' in a manual run"}
+      ],
+      "labels": []
+    },
+    {
+      "id": "gated-or-absent-resource",
+      "channel": "connector",
+      "kind": "given_paper_and_repo",
+      "input": {
+        "paper": {"title": "LayerD: Decomposing Raster Graphic Designs into Layers", "arxiv_id": "2509.25134"},
+        "resources": ["https://github.com/example-org/does-not-exist-re0-probe"]
+      },
+      "expectations": [
+        {"check": "retrieval", "type": "resource_status_in", "value": "https://github.com/example-org/does-not-exist-re0-probe",
+         "allowed": ["access_failed", "indeterminate"],
+         "note": "a failing check must not be written up as 'not released'"},
+        {"check": "retrieval", "type": "not_claimed_unpublished", "note": "the venue a service reported is what travels; a missed venue is a coverage gap"}
+      ],
+      "labels": []
+    },
+    {
+      "id": "live-report-end-to-end",
+      "channel": "live",
+      "kind": "constrained_selection",
+      "input": {"goal": "Find layer-decomposition papers from 2025 on, follow training code, checkpoints and evaluation configs, separate what the authors declared from what the files show, and list what the evidence does not settle."},
+      "expectations": [
+        {"check": "human", "type": "evidence_ids_exist", "note": "every finding cites an evidence id produced by that same task"},
+        {"check": "human", "type": "declaration_vs_observation", "note": "an author's claim and a file listing must not be presented as the same kind of thing"},
+        {"check": "human", "type": "unsupported_parts_named", "note": "what the evidence does not settle must be listed rather than omitted"}
+      ],
+      "labels": [],
+      "requires_credentials": true
+    }
+  ]
+}

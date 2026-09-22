@@ -18,6 +18,8 @@ test-results/
 playwright-report/
 .DS_Store
 backups/
+# Regenerable evaluation run records; evals/results/SUMMARY.md is the record.
+evals/runs/
 *.egg-info/
 build/
 dist/

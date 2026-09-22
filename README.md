@@ -162,6 +162,26 @@ python skills/re0-paper-search/scripts/paper_search.py \
 
 **召回的上限是页大小**：`--max-papers` 默认 20、工具上限 25。**没有源返回的论文就无法被合并、更正或统计**，所以列表太薄时先调大它。**但要注意代价**：这些源按自己的相关性排序，**本工具不做重排**，所以页越大头部越杂（实测 `layer decomposition` 这种两词查询会把数学和金融论文排到前面）。**召回靠页大小，精确度靠查询词** —— 用目标文献真正在用的词（`image layer decomposition RGBA`），并且**跑多个短查询而不是一个长句**：arXiv 和 Semantic Scholar 对空格分隔的词是受限匹配，长句返回的反而可能**更少**。
 
+### 评测（`evals/`）
+
+把"能不能用"从一次幸运的运行变成可复现的记录。三条通道**互不混算**：`unit`（fixtures，`pytest`/`npm test`）、
+`connector`（真实学术与资源服务，**不需要模型**）、`live`（真实任务，需要 BYOK）。
+
+```bash
+python evals/runner.py --list          # 任务清单（版本化，含标签）
+python evals/runner.py                 # connector 通道，打真网、不用模型
+python evals/runner.py --channel live  # 需要模型配置；没有就记 blocked
+python evals/score.py                  # 写 evals/results/SUMMARY.md
+```
+
+**两条规则写在代码里，不是写在文档里**：① **没有分母就不给 100%** —— 没有样本被人工判为
+official 时，准确率报 `no value` 并给出原因；② **未命中就是未命中** —— 检索完成但结果里没有期望的
+标识符时记 `missed`，任务变 `partial`（这条是评测自己第一次运行就抓到的 bug：当时把一次**召回未命中**
+报成了 `completed`）。
+
+其余状态严格区分：`unknown` = **本次没查成**（网络/限流），不是否定结果；`deferred` = 从同一任务的
+另一步读取；`human` = 需要人判断，跑不出来。**记录里永不写入密钥值**，只记哪些变量名被配置过。
+
 ### 命令行入口
 
 skill 脚本和 `re0` 命令走**同一份实现**（`backend/re0/skill_search.py`），所以两者不会分叉：

@@ -413,6 +413,42 @@ provider-reported usage: {'prompt_tokens': 11, 'completion_tokens': 3, 'total_to
 **未实测**：`--find-artifacts` 在 10 篇满额时对 GitHub 搜索限流（10 次/分钟）的实际影响；
 `描述与论文标题相符` 这个标记的误判率没有统计（只用样例验证过正向命中）。
 
+## 2026-09-22（Issue #7 首批：评测集与三条通道）
+### #7 首批：`evals/` 与三条通道（refs #7）
+
+**实测（真实网络，无模型）**：
+
+```
+$ python evals/runner.py
+reveallayer-paper-and-repo  pending_human  identifier_resolves=unknown resource_status_in=ok
+stable-layers-paper-and-repo  pending_human  identifier_resolves=unknown resource_status_in=ok
+recall-reveallayer            completed      found_identifiers=ok
+recall-stable-layers          partial        found_identifiers=missed
+recall-unworld-design         completed      found_identifiers=ok
+gated-or-absent-resource      pending_human  resource_status_in=ok
+
+$ python evals/runner.py --channel live
+live-report-end-to-end        blocked        （无模型配置，"no model configuration"）
+
+$ python evals/score.py
+- Official-candidate accuracy: no value — no sample in this channel has been judged official yet
+- Resource availability false-positive rate: no value — no resource status to compare
+- usage: unknown reported by the provider
+```
+
+**评测第一次运行就抓到自己的一个 bug**：`recall-stable-layers` 的 25 条结果里**没有**
+`arXiv:2605.30257`，但任务状态被算成 `completed` —— 把**召回未命中报成了完成**。已修：新增 `missed`
+状态、任务变 `partial`，并在该步写明"miss 是这次查询与来源的覆盖缺口，不是论文不存在的证据"；
+`tasks.json` 的备注也改成记录这次观察（manual 运行在 arXiv 源下命中过，openalex 源前 25 条没有）。
+**新增回归测试固定这一点。**
+
+**其余实测结论**：`identifier_resolves=unknown` 是诚实的（arXiv 仍被限流，查不下去≠不存在）；
+`pending_human` 是新增的独立状态（有需要人判的期望，但没有失败），不再混进 `unknown`。
+
+**未实测**：`live` 通道的真实运行（无模型凭据）；`evidence_support_rate` /
+`valid_source_location_rate` / `full_task_rate` 需要一次真实的端到端报告；
+官方 MCP 客户端对本轮 `structuredContent` 的渲染。
+
 ## 2026-09-22（Issue #4 第一部分：统一结果模型）
 ### #4 第一部分：统一结果模型与 MCP 结构化返回（refs #4）
 

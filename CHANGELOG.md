@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### A versioned evaluation set, and a harness that caught its own overclaim (#7)
+
+- Add `evals/`: a versioned public task set with labels (`tasks.json`), a runner for the
+  **connector** channel (real services, no model), a scorer, a result template and its own tests.
+  The three channels — `unit`, `connector`, `live` — are never averaged together, so a fixture
+  result cannot reach a live metric.
+- Two rules are in code rather than in prose. **No denominator is not 100%**: with nothing judged
+  official the accuracy is reported as `no value` plus its reason. And **a miss is a miss**: the
+  first real run reported a recall case as `completed` while the expected arXiv id was absent from
+  the 25 results returned. That is the overclaim this harness exists to prevent, so
+  `found_identifiers` now records `missed` and the task becomes `partial`. The step also states that
+  a miss is a coverage gap for that query and source, never evidence of absence.
+- A live task without model configuration is recorded `blocked`, never `passed`, and the summary
+  counts it as such. Provider usage that was not reported stays `unknown` and is never counted as
+  zero.
+- CI proves the distribution builds (`pip wheel .`) and keeps the deterministic channels; the live
+  channel is a separate `workflow_dispatch`-only workflow, so a push or a fork cannot spend tokens.
+
 ### One versioned result, two machine-readable exits (#4)
 
 - Add `backend/re0/result_model.py`: the result shape every exit shares, carrying `schema_version`
