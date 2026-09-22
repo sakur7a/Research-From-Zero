@@ -33,6 +33,10 @@ A copy is a snapshot: re-copy after changing the repository, or run it from the 
 python scripts/paper_search.py --query "KV cache compression for long-context LLMs" \
     --start-year 2024 --end-year 2026 --json /tmp/papers.json
 
+# Equivalent, once the package is installed. Both call re0.skill_search, so they cannot drift.
+re0 paper search --query "KV cache compression for long-context LLMs" --start-year 2024
+re0 doctor            # what can run now; no network unless --probe-network is passed
+
 ```
 
 ## What it does
@@ -255,7 +259,7 @@ Two layers, and you decide how far to go.
 **Layer 1a — always on.** Code/data URLs **the authors themselves put in the abstract**, marked
 as author-declared. Most abstracts do not contain one, so on its own this is usually empty.
 
-**Layer 1b — `--find-artifacts N`, on by default for the first 5 papers.** A paper frequently
+**Layer 1b — `--find-artifacts N`, on by default for the first 10 papers.** A paper frequently
 carries no link in any metadata field yet does have released code, weights or data, so the skill
 searches **GitHub and the Hugging Face Hub for the paper's project name** — the part of the title
 before a colon, which is also how these projects name their repositories. `RevealLayer:

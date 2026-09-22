@@ -14,6 +14,11 @@ dependencies = [
   "pydantic==2.13.4",
 ]
 
+[project.scripts]
+# One thin entry point. Retrieval and the MCP server live in the package, so the console script
+# and the skill wrapper call the same code instead of two copies of it.
+re0 = "re0.cli:main"
+
 [project.optional-dependencies]
 test = ["pytest==9.0.2"]
 

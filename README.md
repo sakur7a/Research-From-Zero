@@ -139,7 +139,7 @@ python skills/re0-paper-search/scripts/paper_search.py \
 
 **先说清能查到什么**：第一层只读**摘要**，而摘要通常不含代码链接 —— 所以单靠它常常为空。
 
-**所以默认还有第二层：按论文项目名去 GitHub 与 Hugging Face Hub 搜**（`--find-artifacts N`，默认对前 5 篇生效）。很多论文在任何元数据字段里都没有链接，但确实发布了开源；项目名就是标题冒号前那段，也正是这些项目给仓库起名的习惯。实测 `RevealLayer: Disentangling Hidden and Visible Layers…` 的摘要与正文都没有链接，而这一层找到了 `github.com/360CVGroup/RevealLayer`、`huggingface.co/qihoo360/RevealLayer` 与 `RevealLayer-100K` 数据集。
+**所以默认还有第二层：按论文项目名去 GitHub 与 Hugging Face Hub 搜**（`--find-artifacts N`，默认对前 10 篇生效）。很多论文在任何元数据字段里都没有链接，但确实发布了开源；项目名就是标题冒号前那段，也正是这些项目给仓库起名的习惯。实测 `RevealLayer: Disentangling Hidden and Visible Layers…` 的摘要与正文都没有链接，而这一层找到了 `github.com/360CVGroup/RevealLayer`、`huggingface.co/qihoo360/RevealLayer` 与 `RevealLayer-100K` 数据集。
 
 **每个结果都是「名称匹配」，不是作者身份证明**，并且会标注：`描述与论文标题相符`（仓库描述复述了论文标题，强得多）或 `仅名称匹配`。归属仍需你确认 —— `--verify` 回答的是另一个问题：这个候选能不能打开、是不是空的。
 
@@ -147,7 +147,7 @@ python skills/re0-paper-search/scripts/paper_search.py \
 
 第一层永远生效：给出上面的链接，并把**作者自己在摘要里写的** code／data 链接抽出来，标为「开源线索（摘要中自述，未核验）」。
 
-第二层是 `--verify N`（0–5，默认 0）：对前 N 个候选链接跑 Re0 已有的**有界资源核验**，把结果显示在该论文下面：
+第二层是 `--verify N`（0–8，默认 0）：对前 N 个候选链接跑 Re0 已有的**有界资源核验**，把结果显示在该论文下面：
 
 ```
      → https://github.com/microsoft/LoRA
@@ -161,6 +161,22 @@ python skills/re0-paper-search/scripts/paper_search.py \
 **为什么默认不核验**：一次核验约 4 个 GitHub 请求，匿名额度约每小时 60 次，所以 `--verify` 默认 0、上限 8，并且会**显示还有几条未核验**；**未被核验的链接仍按候选打印、不会显示成失败**。要查更多请配 `GITHUB_TOKEN`。**没有用 subagent** —— subagent 给你一段描述，这个检查给你一个能横向比较的状态，且不会把请求失败说成"没开源"。要看得更深，用仓库里已有的 `search_repositories`／`search_hub`／`inspect_resource`／`read_repository_file`／`search_release_discussions`（走 MCP 或任务），不在 skill 里另搭流水线。
 
 **召回的上限是页大小**：`--max-papers` 默认 20、工具上限 25。**没有源返回的论文就无法被合并、更正或统计**，所以列表太薄时先调大它。**但要注意代价**：这些源按自己的相关性排序，**本工具不做重排**，所以页越大头部越杂（实测 `layer decomposition` 这种两词查询会把数学和金融论文排到前面）。**召回靠页大小，精确度靠查询词** —— 用目标文献真正在用的词（`image layer decomposition RGBA`），并且**跑多个短查询而不是一个长句**：arXiv 和 Semantic Scholar 对空格分隔的词是受限匹配，长句返回的反而可能**更少**。
+
+### 命令行入口
+
+skill 脚本和 `re0` 命令走**同一份实现**（`backend/re0/skill_search.py`），所以两者不会分叉：
+
+```bash
+re0 doctor                                            # 现在能跑什么；默认不联网、不花钱
+re0 paper search --query "layer decomposition" --start-year 2025
+re0 mcp                                               # 只读工具走 stdio，本机可用
+```
+
+`doctor` 会分清**不需要模型**的能力（`paper search` 与 `mcp`）和**需要 BYOK** 的独立任务；网络探针**只有**传 `--probe-network` 才会跑，所以日常自检不会产生费用或触发限流。CLI 自己**不会启动第二个 LLM** —— 宿主工具模式和独立 agent 模式是两件事。`re0 paper search --help` 打印的就是 skill 自己的真实参数，不是另一份简化版。
+
+**凭据优先级**：`RE0_ENV_FILE` **精确生效**（指了但读不到会照实报告，**不会静默改用别的文件**），然后 `./.env` 与 `~/.re0/.env`。**其他客户端的 `.env`（如 `~/.codex/skills/.env`）默认不读** —— 读到别的客户端登录的账号是凭据混用，不是便利；要用就显式给 `RE0_ENV_FILE=<路径>` 或设 `RE0_ENV_INCLUDE_AGENT_DIRS=1`。输出只显示**变量名与是否配置**，从不打印值。
+
+> 当前产品顺序：**先把 skill 做成可用的科研能力，Web 平台复用同一核心**。赛事材料是单独分支。
 
 **会议论文（CVPR／NeurIPS／ACL 这类只发在会议上的）已经被覆盖** —— Crossref、Semantic Scholar、OpenAlex 都索引 proceedings，venue 会报出来。`--venue NAME` 把会议名前置到查询里：
 

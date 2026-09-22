@@ -43,6 +43,8 @@ web/agent.html + agent.js        web/index.html + app.js
 | `agent/runtime.py` | Model/tool iteration, budget reservation, cancellation, checkpoint/recovery, context bounds, report validation |
 | `agent/api.py` | UI-facing task/config endpoints, no credentials or internal messages in reads/exports |
 | `mcp_server.py` | MCP-over-stdio retrieval surface; reuses the same tool contracts and opens no database |
+| `skill_search.py` | The literature-search capability itself: query, merge, render, verify. Both entry points below call it, so there is no second copy of the logic |
+| `cli.py` | Thin console entry points (`re0 paper search`, `re0 doctor`, `re0 mcp`). Dispatches only; starts no LLM, and `doctor` probes the network only when asked |
 | `web/agent-core.js` | Pure status/tool presentation logic, independently tested |
 | `web/agent.js` | Task composer, model settings, polling trace, report and evidence views |
 | `web/theme.css` + `web/theme.js` | Shared Emilia light/dark palette (every colour a variable) and the persisted theme toggle used by both pages; no hardcoded colours remain in page CSS |

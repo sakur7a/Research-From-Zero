@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### One search implementation, two entry points (#3)
+
+- Add `backend/re0/cli.py` with `re0 paper search`, `re0 doctor` and `re0 mcp`, and move the
+  literature-search capability into the package as `re0.skill_search`. The skill's
+  `paper_search.py` is now a thin wrapper that locates the package and delegates, so the skill and
+  the console script call one implementation instead of two copies of it.
+- `doctor` separates what runs with **no model key** (`paper search`, `mcp`) from what needs BYOK,
+  and runs no network probe unless `--probe-network` is passed, so a routine check cannot spend
+  money or trip a rate limit. It prints credential **names and set/unset**, never a value.
+- Credential precedence is explicit now: `RE0_ENV_FILE` is honoured exactly and reports when it
+  yields nothing instead of silently falling back, and **another product's `.env` is no longer read
+  implicitly** — reading whichever account that client held is a credential mix-up, not a
+  convenience. Pass `RE0_ENV_FILE` or set `RE0_ENV_INCLUDE_AGENT_DIRS=1`, and the default reports
+  the file it left alone.
+- Fix three documentation drifts the parser contradicting: `--find-artifacts` is 10 by default
+  (prose said 5), `--verify` allows 0-8 (README said 0-5), and `--sources` takes `all` or exactly
+  one source rather than a comma-separated subset. A test now holds the parser and the prose
+  together.
+
 ### Venue-aware search, and a model probe that never prints a key
 
 - Add `--venue NAME` to the skill. Conference-only papers (CVPR, NeurIPS, ACL…) were already

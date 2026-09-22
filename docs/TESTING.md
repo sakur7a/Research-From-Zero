@@ -413,6 +413,31 @@ provider-reported usage: {'prompt_tokens': 11, 'completion_tokens': 3, 'total_to
 **未实测**：`--find-artifacts` 在 10 篇满额时对 GitHub 搜索限流（10 次/分钟）的实际影响；
 `描述与论文标题相符` 这个标记的误判率没有统计（只用样例验证过正向命中）。
 
+## 2026-09-22（Issue #3 首个增量）
 
+### #3 首个增量：统一入口与凭据优先级（未完工的项列在最后）
 
+实测（本机）：
 
+- `re0 paper search --help` 打印的是**真实参数**（`--venue/--max-papers/--find-artifacts/--verify`），
+  不是简化版；`skills/.../paper_search.py` 是薄包装，委托同一个 `re0.skill_search`。
+- `re0 doctor`：**默认不跑网络探针**（输出明写 "network probes: not run" 并说明加
+  `--probe-network` 才花钱/触限流）；凭据只列**变量名与是否配置**，不打印值。
+- 凭据优先级：`RE0_ENV_FILE` 指了但读不到会**照实报告**而不静默回落；其他客户端的
+  `~/.codex/skills/.env` **默认不读**，并给出迁移提示（实测输出含 "belongs to another product"）。
+- `python -m re0`（配 `PYTHONPATH=backend`）在**不安装**的情况下可用：`doctor`、
+  `paper search --help`、`--version` 均实测通过。
+- 参数契约由测试钉住：解析器默认值与 README/SKILL.md 的措辞必须一致
+  （修掉三处漂移：`--find-artifacts` 默认 5→10、`--verify` 上限 0–5→0–8、
+  `--sources` 从"可逗号分隔多源"改为"all 或恰好一个"）。
+
+**未实测（环境限制，非代码问题）**：从构建产物在干净虚拟环境安装。
+本环境 `pip install setuptools` 稳定返回 `No matching distribution found`
+（Tsinghua 镜像侧被挡，4 次一致），没有 setuptools 就无法构建 wheel 或 editable 安装；
+因此 `pyproject.toml` 的 console script 只做了**静态断言**，`re0.exe` 未生成。
+**恢复网络/索引后需补测**：`pip wheel .` → 在新 venv 安装 → `re0 doctor` 与
+非仓库目录下的检索 fixture、MCP 握手。
+
+**#3 未完成项**：skill 打包分发（把 skill 目录作为包数据交付 + `re0 skill install --target`
+带预览/冲突提示/不覆盖）、SKILL.md 按 Agent Skills 规范拆 `references/`、
+以及"至少一个实际宿主按 #1 记录安装与调用结果"（依赖 #1 的宿主确认）。

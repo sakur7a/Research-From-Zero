@@ -312,6 +312,13 @@ SKILL_SCRIPT = Path(__file__).resolve().parents[2] / "skills" / "re0-paper-searc
 
 
 def load_skill_module():
+    """The retrieval logic lives in the package now, so this is the module under test."""
+    from re0 import skill_search
+    return skill_search
+
+
+def load_skill_wrapper():
+    """The skill file is a thin wrapper; it only has to locate the package and delegate."""
     spec = importlib.util.spec_from_file_location("paper_search_skill", SKILL_SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -394,9 +401,14 @@ def test_the_retrieval_rules_reach_every_consumer_that_reads_them():
     catalog = {entry["name"]: entry["description"] for entry in mcp_server.catalog(web_enabled=False)}
     assert catalog["search_papers"] == description
 
-    script = (Path(__file__).resolve().parents[2] / "skills" / "re0-paper-search"
-              / "scripts" / "paper_search.py").read_text(encoding="utf-8")
+    # The rules live in the package now, next to the code they describe.
+    script = (Path(__file__).resolve().parents[2] / "backend" / "re0" / "skill_search.py").read_text(encoding="utf-8")
     assert "recall ceiling" in script and "Several short queries" in script
+    # And the skill file delegates rather than keeping a second copy of the search logic.
+    wrapper = (Path(__file__).resolve().parents[2] / "skills" / "re0-paper-search"
+               / "scripts" / "paper_search.py").read_text(encoding="utf-8")
+    assert "from re0.skill_search import main" in wrapper
+    assert "def locate_backend()" in wrapper
 
     skill = (Path(__file__).resolve().parents[2] / "skills" / "re0-paper-search"
              / "SKILL.md").read_text(encoding="utf-8")
@@ -407,7 +419,7 @@ def test_the_retrieval_rules_reach_every_consumer_that_reads_them():
 
 
 def test_the_skill_locates_re0_whether_it_lives_in_the_repository_or_not(tmp_path, monkeypatch):
-    module = load_skill_module()
+    module = load_skill_wrapper()
     repo = Path(__file__).resolve().parents[2]
     # Inside the repository: discovered from the script's own depth.
     monkeypatch.delenv("RE0_HOME", raising=False)
@@ -650,3 +662,113 @@ def test_the_artifact_line_prints_even_when_the_abstract_has_no_link(capsys):
     printed = capsys.readouterr().out
     # An absent artifact module has to read as a finding, not as an omission.
     assert "开源线索: 摘要中未提及" in printed
+
+def test_the_cli_is_reachable_without_installing_a_console_script():
+    """The console script only exists after an install, and an install needs a build backend. A
+    checkout must still be usable, so the module entry point is what makes that true."""
+    root = Path(__file__).resolve().parents[2]
+    entry = root / "backend" / "re0" / "__main__.py"
+    assert entry.is_file()
+    assert "from re0.cli import main" in entry.read_text(encoding="utf-8")
+    # The distribution declares the script too, so an install does provide `re0`.
+    assert 're0 = "re0.cli:main"' in (root / "pyproject.toml").read_text(encoding="utf-8")
+
+
+def test_the_documented_flag_contract_matches_the_parser():
+    """A documented default that is not the real one is worse than no documentation, so the parser
+    and the prose are held together here. Three drifts motivated this: prose said the name search
+    covered 5 papers when the default is 10, the README said `--verify` took 0-5 when the cap is 8,
+    and `--sources` was described as accepting a comma-separated subset while the code refuses more
+    than one."""
+    from re0 import skill_search
+    parser = skill_search.build_parser()
+    options = {action.dest: action for action in parser._actions}
+    assert options["find_artifacts"].default == 10
+    assert options["verify"].default == 0
+    assert options["max_papers"].default == 20
+    assert options["sources"].default == "all"
+
+    # argparse wraps the help to the terminal width, so the assertions run on a flattened copy.
+    help_text = " ".join(parser.format_help().split())
+    assert "exactly one of" in help_text
+    assert "default 10" in help_text and "tool maximum 25" in help_text
+
+    root = Path(__file__).resolve().parents[2]
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    skill = (root / "skills" / "re0-paper-search" / "SKILL.md").read_text(encoding="utf-8")
+    for prose in (readme, skill):
+        assert "前 5 篇" not in prose and "first 5 papers" not in prose
+        assert "0\u20135，默认 0" not in prose
+    assert "默认对前 10 篇生效" in readme
+    assert "first 10 papers" in skill
+
+
+def test_the_console_entry_point_keeps_no_model_and_byok_modes_apart(capsys):
+    """`doctor` must say what runs without a key, must not probe the network unless asked, and
+    must never read a credential value out."""
+    from re0 import cli
+    assert cli.main(["doctor"]) == 0
+    printed = capsys.readouterr().out
+    assert "need no model key" in printed and "standalone task does" in printed
+    assert "network probes: not run" in printed
+    assert "--probe-network" in printed
+    # Names and a yes/no only: a value must never be printed, not even masked.
+    assert "RE0_LLM_API_KEY: not set" in printed
+    assert "openssl" not in printed
+
+
+def test_paper_search_forwards_its_flags_to_the_single_search_entry_point(capsys):
+    """The console script and the skill wrapper must not diverge: both call re0.skill_search."""
+    from re0 import cli, skill_search
+    captured = {}
+
+    def spy(argv=None):
+        captured["argv"] = argv
+        return 0
+
+    original = skill_search.main
+    skill_search.main = spy
+    try:
+        assert cli.main(["paper", "search", "--query", "layer decomposition", "--verify", "0"]) == 0
+    finally:
+        skill_search.main = original
+    assert captured["argv"] == ["--query", "layer decomposition", "--verify", "0"]
+    capsys.readouterr()
+
+
+def test_an_unknown_command_is_refused_without_a_traceback(capsys):
+    from re0 import cli
+    assert cli.main(["nope"]) == 2
+    assert "invalid choice" in capsys.readouterr().err
+    assert cli.main([]) == 2
+    capsys.readouterr()
+
+
+def test_a_credential_file_named_explicitly_is_never_silently_replaced(monkeypatch, tmp_path):
+    """Passing RE0_ENV_FILE means "use this file". Falling back to another one when it yields
+    nothing is how a caller ends up authenticated as the wrong account."""
+    from re0 import skill_search
+    missing = tmp_path / "absent.env"
+    monkeypatch.setenv("RE0_ENV_FILE", str(missing))
+    reported = skill_search.load_credentials()
+    assert str(missing) in reported and "supplied nothing" in reported
+
+    credentials = tmp_path / "creds.env"
+    credentials.write_text("GITHUB_TOKEN=placeholder-not-a-real-token\n", encoding="utf-8")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("RE0_ENV_FILE", str(credentials))
+    assert "1 variables set" in skill_search.load_credentials()
+    # The value was applied to the process, and the report still names the file instead.
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+
+def test_another_products_credential_file_is_not_read_unless_asked(monkeypatch):
+    """Reading a different client's .env implicitly would pick up whichever account it held, so
+    the default is to leave it alone and say so."""
+    from re0 import skill_search
+    monkeypatch.delenv("RE0_ENV_FILE", raising=False)
+    monkeypatch.delenv("RE0_ENV_INCLUDE_AGENT_DIRS", raising=False)
+    assert "~/.codex/skills/.env" not in skill_search.ENV_FILES
+    assert skill_search.AGENT_ENV_FILES == ("~/.codex/skills/.env",)
+    reported = skill_search.load_credentials()
+    assert "another product" in reported or "ambient environment" in reported
