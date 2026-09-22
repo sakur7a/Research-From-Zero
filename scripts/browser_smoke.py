@@ -15,11 +15,13 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
+sys.path.insert(0, str(ROOT / "backend" / "tests"))
 
 import httpx
 from fastapi.testclient import TestClient
 from playwright.sync_api import sync_playwright
 from re0.main import create_app
+from test_zotero import KEY as ZOTERO_KEY, ZoteroService, item as zotero_item
 
 
 def run(output_dir: Path):
@@ -27,7 +29,15 @@ def run(output_dir: Path):
     errors = []
     completed = []
     requests = []
+    # One fixture library, served in-process. Anything that is not api.zotero.org still fails the
+    # run, so "offline" keeps meaning offline: this replaces no provider, it stands in for one.
+    zotero_service = ZoteroService(
+        items=[zotero_item("AAAA0001", 300, "UI 同步进来的论文", doi="10.9999/ui-zotero",
+                           collections=["COLL0001"], abstract="fixture abstract")],
+        library_version=300)
     def no_network(request):
+        if request.url.host == "api.zotero.org":
+            return zotero_service(request)
         raise AssertionError("Offline browser test must not contact external providers")
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp, TestClient(create_app(str(Path(temp)/"browser.sqlite3"), httpx.MockTransport(no_network))) as client, sync_playwright() as engine:
         launch = {"headless": True}
@@ -129,6 +139,52 @@ def run(output_dir: Path):
         page.locator('#confirm-import').click()
         page.locator('.paper-title').filter(has_text='Imported CSL paper').wait_for()
         completed.append("csl_file_preview_and_import")
+        # Zotero read-only sync through the same dialog workflow: credentials, collection scoping,
+        # preview, then an explicit commit. The preview must write nothing.
+        page.locator('[data-action="settings"]').first.click()
+        assert '只读增量同步' in page.locator('dialog.modal').inner_text()
+        assert '远端 API 同步尚未实现' not in page.locator('dialog.modal').inner_text()
+        page.locator('#settings-zotero').click()
+        page.locator('#zotero-form').wait_for()
+        page.locator('#zotero-form [name=library_id]').fill('12345')
+        page.locator('#zotero-form [name=api_key]').fill(ZOTERO_KEY)
+        page.locator('#zotero-form [name=label]').fill('UI 测试库')
+        page.locator('#zotero-collections').click()
+        page.locator('#zotero-scope input[name=collection]').wait_for()
+        assert page.locator('#zotero-scope').inner_text().find('图层分解') >= 0
+        page.locator('#zotero-scope input[name=collection]').first.check()
+        page.screenshot(path=str(output_dir/'library-zotero-scope.png'), full_page=True)
+        page.locator('#zotero-preview').click()
+        page.locator('#zotero-apply').wait_for()
+        preview_text = page.locator('#zotero-result').inner_text()
+        assert '这是预览' in preview_text and '游标 0 → 300' in preview_text, preview_text
+        assert 'UI 同步进来的论文' in preview_text
+        papers_before = len(client.get('/api/papers').json())
+        page.screenshot(path=str(output_dir/'library-zotero-preview.png'), full_page=True)
+        page.locator('#zotero-apply').click()
+        page.locator('.paper-title').filter(has_text='UI 同步进来的论文').wait_for()
+        assert len(client.get('/api/papers').json()) == papers_before + 1
+        status = client.get('/api/zotero/status',
+                            params={'library_type': 'user', 'library_id': '12345'}).json()
+        assert status['cursor']['committed_version'] == 300 and status['links'] == {'linked': 1}
+        # The nickname survives the commit on the cursor row, so a later status can say which
+        # library it is talking about without being handed the credentials again.
+        assert status['cursor']['label'] == 'UI 测试库', status['cursor']
+        assert status['cursor']['scope']['collections'] == ['COLL0001'], status['cursor']['scope']
+        # The key is used and dropped: the field is cleared once the commit returns, and it was
+        # never written to the database.
+        assert page.locator('#zotero-form [name=api_key]').input_value() == ''
+        with client.app.state.store.db.connect() as con:
+            assert ZOTERO_KEY not in '\n'.join(con.iterdump())
+        assert ZOTERO_KEY not in json.dumps(status, ensure_ascii=False)
+        # A second sync over an unchanged library duplicates nothing.
+        page.locator('#zotero-form [name=api_key]').fill(ZOTERO_KEY)
+        page.locator('#zotero-preview').click()
+        page.wait_for_function("document.querySelector('#zotero-result').textContent.includes('游标 300 → 300')")
+        assert '无变化' in page.locator('#zotero-result').inner_text()
+        page.screenshot(path=str(output_dir/'library-zotero-nochange.png'), full_page=True)
+        page.keyboard.press('Escape')
+        completed.append("zotero_readonly_sync_preview_then_commit")
         papers=client.get('/api/papers').json()
         actual=next(p for p in papers if p['title']==title)
         assert actual['notes']=='Edited note: durable research context.'

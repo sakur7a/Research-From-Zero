@@ -35,10 +35,28 @@
   will not retry itself.
 - `disconnect` forgets the cursor and the collection selection and keeps every paper;
   `--remove-links` also drops the mappings, and still deletes no research record.
-- 417 Python tests (was 393), all offline against a fixture Zotero service. **Not done in this
-  increment:** the HTTP endpoints and the web surface (the service is shared and ready to wrap),
-  write-back even as a dry-run contract, and any real-account run — that needs the owner's local
-  authorization, so it stays marked `live` and unauthorized.
+- Add the HTTP surface over the same service: `GET /api/zotero/status`, `GET /api/zotero/links`,
+  `POST /api/zotero/collections`, `PUT /api/zotero/selection`, `POST /api/zotero/sync` and
+  `POST /api/zotero/disconnect`. **Preview is the default here too** — the body carries `apply`, and
+  a request without it writes nothing but the collection list. `status` and `links` need no
+  credential at all, so "what is mapped and where does the cursor stand" can be answered without
+  handing over a key again.
+- The key crosses the wire as a `SecretStr`, which is why it cannot ride out in a repr, a log line or
+  an echoed validation error. It is used for the one call and dropped: the database holds the
+  mapping, the cursor and the selection, never the key. `/api/zotero/sync` is serialized on a lock,
+  so a second sync of the same library gets a 409 rather than two writers racing one cursor.
+- **Scope filters are no longer silently narrowed.** Selecting three collections sends all three
+  (Zotero accepts them comma-separated) where the first implementation sent one; several tags are
+  sent as a union and the response *says* it is a union rather than leaving the reader to guess an
+  intersection. The applied scope is returned beside the plan and stored on the cursor.
+- The library page's settings dialog replaces the paragraph that claimed remote sync was
+  unimplemented — a statement that had become false — with a credentials form, a collection picker,
+  a preview and an explicit commit. The key field is cleared as soon as the commit returns, and the
+  dialog clears it again on close.
+- 428 Python tests (was 393), all offline against a fixture Zotero service; the browser smoke now
+  drives the dialog end to end and asserts the key reaches neither `iterdump()` nor the status JSON.
+  **Not done in this increment:** write-back even as a dry-run contract, and any real-account run —
+  that needs the owner's local authorization, so it stays marked `live` and unauthorized.
 
 ### Continuing a research conversation: follow-ups, changed constraints, auditable reruns (#9)
 

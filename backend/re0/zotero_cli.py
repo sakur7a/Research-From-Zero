@@ -173,9 +173,11 @@ def _library_arguments(parser, *, needs_selection: bool = True) -> None:
     parser.add_argument("--label", default="", help="a name for this connection, stored locally")
     if needs_selection:
         parser.add_argument("--collection", action="append", default=[], metavar="KEY",
-                            help="restrict the sync to one collection; repeatable")
+                            help="restrict the sync to these collections; repeatable, all of them "
+                                 "are sent in one request")
         parser.add_argument("--tag", action="append", default=[], metavar="NAME",
-                            help="restrict the sync to these tags (Zotero ANDs up to five)")
+                            help="restrict the sync to these tags; repeatable, matched as a union "
+                                 "(an item carrying any of them is read)")
     parser.add_argument("--db", default="", help="library database path (default: $RE0_DB)")
 
 

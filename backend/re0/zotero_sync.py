@@ -167,7 +167,7 @@ def plan(store: ZoteroStore, papers: list[dict], connection: Connection, *,
 
     accounted = len(seen) + len(deleted)
     unaccounted = max(0, len(changed) - accounted)
-    notes = []
+    notes = list(page_info.get("scope_notes") or [])
     if unaccounted:
         notes.append(UNACCOUNTED_NOTE.format(count=unaccounted,
                                              types="、".join(BIBLIOGRAPHIC_ITEM_TYPES[:6]) + " 等"))
@@ -198,6 +198,7 @@ def plan(store: ZoteroStore, papers: list[dict], connection: Connection, *,
                      "doi": entry["doi"], "matched_on": entry["matched_on"]}
                     for entry in (added + updated + linked)[:PREVIEW_ITEMS]],
         "pages": page_info, "notes": notes,
+        "scope": page_info.get("scope") or {},
         "note": "这是预览：没有写入任何内容，游标没有移动。取消同步等于什么都不做。",
     }
 
@@ -248,8 +249,10 @@ def commit(store: ZoteroStore, plan: dict, connection: Connection) -> dict:
                         "committed_version=excluded.committed_version, label=excluded.label, "
                         "scope=excluded.scope, updated_at=excluded.updated_at",
                         (kind, identifier, target_version, target_version, connection.label[:200],
-                         encode({"collections": list(connection.collections),
-                                 "tags": list(connection.tags)}), stamp))
+                         # The scope as it was applied, not as it was asked for: `scope_filters`
+                         # deduplicates and clamps, and a stored scope that disagreed with the
+                         # parameters actually sent would make `status` describe a different sync.
+                         encode(plan.get("scope") or {}), stamp))
             con.execute("INSERT INTO zotero_sync_log(library_type,library_id,at,applied,data) "
                         "VALUES (?,?,?,1,?)",
                         (kind, identifier, stamp, encode({"counts": plan["counts"],

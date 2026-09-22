@@ -308,6 +308,22 @@ rolled back.
 The key is held for the length of one call and stored nowhere. The console reads it from the
 environment rather than a flag, because a command line persists in shell history and the process list.
 
+The HTTP endpoints wrap that same service rather than restating it: `GET /api/zotero/status` and
+`GET /api/zotero/links` need no credential, because "what is mapped and where does the cursor stand"
+should be answerable without handing over a key again; `POST /api/zotero/collections`,
+`PUT /api/zotero/selection`, `POST /api/zotero/sync` and `POST /api/zotero/disconnect` carry one for
+the length of the call. Preview is the default on the wire too — `apply` is a field in the body, and
+without it nothing is written but the collection list. `sync` is serialized on one lock, so two
+writers cannot race a single cursor; the second caller gets a 409. The mapping store shares the
+library database on purpose, since a link points at a paper row and the two must be backed up and
+migrated together.
+
+Scope filters are reported rather than applied silently. `scope_filters()` returns the parameters it
+will send *and* the scope they mean, so selecting three collections sends all three and several tags
+are sent as a union with the response saying it is a union. A filter that quietly narrows produces a
+result set that looks complete while covering less than was asked for, which is the one failure this
+connector cannot afford — the same reason a narrow `itemType` list has to report its `unaccounted`.
+
 ## Deliberately not implemented
 
 Arbitrary website fetching/browser automation, vector memory, theorem graphs,

@@ -6,13 +6,14 @@ from contextlib import asynccontextmanager
 import threading
 import time
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .agent.api import agent_router
@@ -24,6 +25,8 @@ from .models import MetadataRequest, PaperInput, ResourceAudit, ResourceInput, T
 from .providers import ProviderError, check_resource, resolve_metadata
 from .resource_audit import audit_from_observation
 from .service import Store, bibtex_export, validation_message
+from .zotero import Connection, ZoteroClient, ZoteroError, ZoteroStore
+from .zotero_sync import sync as run_zotero_sync
 
 ROOT = Path(__file__).resolve().parents[2]
 WEB = ROOT / "web"
@@ -42,6 +45,39 @@ class AuditImport(BaseModel):
     model_config = ConfigDict(extra="forbid")
     items: list[dict] = Field(max_length=200)
     dry_run: bool = True
+
+
+class ZoteroLibrary(BaseModel):
+    """Which library, and nothing else. Used by the endpoints that need no credential."""
+
+    model_config = ConfigDict(extra="forbid")
+    library_type: Literal["user", "group"] = "user"
+    library_id: str = Field(min_length=1, max_length=20)
+
+
+class ZoteroSelection(ZoteroLibrary):
+    collections: list[str] = Field(default_factory=list, max_length=20)
+
+
+class ZoteroDisconnect(ZoteroLibrary):
+    remove_links: bool = False
+
+
+class ZoteroConnect(ZoteroLibrary):
+    """One call's worth of credential.
+
+    `SecretStr` so the key cannot ride out in a repr, a log line or an echoed validation error; the
+    app-wide handler already replaces every message because model configuration carries secrets, and
+    this body carries one too. It is used for the request and then dropped — the database stores the
+    mapping, the cursor and the collection selection, never the key.
+    """
+
+    api_key: SecretStr
+    label: str = Field(default="", max_length=200)
+    collections: list[str] = Field(default_factory=list, max_length=20)
+    tags: list[str] = Field(default_factory=list, max_length=10)
+    max_requests: int = Field(default=60, ge=3, le=200)
+    apply: bool = False
 
 
 def create_app(db_path: str | None = None, transport=None, model_factory=None) -> FastAPI:
@@ -67,6 +103,16 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None) -
         # FastAPI normally echoes invalid input; configuration payloads contain secrets.
         return JSONResponse({"detail": [{"loc": e["loc"], "msg": "输入格式或取值不符合要求", "type": e["type"]} for e in exc.errors()]}, status_code=422)
     app.state.store = store
+    # Shares the library database: a Zotero mapping points at a paper row, so the two must live in
+    # one file and one backup. It holds mappings, cursors and collection selections — never a key.
+    zotero = ZoteroStore(store.db)
+    app.state.zotero = zotero
+    zotero_guard = threading.Lock()
+
+    def zotero_connection(data: ZoteroConnect) -> Connection:
+        return Connection(library_type=data.library_type, library_id=data.library_id,
+                          api_key=data.api_key.get_secret_value(), label=data.label,
+                          collections=list(data.collections), tags=list(data.tags))
     audit_slots = threading.BoundedSemaphore(2)
     active_resources: set[str] = set()
     active_guard = threading.Lock()
@@ -237,6 +283,68 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None) -
     @app.post("/api/import/resource-audits")
     def import_resource_audits(data: AuditImport):
         return store.import_audits(data.items, data.dry_run)
+
+    # --- Zotero: read-only, preview by default, and the key lives only for the length of a call ---
+
+    @app.get("/api/zotero/status")
+    def zotero_status(library_type: str = Query("user", pattern="^(user|group)$"),
+                      library_id: str = Query(min_length=1, max_length=20)):
+        # Needs no credential: what is mapped, where the cursor stands, which collections are
+        # selected. Contains no key and no note text.
+        return zotero.status(Connection(library_type=library_type, library_id=library_id))
+
+    @app.get("/api/zotero/links")
+    def zotero_links(paper_id: str = Query("", max_length=80)):
+        return zotero.links(paper_id=paper_id)
+
+    @app.post("/api/zotero/collections")
+    def zotero_collections(data: ZoteroConnect):
+        """Read the remote collection list — names and keys only, never their contents."""
+        connection = zotero_connection(data)
+        try:
+            with ZoteroClient(connection, transport=transport,
+                              max_requests=min(data.max_requests, 10)) as client:
+                rows = client.collections()
+        except ZoteroError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        written = zotero.save_collections(connection, rows,
+                                          selected=list(data.collections) or None)
+        return {"connection": connection.public(), "collections": rows, "stored": written,
+                "note": "只读了集合名称与 key；集合内容要等同步时按条目读取"}
+
+    @app.put("/api/zotero/selection")
+    def zotero_selection(data: ZoteroSelection):
+        """Choosing which collections a sync covers is a scope decision, so it is explicit."""
+        return zotero.select_collections(
+            Connection(library_type=data.library_type, library_id=data.library_id),
+            list(data.collections))
+
+    @app.post("/api/zotero/sync")
+    def zotero_sync_endpoint(data: ZoteroConnect):
+        """Preview by default; `apply: true` commits. One call, one transaction, one cursor move.
+
+        Serialized on a lock: two concurrent syncs of the same library would each read the same
+        window and race on the cursor, and the loser's plan would be stale. Refusing the second is
+        cheaper than explaining it afterwards.
+        """
+        if not zotero_guard.acquire(blocking=False):
+            raise HTTPException(409, "已有一个 Zotero 同步在进行；请等它结束，不要并发同步同一个库")
+        try:
+            return run_zotero_sync(zotero, store.list_papers(), zotero_connection(data),
+                                   transport=transport, apply=data.apply,
+                                   max_requests=data.max_requests)
+        except ZoteroError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        finally:
+            zotero_guard.release()
+
+    @app.post("/api/zotero/disconnect")
+    def zotero_disconnect(data: ZoteroDisconnect):
+        """Forget the cursor and the selection. Papers, notes, resources and evidence are never
+        touched, with or without `remove_links`."""
+        return zotero.disconnect(Connection(library_type=data.library_type,
+                                            library_id=data.library_id),
+                                 remove_links=data.remove_links)
 
     @app.get("/api/export")
     def export(format: str = Query("json", pattern="^(json|bibtex)$")):

@@ -85,6 +85,17 @@ never requested at all — the item call carries an inclusion list of bibliograp
 types — and what that excludes is counted and reported rather than silently
 absent. Sync is read-only: the connector has no write method.
 
+Over HTTP the key arrives as a `SecretStr`, so it cannot ride out in a repr, a
+log line or an echoed validation error — the app-wide handler already replaces
+every validation message, and this body carries a secret too. Two endpoints need
+no credential at all (`status`, `links`), so checking what is mapped does not
+require re-sending a key. Preview is the default: a sync body without `apply`
+writes nothing, and one sync at a time is enforced by a lock rather than by
+trusting the caller not to click twice. In the browser the field is cleared as
+soon as the commit returns and again when the dialog closes; the key is never
+put in frontend storage. Filters are reported, not narrowed silently: a scope
+that covered less than the reader asked for would look like a complete sync.
+
 Continuing a conversation does not reset any of it. Model and tool counts are
 summed across every turn of a conversation and **recomputed from the runs**
 rather than incremented, so a follow-up cannot escape a cap by being a new run;

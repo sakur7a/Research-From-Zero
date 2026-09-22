@@ -222,16 +222,14 @@ class ZoteroClient:
         # while that number is still unmet, the read was truncated — even when the last page was
         # empty and the pager therefore reported "complete".
         promised = [0]
+        applied = scope_filters(collections, tags)
 
         def fetch(cursor: str):
             start = int(cursor or 0)
             params: dict = {"format": "json", "since": str(since), "limit": str(PAGE_SIZE),
                             "start": str(start),
                             "itemType": "||".join(BIBLIOGRAPHIC_ITEM_TYPES)}
-            if collections:
-                params["collection"] = collections[0]
-            if tags:
-                params["tag"] = "::".join(tags[:5])
+            params.update(applied["params"])
             payload, headers = self._get(self.connection.prefix + "/items", params)
             if not isinstance(payload, list):
                 raise ZoteroError("条目列表格式无效")
@@ -252,7 +250,37 @@ class ZoteroClient:
         if len(received) > MAX_ITEMS_PER_SYNC:
             raise ZoteroError(f"本次变更超过 {MAX_ITEMS_PER_SYNC} 条；请缩小集合范围后分次同步")
         return received, {"pages_fetched": outcome.pages_fetched, "requests_used": outcome.requests_used,
-                          "stop_reason": outcome.stop_reason, "stops": stops}
+                          "stop_reason": outcome.stop_reason, "stops": stops,
+                          "scope": applied["scope"], "scope_notes": applied["notes"]}
+
+
+def scope_filters(collections: list[str] = (), tags: list[str] = ()) -> dict:
+    """The query parameters a scoped request actually sends, and what that means.
+
+    Returning the applied scope beside the parameters is the point: a filter that is silently
+    narrowed — one collection honoured out of three, a tag list truncated — produces a result set
+    that looks complete while covering less than the caller asked for. Zotero accepts several
+    collections comma-separated, so nothing has to be dropped there. Tags are a union (comma), not an
+    intersection (`::`), and that is stated rather than left for the reader to guess.
+    """
+    keys = [_text(key, 8) for key in collections or []]
+    keys = [key for key in dict.fromkeys(keys) if key]
+    names = [_text(name, 120) for name in tags or []]
+    names = [name for name in dict.fromkeys(names) if name]
+    params: dict = {}
+    notes: list[str] = []
+    if keys:
+        params["collection"] = ",".join(keys)
+    if names:
+        params["tag"] = ",".join(names)
+        notes.append("标签按并集过滤（逗号），不是交集：命中标签里任意一个的条目都会被读到")
+    if not keys and not names:
+        notes.append("没有选择集合或标签，本次读取整个库中符合条件的条目")
+    return {"params": params,
+            "scope": {"collections": keys, "tags": names,
+                      "collection_mode": "union" if keys else "",
+                      "tag_mode": "union" if names else ""},
+            "notes": notes}
 
 
 @dataclass

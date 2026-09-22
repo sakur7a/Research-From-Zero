@@ -155,14 +155,18 @@ def run(output):
         page.locator('#followup-form [name=authorize]').check()
         page.screenshot(path=str(output/'agent-followup-composer.png'),full_page=True)
         page.locator('#followup-form [type=submit]').click()
-        # Wait on the turn label, not on the status chip: run 1 already reads "报告已生成", so a
-        # status-only wait passes against the stale DOM before the new turn is rendered.
+        # Wait on the turn label, not on the status chip alone: run 1 already reads "报告已生成", so a
+        # status-only wait passes against the stale DOM before the new turn is rendered. The label
+        # alone is not enough either — it appears when the turn starts, and the delta only exists
+        # once this turn's report does, so both are required in one snapshot.
         page.wait_for_function("document.querySelector('.run-controls span')?.textContent.includes('第 2 轮 · 追问')",timeout=20000)
+        page.wait_for_function("document.querySelector('.run-controls span')?.textContent.includes('第 2 轮 · 追问') && document.querySelector('.status')?.classList.contains('completed')",timeout=30000)
         assert '第 2 轮 · 追问' in page.locator('.run-controls span').first.inner_text()
         history=client.get('/api/agent/runs').json()
         assert len(history)==2,history
         second=[row for row in history if row['turn']==2][0]
         assert second['kind']=='followup'
+        assert second['status']=='completed',second
         assert second['conversation_id']==[row for row in history if row['turn']==1][0]['conversation_id']
         detail=client.get('/api/agent/runs/'+second['id']).json()
         # Reuse means the material was carried, not fetched again.

@@ -290,12 +290,64 @@ function settingsDialog() {
   const dialog=openDialog(`${modalHead('DATA & PRIVACY','数据与设置','这是本地单用户预览版，没有账号系统；请勿直接暴露到公网。')}
   <div class="settings-card"><div>${icon('database',22)}<strong>你的研究，留在本地</strong></div><p>${total.papers} 篇论文 · ${total.resources} 个资源。数据库默认保存在项目的 <code>.data/re0.sqlite3</code>。没有遥测，没有自动上传附件或笔记。</p></div>
   <h3>导出与备份</h3><p class="muted">JSON 导出包含笔记、用户声明和全部核验历史；BibTeX 用于引文工具。完整恢复请使用 SQLite 备份，详见 README。</p><div class="settings-actions"><a class="btn" href="/api/export" download>${icon('download')} 导出 JSON</a><a class="btn" href="/api/export?format=bibtex" download>${icon('download')} 导出 BibTeX</a></div>
-  <h3>Zotero 连接</h3><p class="muted">当前支持导入 Zotero 导出的 CSL JSON；不包含附件、批注或双向同步。远端 API 同步尚未实现。</p><button class="btn" id="settings-import">${icon('upload')} 导入 CSL JSON</button>
+  <h3>Zotero 连接</h3><p class="muted">两条路：<strong>导入 CSL JSON</strong>（离线文件，先预览再确认），或<strong>只读增量同步</strong>一个 Zotero 库（按版本游标，只读文献类型，不读取附件、批注或笔记）。远端删除只标记 tombstone，不会删掉这里的笔记、资源或核验记录。仍不支持双向写回。</p><div class="settings-actions"><button class="btn" id="settings-import">${icon('upload')} 导入 CSL JSON</button><button class="btn" id="settings-zotero">${icon('database')} 连接 Zotero 库</button></div>
   <h3>检查行为</h3><div class="settings-facts"><span>触发方式<strong>用户手动点击</strong></span><span>自动执行代码<strong>关闭 / 未实现</strong></span><span>LLM 分析<strong>未接入</strong></span><span>定时复查<strong>未启用</strong></span></div>
   <p class="muted">只有核验或元数据填充操作会请求对应的外部服务。GitHub、Hub 和文献元数据 API 可能限流；60 秒内重复核验会复用历史结果。</p>
   <h3>演示数据</h3><p class="muted">演示论文与检查结果均为虚构，可单独清除，不影响真实论文。</p><div class="settings-actions">${button('载入演示','seed-demo')}${button('清除演示','clear-demo')}</div>`,{wide:true});
   dialog.querySelector('#settings-import').onclick=()=>{dialog.close();importDialog();};
+  dialog.querySelector('#settings-zotero').onclick=()=>{dialog.close();zoteroDialog();};
   dialog.querySelectorAll('[data-action]').forEach(node=>node.onclick=async()=>{await handleAction(node.dataset.action,node);dialog.close();});
+}
+function zoteroDialog() {
+  // The key is typed here, sent once per request, and never stored — not in the database, not in
+  // localStorage, not in this module's state. Closing the dialog discards it. That is the same
+  // arrangement the model key uses, and it is stated in the dialog rather than assumed.
+  const dialog=openDialog(`${modalHead('ZOTERO SYNC','只读增量同步一个 Zotero 库。','按版本游标读取文献条目；附件、批注与笔记一律不请求。先预览，再确认。')}
+  <form id="zotero-form" class="form-grid">
+    <label>库类型<select name="library_type"><option value="user">个人库 (user)</option><option value="group">群组库 (group)</option></select></label>
+    <label>库 ID（数字）<input name="library_id" required inputmode="numeric" pattern="[0-9]{1,20}" placeholder="12345"></label>
+    <label>API key<input name="api_key" type="password" required autocomplete="off" placeholder="只用于本次请求，不会保存"></label>
+    <label>本地备注名<input name="label" maxlength="200" placeholder="例如：博士论文库"></label>
+  </form>
+  <div class="settings-actions"><button class="btn" id="zotero-collections">${icon('database')} 读取集合列表</button><button class="btn" id="zotero-preview">${icon('search')} 预览同步</button></div>
+  <div id="zotero-scope"></div>
+  <div id="zotero-result"><div class="inline-note">${icon('info',16)} 同步是<strong>只读</strong>的：这里不会写回 Zotero。远端删除只把映射标记为 tombstone，本地的笔记、资源与核验记录都保留。API key 只发往 api.zotero.org，不写入数据库、不写入日志、关闭本窗口即丢弃。</div></div>`,{wide:true});
+  const form=dialog.querySelector('#zotero-form');
+  const scope=dialog.querySelector('#zotero-scope');
+  const result=dialog.querySelector('#zotero-result');
+  const credentials=()=>({library_type:form.elements.library_type.value,
+    library_id:form.elements.library_id.value.trim(),
+    api_key:form.elements.api_key.value,
+    label:form.elements.label.value.trim()});
+  const selectedCollections=()=>[...scope.querySelectorAll('input[name=collection]:checked')].map(x=>x.value);
+  dialog.querySelector('#zotero-collections').onclick=event=>busy(event.currentTarget,async()=>{
+    const listed=await api('/zotero/collections',{method:'POST',body:credentials()});
+    scope.innerHTML=listed.collections.length?`<h3>选择要同步的集合</h3><p class="muted">不选则同步整个库。多个集合会一起发送，不会只取第一个。</p>${listed.collections.map(row=>`<label class="check-row"><input type="checkbox" name="collection" value="${e(row.key)}"> ${e(row.name)} <code>${e(row.key)}</code></label>`).join('')}`:'<p class="muted">这个库没有集合；同步会覆盖整个库。</p>';
+    toast(`读到 ${listed.collections.length} 个集合（只有名称与 key）。`);
+  });
+  const renderResult=body=>{
+    const c=body.counts;
+    const rows=[['新增',c.added],['修改',c.updated],['关联到已有条目',c.linked_existing],['无变化',c.unchanged],['远端删除（tombstone）',c.remote_deleted],['跳过',c.skipped],['未读取到的变更',c.unaccounted]];
+    result.innerHTML=`<div class="import-stats">${rows.filter(([,n])=>n).map(([label,n])=>`<div><strong>${n}</strong>${e(label)}</div>`).join('')||'<div><strong>0</strong>没有变更</div>'}</div>
+    <p class="muted">游标 ${e(String(body.cursor.from))} → ${e(String(body.cursor.to))}；范围：${e(body.scope.collections?.length?body.scope.collections.join('、'):'整个库')}${body.scope.tags?.length?'；标签 '+e(body.scope.tags.join('、'))+'（并集）':''}</p>
+    ${body.preview.length?`<div class="import-titles">${body.preview.map(row=>`<p>${icon('book',14)} ${e(row.title)} <code>${e(row.key)}</code>${row.matched_on?' · 按 '+e(row.matched_on)+' 关联':''}</p>`).join('')}</div>`:''}
+    ${body.skipped.length?`<div class="form-error">${body.skipped.slice(0,8).map(row=>'跳过 '+(row.key?e(row.key)+'：':'')+e(row.reason||row.title||'')).join('<br>')}</div>`:''}
+    ${body.notes.length?`<ul class="muted">${body.notes.map(note=>`<li>${e(note)}</li>`).join('')}</ul>`:''}
+    <div class="modal-actions"><button class="btn" data-close>取消</button>${body.applied?'':`<button class="btn primary" id="zotero-apply" ${c.added+c.updated+c.linked_existing+c.remote_deleted?'':'disabled'}>确认并提交</button>`}</div>
+    ${body.applied?'<p class="muted">已提交：映射、条目与游标在同一个事务里写入。</p>':'<p class="muted">这是预览：文献库没有任何改动，游标没有移动。</p>'}`;
+    const apply=result.querySelector('#zotero-apply');
+    if(apply)apply.onclick=event=>busy(event.currentTarget,async()=>{
+      const done=await api('/zotero/sync',{method:'POST',body:{...credentials(),collections:selectedCollections(),apply:true}});
+      renderResult(done);dialog.querySelector('#zotero-form').elements.api_key.value='';
+      await refresh();
+      toast(`已提交：新增 ${done.counts.added}、修改 ${done.counts.updated}、关联 ${done.counts.linked_existing}、远端删除 ${done.counts.remote_deleted}、跳过 ${done.counts.skipped}。`);
+    });
+  };
+  dialog.querySelector('#zotero-preview').onclick=event=>busy(event.currentTarget,async()=>{
+    result.innerHTML='<p class="muted">正在读取远端库…</p>';
+    renderResult(await api('/zotero/sync',{method:'POST',body:{...credentials(),collections:selectedCollections()}}));
+  });
+  dialog.addEventListener('close',()=>{form.elements.api_key.value='';});
 }
 function importDialog() {
   const dialog=openDialog(`${modalHead('IMPORT LIBRARY','带着已有积累，开始。','在 Zotero 中导出 CSL JSON，再导入这里；不读取原文 PDF 或私人批注。')}
