@@ -21,6 +21,8 @@ import httpx
 from fastapi.testclient import TestClient
 from playwright.sync_api import sync_playwright
 from re0.main import create_app
+from re0.workspace import Workspace
+from test_fulltext import read as read_fulltext_fixture
 from test_zotero import KEY as ZOTERO_KEY, ZoteroService, item as zotero_item
 
 
@@ -88,9 +90,139 @@ def run(output_dir: Path):
         completed.append("search_select_compare")
         page.locator('nav [data-nav="graph"]').click()
         assert page.locator('.graph-paper').count()==6
+        page.locator('.knowledge-relations').wait_for()
+        with client.app.state.store.db.connect() as con:
+            relation_paper=con.execute("SELECT p.id FROM papers p JOIN resources r ON r.paper_id=p.id "
+                                        "JOIN observations o ON o.resource_id=r.id "
+                                        "WHERE p.is_demo=1 GROUP BY p.id ORDER BY p.id LIMIT 1").fetchone()
+        relation_paper_id=relation_paper['id']
+        page.locator('#relation-paper').select_option(relation_paper_id)
+        page.locator('[data-action="new-relation"]').click()
+        relation_form=page.locator('#relation-form')
+        assert relation_form.locator('[name=relation_type] option[value=claim]').get_attribute('disabled') is not None
+        relation_form.locator('[name=relation_type]').select_option('uses_method')
+        relation_form.locator('[name=target]').fill('扩散模型')
+        relation_form.locator('[name=statement]').fill('演示关系；只用于测试来源和版本投影。')
+        relation_form.locator('[name=locator]').fill('虚构演示检查记录')
+        relation_form.locator('[name=source_snapshot_id]').select_option(index=1)
+        relation_form.locator('[type=submit]').click()
+        page.locator('.relation-table tbody tr').first.wait_for()
+        assert '演示关系' in page.locator('.relation-table').inner_text()
+        page.locator('#relation-query').fill('扩散模型')
+        page.locator('[data-action="search-relations"]').click()
+        page.locator('.relation-table tbody tr').first.wait_for()
+        assert page.locator('.relation-table tbody tr').count()==1
+        page.locator('.relation-table [data-action="new-relation"]').click()
+        revised=page.locator('#relation-form')
+        assert revised.locator('[name=supersedes_id]').input_value()
+        assert revised.locator('[name=source_snapshot_id]').input_value()
+        revised.locator('[name=statement]').fill('演示修订：保留旧行。')
+        revised.locator('[name=locator]').fill('虚构演示的复核记录')
+        revised.locator('[type=submit]').click()
+        try:
+            page.wait_for_function("() => !document.querySelector('#relation-form') || "
+                                   "Boolean(document.querySelector('#relation-form .form-error')?.textContent)",
+                                   timeout=8000)
+        except Exception as exc:
+            invalid=page.locator('#relation-form :invalid').evaluate_all(
+                "nodes=>nodes.map(node=>({name:node.name,value:node.value}))")
+            raise AssertionError(f"relation submit stalled: invalid={invalid}; "
+                                 f"form={revised.inner_text()}; requests={requests[-4:]}") from exc
+        if page.locator('#relation-form').count():
+            raise AssertionError('结构化关系修订失败：'+revised.locator('.form-error').inner_text())
+        page.locator('.relation-table').get_by_text('演示修订').wait_for()
+        assert '演示修订' in page.locator('.relation-table').inner_text()
+        assert page.locator('.relation-table tbody tr').count()==2
+        assert page.locator('#toasts .toast').count()==1
+        completed.append("typed_relations_require_sources_and_revisions_are_append_only")
+
+        page.locator('#relation-query').fill('')
+        page.locator('[data-action="search-relations"]').click()
+        page.wait_for_function("document.querySelector('.relation-count')?.textContent.includes('匹配 2 条')")
+
+        # Read a fixture full text into a named workspace, import that bundle, then use the page's
+        # preview/confirm flow to bind the reviewed chunks to the exact PaperVersion.
+        fulltext_paper=client.post('/api/papers',headers={'X-Re0-Client':'web'},json={
+            'title':'Full-text import smoke fixture','arxiv_id':'2601.12345v1','version_label':'v1'})
+        assert fulltext_paper.status_code==201,fulltext_paper.text
+        fulltext_paper_id=fulltext_paper.json()['id']
+        source_workspace=Workspace(Path(temp)/'fulltext-workspace').open()
+        fulltext_result=read_fulltext_fixture('2601.12345v1',workspace=source_workspace)
+        assert fulltext_result['stored']['chunks']>0
+        source_bundle=source_workspace.bundle()
+        imported_bundle=client.post('/api/workspaces/import',headers={'X-Re0-Client':'web'},
+                                    json={'bundle':source_bundle})
+        assert imported_bundle.status_code==201,imported_bundle.text
+        workspace_rows=client.get('/api/workspaces').json()['workspaces']
+        listed_fulltext=[source for row in workspace_rows for source in row['sources']
+                         if source['kind']=='fulltext_chunk' and source.get('fulltext')]
+        assert listed_fulltext, json.dumps(workspace_rows,ensure_ascii=False)
+        assert all(source.get('source_url') and source['fulltext'].get('identifier')
+                   for source in listed_fulltext), json.dumps(listed_fulltext,ensure_ascii=False)
+        page.evaluate('window.re0Reload()')
+        page.locator('nav [data-nav="graph"]').click()
+        page.locator('#relation-paper').select_option(fulltext_paper_id)
+        page.locator('.relation-tools [data-action="new-relation"]').click()
+        try:
+            page.locator('#fulltext-document').wait_for(timeout=5000)
+        except Exception as exc:
+            raise AssertionError(f"全文导入面板未渲染：{page.locator('dialog').all_text_contents()}；"
+                                 f"selected={page.locator('#relation-paper').input_value()}；"
+                                 f"body={page.locator('body').inner_text()[-1000:]}；requests={requests[-6:]}；"
+                                 f"pageerrors={errors}；sources={json.dumps(listed_fulltext,ensure_ascii=False)}") from exc
+        page.locator('#fulltext-preview').click()
+        page.locator('#fulltext-confirm').wait_for()
+        assert '未经加密认证' in page.locator('#fulltext-import-result').inner_text()
+        assert not any(item['snapshot_kind']=='fulltext_chunk'
+                       for item in client.get(f'/api/papers/{fulltext_paper_id}/knowledge').json()['source_snapshots'])
+        page.locator('#fulltext-confirm').click()
+        fulltext_knowledge=client.get(f'/api/papers/{fulltext_paper_id}/knowledge').json()
+        imported_snapshot=next(item for item in fulltext_knowledge['source_snapshots']
+                               if item['snapshot_kind']=='fulltext_chunk')
+        assert imported_snapshot['paper_version_id']
+        assert imported_snapshot['payload']['provenance_verified'] is False
+        source_option=page.locator(f'#relation-form [name=source_snapshot_id] option[value="{imported_snapshot["id"]}"]')
+        try:
+            source_option.wait_for(state='attached',timeout=5000)
+        except Exception as exc:
+            raise AssertionError('全文已落库但关系窗口未刷新：'
+                                 +page.locator('#fulltext-import-result').inner_text()) from exc
+        relation_form=page.locator('#relation-form')
+        assert relation_form.locator('[name=relation_type] option[value=claim]').get_attribute('disabled') is None, \
+            json.dumps({'snapshots':fulltext_knowledge['source_snapshots'],
+                        'select':relation_form.locator('[name=relation_type]').inner_html()},ensure_ascii=False)
+        relation_form.locator('[name=relation_type]').select_option('claim')
+        relation_form.locator('[name=assertion_kind]').select_option('human_confirmation')
+        relation_form.locator('[name=target]').fill('Fixture claim target')
+        relation_form.locator('[name=statement]').fill('已核对导入的全文块；只用于本机 smoke。')
+        relation_form.locator('[name=conditions]').fill('仅适用于引用的 v1 段落。')
+        relation_form.locator('[name=source_snapshot_id]').select_option(imported_snapshot['id'])
+        stored_chunk=source_workspace.read(source_workspace.identifiers()[0])
+        locator=re.search(r'^\[([^\]]+)\]',stored_chunk['content'],re.M).group(1)
+        relation_form.locator('[name=locator]').fill(locator)
+        relation_form.locator('[type=submit]').click()
+        try:
+            page.locator('.relation-table').get_by_text('Fixture claim target').wait_for(timeout=8000)
+        except Exception as exc:
+            errors_text=(relation_form.locator('.form-error').text_content()
+                         if relation_form.count() and relation_form.locator('.form-error').count() else '')
+            raise AssertionError('全文 claim 提交失败：'+errors_text+f"；requests={requests[-5:]}") from exc
+        assert client.get(f'/api/papers/{fulltext_paper_id}/knowledge').json()['relations'][0]['paper_version_id']==imported_snapshot['paper_version_id']
+        assert client.delete(f'/api/papers/{fulltext_paper_id}',headers={
+            'X-Re0-Client':'web','Content-Type':'application/json'}).status_code==204
+        page.evaluate('window.re0Reload()')
+        page.locator('nav [data-nav="graph"]').click()
+        completed.append("fulltext_bundle_preview_confirm_version_binding_and_manual_claim")
         page.screenshot(path=str(output_dir/"graph.png"),full_page=True)
+        page.locator('#search').fill('no matching paper')
+        assert page.locator('.graph-paper').count()==0
+        assert page.locator('.knowledge-relations').count()==1
+        assert '结构化关系与主张' in page.locator('.knowledge-relations').inner_text()
+        page.locator('#search').fill('')
+        assert page.locator('.graph-paper').count()==6
+        completed.append("relation_index_remains_available_when_graph_filter_is_empty")
         page.locator('nav [data-nav="library"]').click()
-        completed.append("graph_from_saved_relations")
+        completed.append("graph_separates_topic_projection_from_evidence_relations")
         page.locator('.paper-title').filter(has_text='Layered Canvas').click()
         page.locator('dialog.drawer').wait_for()
         page.locator('[data-evidence]').first.click()
@@ -128,17 +260,84 @@ def run(output_dir: Path):
         page.locator('[data-evidence]').click()
         page.locator('#evidence-content').wait_for()
         assert '未完成验证' in page.locator('#evidence-content').inner_text()
+        assert '记录类型：来源观察' in page.locator('#evidence-content').inner_text()
+        page.locator('#revise-audit').click()
+        review=page.locator('#audit-confirmation-form')
+        review.locator('[name=attribution]').select_option('official')
+        review.locator('[name=review_note]').fill('已核对论文页面的资源链接；访问状态仍按原观察记录。')
+        review.locator('[type=submit]').click()
+        page.wait_for_function("Boolean(document.querySelector('#audit-confirmation-form .form-error')?.textContent)")
+        assert '依据' in review.locator('.form-error').inner_text()
+        assert not any('/confirmations' in path for _,path in requests)
+        review.locator('[name=attribution_source_url]').fill('https://arxiv.org/abs/2401.00001')
+        review.locator('[name=attribution_excerpt]').fill('论文作者在论文页面明确链接到该资源。')
+        review.locator('[type=submit]').click()
+        page.wait_for_function("() => !document.querySelector('#audit-confirmation-form') || "
+                               "Boolean(document.querySelector('#audit-confirmation-form .form-error')?.textContent)")
+        if page.locator('#audit-confirmation-form').count():
+            raise AssertionError('人工复核未提交：'+page.locator('#audit-confirmation-form .form-error').inner_text())
+        page.locator('.record-provenance').wait_for()
+        assert '人工复核' in page.locator('.record-provenance').inner_text()
+        assert page.locator('#history-select option').count()==2
+        review_paper=next(p for p in client.get('/api/papers').json() if p['title']==title)
+        resource_id=review_paper['resources'][0]['id']
+        confirmed=client.get(f"/api/resources/{resource_id}/observations").json()
+        assert confirmed[0]['record_kind']=='confirmation'
+        assert confirmed[0]['attribution']=='official'
+        assert confirmed[1]['record_kind']=='observation'
+        completed.append("append_human_resource_revision_without_replacing_observation")
         page.keyboard.press('Escape')
         page.keyboard.press('Escape')
         completed.append("edit_notes_and_record_unsupported_check")
         # Import via the actual file-picker workflow and real backend preview.
+        write_headers={'X-Re0-Client':'web'}
+        doi_conflict=client.post('/api/papers',headers=write_headers,json={"title":"Existing DOI work","doi":"10.1234/ui-existing"}).json()
+        arxiv_conflict=client.post('/api/papers',headers=write_headers,json={"title":"Existing arXiv work","arxiv_id":"2401.12345v1"}).json()
+        conflict_item={"title":"Conflicting DOI and arXiv","DOI":"10.1234/ui-existing",
+                       "URL":"https://arxiv.org/abs/2401.12345v1"}
         page.locator('.page-actions [data-action="import"]').click()
-        content=json.dumps([{"title":"Imported CSL paper","DOI":"10.1234/ui-csl","author":[{"given":"CSL","family":"Author"}]}])
+        content=json.dumps([
+            {"title":"Same title, distinct DOI","DOI":"10.1234/ui-csl-one"},
+            {"title":"Same title, distinct DOI","DOI":"10.1234/ui-csl-two"},
+            conflict_item,
+        ])
         page.locator('#import-file').set_input_files({"name":"library.json","mimeType":"application/json","buffer":content.encode()})
         page.locator('#confirm-import').wait_for()
+        preview_text=page.locator('#import-preview').inner_text()
+        assert '身份冲突 · 不会自动合并' in preview_text and '分别指向不同文献' in preview_text, preview_text
+        assert '精确重复的 DOI / arXiv 会跳过' in page.locator('dialog.modal').inner_text()
+        assert '同标题但标识符不同的论文会分别保留' in page.locator('dialog.modal').inner_text()
+        page.screenshot(path=str(output_dir/'csl-import-preview.png'),full_page=True)
+        page.set_viewport_size({'width':390,'height':844})
+        page.screenshot(path=str(output_dir/'csl-import-preview-mobile.png'),full_page=False)
+        assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+        page.locator('dialog.modal').evaluate('(dialog)=>dialog.scrollTop=dialog.scrollHeight')
+        mobile_confirm=page.locator('#confirm-import').bounding_box()
+        assert mobile_confirm['y'] >= 0 and mobile_confirm['y']+mobile_confirm['height'] <= 844
+        page.set_viewport_size({'width':1440,'height':1050})
+        page.locator('#confirm-import').wait_for()
+        assert '导入 2 篇并记录 1 条冲突' in page.locator('#confirm-import').inner_text()
         page.locator('#confirm-import').click()
-        page.locator('.paper-title').filter(has_text='Imported CSL paper').wait_for()
-        completed.append("csl_file_preview_and_import")
+        page.locator('.paper-title').filter(has_text='Same title, distinct DOI').first.wait_for()
+        assert page.locator('.paper-title').filter(has_text='Same title, distinct DOI').count()==2
+        assert any(row['snapshot_kind']=='identity_conflict' for row in
+                   client.get(f"/api/papers/{doi_conflict['id']}/knowledge").json()['source_snapshots'])
+        assert any(row['snapshot_kind']=='identity_conflict' for row in
+                   client.get(f"/api/papers/{arxiv_conflict['id']}/knowledge").json()['source_snapshots'])
+        page.locator('.page-actions [data-action="import"]').click()
+        page.locator('#import-file').set_input_files({"name":"conflict-only.json","mimeType":"application/json",
+                                                      "buffer":json.dumps([conflict_item]).encode()})
+        page.locator('#confirm-import').wait_for()
+        assert '记录 1 条待复核冲突' in page.locator('#confirm-import').inner_text()
+        assert not page.locator('#confirm-import').is_disabled()
+        page.locator('#confirm-import').click()
+        page.locator('dialog.modal').wait_for(state='detached')
+        page.wait_for_function("document.querySelector('#toasts')?.innerText.includes('身份待复核 1 条')")
+        for conflict_paper in (doi_conflict, arxiv_conflict):
+            recorded=client.get(f"/api/papers/{conflict_paper['id']}/knowledge").json()['source_snapshots']
+            assert sum(row['snapshot_kind'] in {'identifier_declaration','identity_conflict'}
+                       for row in recorded)==2, json.dumps(recorded,ensure_ascii=False)
+        completed.append("csl_distinct_titles_and_persisted_identity_conflict")
         # Zotero read-only sync through the same dialog workflow: credentials, collection scoping,
         # preview, then an explicit commit. The preview must write nothing.
         page.locator('[data-action="settings"]').first.click()

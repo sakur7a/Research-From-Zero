@@ -130,9 +130,12 @@ class FollowUpInput(TurnBudget):
     # Content-addressed source ids from an opt-in workspace (see re0.workspace). This is the only
     # route by which material recorded outside the conversation can enter it.
     reuse_sources: list[str] = Field(default_factory=list, max_length=40)
+    workspace_id: str = Field(default="", max_length=19,
+                              pattern=r"^(|ws_[0-9a-f]{16})$",
+                              description="owner-scoped server workspace imported through the Web API")
     workspace: str = Field(default="", max_length=400,
-                           description="directory of the workspace holding reuse_sources; required "
-                                       "if any are named")
+                           description="local CLI only: explicit directory holding reuse_sources; "
+                                       "hosted Web calls must use workspace_id")
     use_library: bool | None = None
     # Required on every continuing turn: a follow-up spends money, and spending is authorized per
     # turn rather than once for the conversation.

@@ -19,14 +19,14 @@ from pathlib import Path
 from .auth import AccountStore, AuthError, new_secret
 from .db import Database
 from .deployment import LOCAL_OWNER, DeploymentError, from_env
+from .paths import default_database
 
 PROGRAM = "re0 auth"
-ROOT = Path(__file__).resolve().parents[2]
 KEY_ENVIRON = "RE0_AUTH_PASSWORD"
 
 
 def database_path(explicit: str = "") -> str:
-    return explicit or os.getenv("RE0_DB") or str(ROOT / ".data" / "re0.sqlite3")
+    return explicit or os.getenv("RE0_DB") or str(default_database())
 
 
 def _store(path: str) -> AccountStore:

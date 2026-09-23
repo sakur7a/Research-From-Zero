@@ -30,9 +30,9 @@ from pydantic import ValidationError
 from .agent.schemas import FollowUpInput, RetryInput, TaskDefaults
 from .agent.session import validate_followup, validate_retry
 from .deployment import LOCAL_OWNER
+from .paths import default_database
 
 PROGRAM = "re0 session"
-ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 DEFAULTS_KEY = "task_defaults"
 # The console reads the database directly, so it acts as the owner a single-user database has: the
@@ -45,7 +45,7 @@ UNCONFIGURED_DESTINATION: dict = {}
 
 
 def database_path(explicit: str = "") -> str:
-    return explicit or os.getenv("RE0_DB") or str(ROOT / ".data" / "re0.sqlite3")
+    return explicit or os.getenv("RE0_DB") or str(default_database())
 
 
 def _store(path: str):

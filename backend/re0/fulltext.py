@@ -530,12 +530,17 @@ def _store_chunks(workspace, chunks: list[dict], payload: dict) -> dict:
     """
     paper = {"title": "", "identifier": payload["identifier"], "version": payload["version"],
              "arxiv_id": payload["identifier"] if payload["source"] == "arxiv" else ""}
+    fulltext = {key: payload[key] for key in (
+        "source", "identifier", "version", "state", "content_type", "parser", "parser_version",
+        "source_url", "final_url", "fetched_at", "bytes_read", "parse_quality",
+        "limitations", "untrusted_note") if key in payload}
     stored, failures = [], []
     for index, chunk in enumerate(chunks[:MAX_CHUNKS_REPORTED], start=1):
         try:
             identifier = workspace.record({
                 "source_url": payload["final_url"], "locator": chunk["locator"],
                 "kind": "fulltext_chunk", "content": chunk["text"], "paper": paper,
+                "fulltext": fulltext,
             }, tool="fetch_paper_text")
             stored.append({"index": index, "locator": chunk["locator"], "source_id": identifier})
         except Exception as exc:  # noqa: BLE001 - a storage refusal must not lose the read

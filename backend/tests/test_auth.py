@@ -180,7 +180,7 @@ def test_a_revoked_or_expired_session_stops_working_immediately(tmp_path):
 def test_every_api_route_needs_a_session_in_hosted_mode(tmp_path):
     app = hosted(tmp_path)
     client = TestClient(app, headers=WRITE)
-    for path in ("/api/papers", "/api/topics", "/api/export", "/api/agent/runs",
+    for path in ("/api/papers", "/api/topics", "/api/knowledge/templates", "/api/export", "/api/agent/runs",
                  "/api/agent/conversations", "/api/zotero/status?library_id=12345",
                  "/api/agent/config"):
         assert client.get(path).status_code == 401, path
@@ -211,6 +211,19 @@ def test_two_accounts_do_not_see_each_others_library_tasks_or_mappings(tmp_path)
     mine = paper(alice, "Alice 的一篇", doi="10.1000/shared")
     alice.post(f"/api/papers/{mine['id']}/resources",
                json={"kind": "code", "label": "repo", "url": "https://github.com/a/b"})
+    alice_knowledge = alice.get(f"/api/papers/{mine['id']}/knowledge")
+    assert alice_knowledge.status_code == 200 and alice_knowledge.json()["versions"]
+    assert bob.get(f"/api/papers/{mine['id']}/knowledge").status_code == 404
+    template = next(row for row in alice.get("/api/knowledge/templates").json()
+                    if row["template_key"] == "layout-layer")
+    definition = dict(template["definition"])
+    definition["concepts"] = [*definition["concepts"], {
+        "key": "alice_private_term", "kind": "method", "label": "Alice private term",
+        "aliases": [], "parent": "layout_and_layers"}]
+    custom_template = alice.post("/api/knowledge/templates/layout-layer", json=definition)
+    assert custom_template.status_code == 201, custom_template.text
+    assert custom_template.json()["id"] not in {
+        row["id"] for row in bob.get("/api/knowledge/templates").json()}
     assert len(alice.get("/api/papers").json()) == 1
 
     assert bob.get("/api/papers").json() == []
@@ -233,6 +246,59 @@ def test_two_accounts_do_not_see_each_others_library_tasks_or_mappings(tmp_path)
     assert "只有 Alice 的方向" not in bob.get("/api/topics").json()
     assert "Alice" not in bob.get("/api/export").text
     assert bob.get("/api/agent/runs").json() == []
+
+
+def test_imported_workspaces_are_scoped_by_the_authenticated_owner(tmp_path):
+    from re0.workspace import Workspace, managed_workspace_path
+
+    app = hosted(tmp_path)
+    alice, bob = session(app, "alice"), session(app, "bob")
+    source = Workspace(tmp_path / "external-workspace").open()
+    source.record({"source_url": "https://export.arxiv.org/abs/2501.12345",
+                   "locator": "metadata", "kind": "paper", "content": "fixture"},
+                  tool="search_papers")
+    bundle = source.bundle()
+    assert alice.post("/api/workspaces/import", json={"bundle": bundle}).status_code == 201
+    assert len(alice.get("/api/workspaces").json()["workspaces"]) == 1
+    assert bob.get("/api/workspaces").json()["workspaces"] == []
+    alice_owner = alice.get("/api/auth/session").json()["identity"]["workspace"]
+    bob_owner = bob.get("/api/auth/session").json()["identity"]["workspace"]
+    alice_path = managed_workspace_path(app.state.store.db.path, alice_owner, source.workspace_id)
+    bob_path = managed_workspace_path(app.state.store.db.path, bob_owner, source.workspace_id)
+    assert alice_path.is_dir() and not bob_path.exists()
+    assert bob.get(f"/api/workspaces/{source.workspace_id}/export").status_code == 404
+
+
+def test_fulltext_workspace_import_cannot_cross_account_or_paper_scope(tmp_path):
+    from re0.workspace import Workspace
+
+    app = hosted(tmp_path)
+    alice, bob = session(app, "alice"), session(app, "bob")
+    paper_row = paper(alice, "Alice full-text paper", arxiv_id="2501.12345v1", version_label="v1")
+    version = alice.get(f"/api/papers/{paper_row['id']}/knowledge").json()["versions"][0]
+    source = Workspace(tmp_path / "external-fulltext").open()
+    url = "https://arxiv.org/html/2501.12345v1"
+    fulltext = {"source": "arxiv", "identifier": "2501.12345v1", "version": "v1",
+                "state": "ok", "content_type": "text/html", "parser": "html.parser",
+                "parser_version": "1", "source_url": url, "final_url": url,
+                "fetched_at": "2026-09-23T00:00:00+00:00", "parse_quality": "ok"}
+    source_id = source.record({"source_url": url, "locator": "§1¶1", "kind": "fulltext_chunk",
+                               "content": "[§1¶1] This is a full-text fixture paragraph.",
+                               "paper": {"identifier": "2501.12345v1", "arxiv_id": "2501.12345v1",
+                                         "version": "v1"},
+                               "fulltext": fulltext}, tool="fetch_paper_text")
+    bundle = source.bundle()
+    assert alice.post("/api/workspaces/import", json={"bundle": bundle}).status_code == 201
+    request = {"workspace_id": source.workspace_id, "source_ids": [source_id],
+               "paper_version_id": version["id"]}
+    preview_path = f"/api/papers/{paper_row['id']}/knowledge/fulltext/preview"
+    assert alice.post(preview_path, json=request).status_code == 200
+    assert bob.get("/api/workspaces").json()["workspaces"] == []
+    assert bob.post(preview_path, json=request).status_code == 404
+    assert bob.post(f"/api/papers/{paper_row['id']}/knowledge/fulltext/import",
+                    json=request).status_code == 404
+    assert not any(item["snapshot_kind"] == "fulltext_chunk"
+                   for item in alice.get(f"/api/papers/{paper_row['id']}/knowledge").json()["source_snapshots"])
 
 
 def test_task_defaults_and_session_caps_are_per_account(tmp_path):
@@ -395,33 +461,66 @@ def test_doctor_says_which_mode_would_run_and_exits_non_zero_when_it_could_not(m
 
 def test_a_single_user_database_is_migrated_to_the_local_owner_and_backed_up(tmp_path):
     path = tmp_path / "old.sqlite3"
-    with Database(str(path)).connect() as con:
-        con.execute("UPDATE schema_version SET version=1")
-        # The v1 shape had no owner column and no owner-scoped indexes; SQLite will not drop a column
-        # an index still refers to, so the indexes go first.
-        con.execute("DROP INDEX papers_owner_doi")
-        con.execute("DROP INDEX papers_owner_arxiv")
-        con.execute("DROP INDEX papers_owner")
-        con.execute("ALTER TABLE papers DROP COLUMN owner")
-        con.execute("CREATE UNIQUE INDEX papers_doi ON papers(doi) WHERE doi != ''")
-        con.execute("CREATE TABLE topics_v1 (name TEXT PRIMARY KEY)")
-        con.execute("INSERT INTO topics_v1 VALUES ('旧主题')")
-        con.execute("DROP TABLE topics")
-        con.execute("ALTER TABLE topics_v1 RENAME TO topics")
-        con.execute("INSERT INTO papers(id,data,doi,arxiv_base,created_at,updated_at,is_demo) "
-                    "VALUES ('old-1','{\"title\":\"旧论文\"}','10.1/old','','2026-01-01','2026-01-01',0)")
+    import json
+    import sqlite3
+
+    old_paper = {"title": "旧论文", "authors": ["旧作者"], "year": 2024, "venue": "",
+                 "abstract": "旧摘要", "doi": "10.1/old", "arxiv_id": "2401.12345v2",
+                 "paper_url": "https://doi.org/10.1/old", "topics": ["旧主题", "图层分解 / 生成"],
+                 "status": "reading", "notes": "保留的旧笔记", "version_label": "v2"}
+    with sqlite3.connect(path) as con:
+        con.executescript("""
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version VALUES (1);
+        CREATE TABLE papers (id TEXT PRIMARY KEY,data TEXT NOT NULL,doi TEXT NOT NULL DEFAULT '',
+          arxiv_base TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+          is_demo INTEGER NOT NULL DEFAULT 0);
+        CREATE UNIQUE INDEX papers_doi ON papers(doi) WHERE doi!='';
+        CREATE UNIQUE INDEX papers_arxiv ON papers(arxiv_base) WHERE arxiv_base!='';
+        CREATE TABLE resources (id TEXT PRIMARY KEY,paper_id TEXT NOT NULL,data TEXT NOT NULL,
+          created_at TEXT NOT NULL);
+        CREATE TABLE observations (id INTEGER PRIMARY KEY AUTOINCREMENT,resource_id TEXT NOT NULL,
+          data TEXT NOT NULL,checked_at TEXT NOT NULL);
+        CREATE TABLE topics (name TEXT PRIMARY KEY);
+        INSERT INTO topics VALUES ('旧主题');
+        """)
+        con.execute("INSERT INTO papers VALUES (?,?,?,?,?,?,0)",
+                    ("old-1", json.dumps(old_paper, ensure_ascii=False), "10.1/old",
+                     "2401.12345", "2026-01-01", "2026-01-01"))
+        con.execute("INSERT INTO resources VALUES (?,?,?,?)",
+                    ("old-resource", "old-1", json.dumps({"url": "https://github.com/lab/old"}),
+                     "2026-01-01"))
+        observation = {"status": "metadata_readable", "checked_at": "2026-01-02T00:00:00+00:00",
+                       "paper_version_snapshot": {"doi": "10.1/old", "arxiv_id": "2401.12345v1",
+                                                  "version_label": "v1"},
+                       "evidence": [{"source_url": "https://github.com/lab/old/tree/v1",
+                                     "locator": "revision", "excerpt": "version one"}]}
+        con.execute("INSERT INTO observations(resource_id,data,checked_at) VALUES (?,?,?)",
+                    ("old-resource", json.dumps(observation), observation["checked_at"]))
     database = Database(str(path))
     from re0.service import Store
     store = Store(database)
     assert [row["title"] for row in store.list_papers(owner="local")] == ["旧论文"]
-    # The direction the single user already had came across with the rows; the starter directions are
-    # seeded on every open, as they were before this migration existed, so membership is the claim.
+    # The direction the single user already had came across with the row. The existing paper
+    # membership and its notes are not inferred from the template or overwritten by it.
     assert "旧主题" in store.topics(owner="local")
-    # The upgrade copied the file first, and said which schema it moved to.
-    assert list(tmp_path.glob("old.sqlite3.pre-v2-*.sqlite3")), list(tmp_path.iterdir())
+    # The upgrade copied the file before v1→v2→v3 migration.
+    assert list(tmp_path.glob("old.sqlite3.pre-v3-*.sqlite3")), list(tmp_path.iterdir())
     with database.connect() as con:
-        assert con.execute("SELECT version FROM schema_version").fetchone()[0] == 2
+        assert con.execute("SELECT version FROM schema_version").fetchone()[0] == 3
         assert con.execute("SELECT owner FROM papers WHERE id='old-1'").fetchone()[0] == "local"
+        assert con.execute("SELECT data FROM papers WHERE id='old-1'").fetchone()[0].find("保留的旧笔记") >= 0
+        assert con.execute("SELECT COUNT(*) FROM works WHERE id='old-1'").fetchone()[0] == 1
+        versions = con.execute("SELECT arxiv_id,is_current FROM paper_versions WHERE work_id='old-1'").fetchall()
+        assert {(row["arxiv_id"], row["is_current"]) for row in versions} == {
+            ("2401.12345v1", 0), ("2401.12345v2", 1)}
+        source = con.execute("SELECT s.paper_version_id,v.arxiv_id FROM source_snapshots s "
+                             "JOIN paper_versions v ON v.id=s.paper_version_id "
+                             "WHERE s.observation_id=1").fetchone()
+        assert tuple(source) == (next(row["id"] for row in con.execute(
+            "SELECT id FROM paper_versions WHERE work_id='old-1' AND arxiv_id='2401.12345v1'")),
+                                 "2401.12345v1")
+        assert con.execute("SELECT COUNT(*) FROM research_relations").fetchone()[0] == 0
 
 
 def test_a_newer_database_is_refused_rather_than_downgraded(tmp_path):

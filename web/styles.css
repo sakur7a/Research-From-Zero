@@ -19,3 +19,34 @@ dialog{color:var(--ink);border:1px solid var(--line);background:var(--paper);box
 
 /* Native dialogs must fill narrow viewports without UA max-width margins. */
 .drawer{max-width:100vw;}
+.record-provenance{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:16px 0;padding:11px 13px;border:1px solid var(--line);border-radius:7px;background:var(--paper-2);font-size:10px;color:var(--ink-3);}
+.record-provenance b{font-weight:550;color:var(--ink-2);}
+.record-provenance .btn{flex-shrink:0;}
+@media(max-width:520px){.record-provenance{align-items:flex-start;flex-direction:column;}}
+.knowledge-relations{border:1px solid var(--line);border-radius:9px;background:var(--paper);padding:20px;margin:0 0 27px;}
+.relations-heading h2{font-size:16px;margin-top:5px;}
+.relations-heading p,.relation-footnote{font-size:10px;line-height:1.8;color:var(--ink-3);margin-top:6px;}
+.relation-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:17px 0 8px;}
+.relation-tools input{flex:1 1 210px;min-width:150px;font-size:11px;}
+.relation-tools select{max-width:230px;min-width:145px;font-size:10px;}
+.relation-count{font-size:10px;color:var(--ink-3);margin:9px 0;}
+.relation-table-wrap{max-width:100%;}
+.relation-table{min-width:950px;width:100%;border-collapse:collapse;font-size:10px;}
+.relation-table th,.relation-table td{padding:11px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;}
+.relation-table th{font-size:9px;color:var(--ink-3);font-weight:500;white-space:nowrap;}
+.relation-table td{color:var(--ink-2);line-height:1.7;max-width:260px;overflow-wrap:anywhere;}
+.relation-table td small{display:block;font-size:9px;color:var(--ink-3);margin-top:4px;}
+.relation-table td a{color:var(--primary-strong);}
+.relation-pagination{display:flex;align-items:center;justify-content:flex-end;gap:12px;margin-top:12px;font-size:10px;color:var(--ink-3);}
+.relation-footnote{border-top:1px solid var(--line);padding-top:12px;margin-top:14px;}
+@media(max-width:680px){.knowledge-relations{padding:14px}.relation-tools{align-items:stretch}.relation-tools input,.relation-tools select,.relation-tools .btn{width:100%;max-width:none}.relation-pagination{justify-content:space-between}}
+.fulltext-import-panel{border:1px solid var(--line);border-radius:12px;padding:16px;margin:12px 0 18px;background:var(--surface-2,#f8fafc);}
+.fulltext-import-panel h3{margin:0 0 6px;font-size:14px;}
+.fulltext-import-panel>p{font-size:11px;color:var(--ink-3);line-height:1.65;margin:0 0 12px;}
+.fulltext-import-controls{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:10px;align-items:end;}
+.fulltext-chunk{border-top:1px solid var(--line);padding:10px 0;font-size:11px;}
+.fulltext-chunk summary{cursor:pointer;color:var(--ink-2);}
+.fulltext-chunk pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto;padding:12px;border-radius:8px;background:var(--surface,#fff);color:var(--ink-2);font:11px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace;}
+.fulltext-chunk>a{font-size:10px;color:var(--primary-strong);}
+@media(max-width:680px){.fulltext-import-controls{grid-template-columns:1fr}.fulltext-import-controls .btn{width:100%}.fulltext-import-panel{padding:12px}}
+.import-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr))}.import-conflict-count strong{color:var(--warn-text)}.import-conflicts{margin:18px 0;padding:16px;border:1px solid var(--warn-line);border-radius:8px;background:var(--warn-soft)}.import-conflicts h3{font-size:12px;font-weight:600;color:var(--warn-text)}.import-conflicts>p{font-size:10px;line-height:1.7;color:var(--warn-text);margin:7px 0 12px}.import-conflicts article{padding:10px 0;border-top:1px solid var(--warn-line);font-size:10px;overflow-wrap:anywhere}.import-conflicts article strong{font-size:11px;color:var(--ink-2)}.import-conflicts article p{margin:4px 0 6px;color:var(--warn-text);line-height:1.6}.import-conflicts ul{list-style:none;padding:0;margin:0}.import-conflicts li{display:flex;flex-wrap:wrap;gap:4px 10px;justify-content:space-between;padding:3px 0;color:var(--ink-2)}.import-conflicts li span{font-size:9px;color:var(--ink-3);overflow-wrap:anywhere}

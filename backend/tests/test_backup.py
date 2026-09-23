@@ -3,6 +3,7 @@ import importlib.util
 import sqlite3
 
 import pytest
+from re0.db import restore_database
 
 path = Path(__file__).resolve().parents[2] / "scripts/backup.py"
 spec = importlib.util.spec_from_file_location("backup_script", path)
@@ -49,6 +50,26 @@ def test_invalid_source_cleans_partial_backup(tmp_path):
     assert not target.exists()
 
 
+def test_restore_requires_a_re0_database_and_cleans_invalid_copy(tmp_path):
+    source, target = tmp_path / "unrelated.sqlite3", tmp_path / "restored.sqlite3"
+    with sqlite3.connect(source) as con:
+        con.execute("CREATE TABLE unrelated (value TEXT)")
+        con.execute("INSERT INTO unrelated VALUES ('not Re0')")
+    with pytest.raises(sqlite3.DatabaseError, match="缺少 Re0 文献库表"):
+        restore_database(source, target)
+    assert not target.exists()
+
+
+def test_restore_never_overwrites_an_existing_destination(tmp_path):
+    source, target = tmp_path / "backup.sqlite3", tmp_path / "restored.sqlite3"
+    from re0.db import Database
+    Database(str(source))
+    target.write_text("keep this file", encoding="utf-8")
+    with pytest.raises(FileExistsError, match="未覆盖"):
+        restore_database(source, target)
+    assert target.read_text(encoding="utf-8") == "keep this file"
+
+
 def test_audit_records_survive_a_backup_and_restore_cycle(tmp_path):
     """Issue #6's data has to come back readable, and it does so without a migration.
 
@@ -80,7 +101,9 @@ def test_audit_records_survive_a_backup_and_restore_cycle(tmp_path):
     assert observation["record_kind"] == "observation"
     assert confirmation["record_kind"] == "confirmation"
 
-    backup_database(source, restored_path)
+    backup_path = tmp_path / "archive.sqlite3"
+    backup_database(source, backup_path)
+    restore_database(backup_path, restored_path)
     after = Store(Database(str(restored_path)))
     history = after.history(resource["id"], owner=LOCAL_OWNER)
     assert [row["record_kind"] for row in history] == ["confirmation", "observation"]

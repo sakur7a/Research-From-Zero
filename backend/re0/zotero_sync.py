@@ -25,6 +25,8 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from .db import encode
+from .knowledge import (append_source_snapshot, ensure_paper_version, metadata_snapshot,
+                        sync_topic_assignments)
 from .models import now
 from .scheduling import Governor
 from .zotero import (BIBLIOGRAPHIC_ITEM_TYPES, TITLE_KEY_MIN_CHARS, Connection, ZoteroClient,
@@ -284,6 +286,13 @@ def _insert_paper(con, paper_id: str, record: dict, stamp: str, owner: str) -> N
                  re.sub(r"v\d+$", "", record.get("arxiv_id") or ""), stamp, stamp, owner))
     con.executemany("INSERT OR IGNORE INTO topics(name,owner) VALUES (?,?)",
                     [(name, owner) for name in record.get("topics") or []])
+    version_id = ensure_paper_version(con, paper_id, owner, record, origin="zotero_sync",
+                                      created_at=stamp)
+    append_source_snapshot(con, work_id=paper_id, owner=owner,
+                           paper_version_id=version_id, kind="zotero_metadata",
+                           payload=metadata_snapshot(record), retrieved_at=stamp,
+                           source_url=record.get("paper_url") or "", locator="Zotero item metadata")
+    sync_topic_assignments(con, paper_id, owner, record.get("topics") or [], stamp)
 
 
 def _update_paper(con, paper_id: str, record: dict, stamp: str, owner: str) -> None:
@@ -299,11 +308,21 @@ def _update_paper(con, paper_id: str, record: dict, stamp: str, owner: str) -> N
     if row is None:
         raise HTTPException(409, "计划里的论文在提交前被删除了；本次同步没有写入任何内容")
     stored = json.loads(row[0])
+    before = metadata_snapshot(stored)
     merged = {**stored, **{key: value for key, value in record.items()
                            if key not in ("notes", "topics", "status")}}
     con.execute("UPDATE papers SET data=?,doi=?,arxiv_base=?,updated_at=? WHERE id=? AND owner=?",
                 (encode(merged), merged.get("doi", ""),
                  re.sub(r"v\d+$", "", merged.get("arxiv_id") or ""), stamp, paper_id, owner))
+    version_id = ensure_paper_version(con, paper_id, owner, merged, origin="zotero_sync",
+                                      created_at=stamp)
+    current_metadata = metadata_snapshot(merged)
+    if before != current_metadata:
+        append_source_snapshot(con, work_id=paper_id, owner=owner,
+                               paper_version_id=version_id, kind="zotero_metadata",
+                               payload=current_metadata, retrieved_at=stamp,
+                               source_url=merged.get("paper_url") or "", locator="Zotero item update")
+    sync_topic_assignments(con, paper_id, owner, merged.get("topics") or [], stamp)
 
 
 def _upsert_link(con, owner: str, kind: str, identifier: str, entry: dict, paper_id: str,

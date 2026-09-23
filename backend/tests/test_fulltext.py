@@ -389,6 +389,8 @@ def test_chunks_are_stored_in_the_workspace_with_ids_that_are_stable_per_version
     stored = workspace.read(ids[0])
     assert stored["kind"] == "fulltext_chunk" and stored["origin"] == "tool"
     assert stored["source_url"] == first["final_url"]
+    assert stored["fulltext"]["parser_version"] == fulltext.PARSER_VERSION
+    assert stored["fulltext"]["version"] == first["version"]
     second = read(workspace=workspace)
     assert [entry["source_id"] for entry in second["stored"]["source_ids"]] == ids, \
         "the same version of the same paper is the same source, not a second copy"

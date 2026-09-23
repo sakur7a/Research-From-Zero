@@ -48,16 +48,19 @@ web/agent.html + agent.js        web/index.html + app.js
 | `agent/api.py` | UI-facing task/config endpoints, no credentials or internal messages in reads/exports |
 | `mcp_server.py` | MCP-over-stdio retrieval surface; reuses the same tool contracts and opens no database |
 | `skill_search.py` | The literature-search capability's own surface: query, merge, render, report coverage. Both entry points below call it, so there is no second copy of the logic. It renders what `resource_audit.py` already fetched and decided |
-| `cli.py` | Thin console entry points (`re0 paper search`, `re0 doctor`, `re0 mcp`). Dispatches only; starts no LLM, and `doctor` probes the network only when asked |
+| `cli.py` | Thin console entry points (`re0 paper search`, `re0 doctor`, `re0 mcp`, `re0 workspace`). Dispatches only; starts no LLM, and `doctor` probes the network only when asked |
 | `resource_audit.py` | Candidate discovery and the field-level resource audit, as data rather than as print statements. Owns the two shared budgets, the audit states and the per-artifact-class coverage; every affirmative conclusion carries the source it rests on |
 | `resource_matrix.py` | Three renderings of one row list (JSON, Markdown, CSV) for comparing 2–6 papers, plus the importable approval payload. Re-renders, never re-checks; escapes spreadsheet formulas and writes only http(s) links |
-| `workspace.py` | The opt-in source store behind `--workspace`: content-addressed ids over a source's identity only, snapshots of tool results, and an import that previews, stays idempotent and refuses a bundle from another workspace. An audit travels beside the identity, never inside it, so re-checking a repository does not mint a second source |
+| `workspace.py` | The opt-in source store behind `--workspace`: content-addressed ids over a source's identity only, bounded snapshots and JSON bundles, read-only import preview, idempotent commit, and owner-derived storage paths for Web workspaces. Imported bundle provenance is marked unverified; it never approves a paper |
 | `service.py` | The library: papers, resources and an append-only observation history. Each record is labelled `observation` or `confirmation`, so a check and a human revision of it stay separately retrievable |
+| `db.py` / `knowledge.py` / `service.py` | Library v3 migration: stable Work ids, append-only PaperVersion and SourceSnapshot projections, versioned Layout topic template and multi-membership assignments; legacy observations without explicit version evidence remain unbound. A reviewed workspace full-text chunk can be previewed and appended to one exact archive version |
+| `scripts/backup.py` / `scripts/restore.py` | SQLite backup through the backup API and restore to a new, validated destination; neither operation overwrites an existing file |
 | `result_model.py` | The versioned result shape (`schema_version`) that every exit shares. Unknown fields ride along under `unrecognised` instead of vanishing, and a bounded body states `content_chars`/`excerpt_chars`/`truncated` so a cut body cannot look like a short one |
 | `web/agent-core.js` | Pure status/tool presentation logic, independently tested |
 | `web/search-core.js` | Pure views over the versioned result file: coverage facts with their denominators, candidate rows, matrix rows carrying the same blockers `resource_matrix` computes, BibTeX and CSV. Mirrors `models.py`'s label vocabulary, pinned by a test so the two cannot drift |
 | `web/search.js` + `web/search.html` | The local retrieval workbench at `/static/search.html`, served by the static mount with no new route. It reads a `--json` result in the browser and renders coverage, candidates, the audit matrix and export/import; it performs no retrieval of its own, so there is no second search implementation to drift |
-| `web/agent.js` | Task composer, model settings, polling trace, report and evidence views |
+| `web/app.js` | Retained library UI, append-only evidence history and user-confirmation form for imported resource audits |
+| `web/agent.js` | Task composer, model settings, polling trace, report/evidence views, source-bundle preview/import/export and explicit source selection for follow-ups |
 | `web/theme.css` + `web/theme.js` | Shared Emilia light/dark palette (every colour a variable) and the persisted theme toggle used by both pages; no hardcoded colours remain in page CSS |
 
 ## Loop, not a predetermined chain

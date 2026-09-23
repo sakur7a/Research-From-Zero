@@ -25,7 +25,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .agent.api import agent_router
@@ -35,16 +35,19 @@ from . import __version__
 from .auth import SESSION_TTL, AccountStore, Identity, anonymous_identity, local_identity
 from .db import Database
 from .deployment import SESSION_COOKIE, Deployment, DeploymentError, from_env
-from .models import MetadataRequest, PaperInput, ResourceAudit, ResourceInput, TopicInput
+from .models import (MetadataRequest, PaperInput, ResearchRelationInput,
+                     ResearchTemplateDefinition, ResourceAudit, ResourceInput,
+                     TopicAssignmentInput, TopicInput)
+from .paths import default_database, web_directory
 from .providers import ProviderError, check_resource, resolve_metadata
 from .quota import Quota
 from .resource_audit import audit_from_observation
 from .service import Store, bibtex_export, validation_message
 from .zotero import Connection, ZoteroClient, ZoteroError, ZoteroStore
 from .zotero_sync import sync as run_zotero_sync
+from .workspace import (Workspace, WorkspaceError, managed_workspace_path,
+                        managed_workspaces_root)
 
-ROOT = Path(__file__).resolve().parents[2]
-WEB = ROOT / "web"
 # Routes that answer without a session: the shell has to load before anybody can log in, health has
 # to answer before an orchestrator sends traffic, and login is the door. None of them returns a row
 # belonging to anybody, which is what makes the list short.
@@ -64,6 +67,29 @@ class AuditImport(BaseModel):
     model_config = ConfigDict(extra="forbid")
     items: list[dict] = Field(max_length=200)
     dry_run: bool = True
+
+
+class WorkspaceBundleInput(BaseModel):
+    """A bounded source bundle; it can add source snapshots but never approve a paper."""
+
+    model_config = ConfigDict(extra="forbid")
+    bundle: dict
+
+
+class FullTextWorkspaceImport(BaseModel):
+    """A selected set of source IDs; the server derives both owner and workspace path."""
+
+    model_config = ConfigDict(extra="forbid")
+    workspace_id: str = Field(pattern=r"^ws_[0-9a-f]{16}$")
+    source_ids: list[str] = Field(min_length=1, max_length=200)
+    paper_version_id: str = Field(min_length=1, max_length=100)
+
+    @field_validator("source_ids")
+    @classmethod
+    def distinct_sources(cls, values: list[str]) -> list[str]:
+        if len(set(values)) != len(values):
+            raise ValueError("同一 source ID 不能在一次导入中重复选择")
+        return values
 
 
 class Login(BaseModel):
@@ -118,7 +144,10 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
     # no correct fallback, and choosing one silently is how an unauthenticated service ends up
     # listening on a public address.
     deployment = (deployment if deployment is not None else from_env()).require_startable()
-    store = Store(Database(db_path or os.getenv("RE0_DB", str(ROOT / ".data/re0.sqlite3"))))
+    # Resolved per app, not once at import: the directory is a property of the installation, and a
+    # test (or a second app in one process) may legitimately point at a different one.
+    web = web_directory()
+    store = Store(Database(db_path or os.getenv("RE0_DB") or str(default_database())))
     accounts = AccountStore(store.db)
     # The ceilings are read once, here, so the middleware and the runtime cannot disagree about them.
     quota = quota if quota is not None else Quota.from_env(os.environ, hosted=deployment.hosted)
@@ -188,6 +217,67 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
     def owner_of(request: Request) -> str:
         """The owner this request acts as. Never a value from the body, the query or a header."""
         return request.state.identity.owner
+
+    def workspaces_for(owner: str) -> dict:
+        """List only this owner's server-managed workspaces; no caller-supplied paths are read."""
+        root = managed_workspaces_root(store.db.path, owner)
+        rows = []
+        if not root.is_dir():
+            return {"workspaces": rows}
+        for path in sorted(root.iterdir(), key=lambda item: item.name):
+            if path.is_symlink() or not path.is_dir():
+                continue
+            try:
+                workspace = Workspace(path).open(create=False)
+            except (WorkspaceError, OSError):
+                rows.append({"workspace_id": path.name, "available": False,
+                             "total_sources": 0, "sources": []})
+                continue
+            sources = []
+            identifiers = workspace.identifiers()
+            for identifier in identifiers[:200]:
+                try:
+                    document = workspace.read(identifier)
+                except (WorkspaceError, OSError):
+                    continue
+                paper = document.get("paper") if isinstance(document.get("paper"), dict) else {}
+                fulltext = document.get("fulltext") if isinstance(document.get("fulltext"), dict) else {}
+                fulltext_summary = ({key: fulltext.get(key) for key in (
+                    "source", "identifier", "version", "state", "parser", "parser_version",
+                    "fetched_at", "parse_quality")} if fulltext else None)
+                sources.append({"source_id": identifier, "title": str(paper.get("title") or ""),
+                                "source_url": str(document.get("source_url") or ""),
+                                "locator": str(document.get("locator") or ""),
+                                "kind": str(document.get("kind") or ""),
+                                "retrieved_at": str(document.get("retrieved_at") or ""),
+                                "fulltext": fulltext_summary,
+                                "imported_by_user": bool(document.get("imported_by_user"))})
+            rows.append({"workspace_id": workspace.workspace_id, "available": True,
+                         "total_sources": len(identifiers), "sources": sources})
+        return {"workspaces": rows}
+
+    def import_workspace_bundle(data: WorkspaceBundleInput, request: Request, *, apply: bool):
+        owner = owner_of(request)
+        workspace_id = data.bundle.get("workspace_id") if isinstance(data.bundle, dict) else ""
+        try:
+            root = managed_workspace_path(store.db.path, owner, workspace_id)
+            workspace, result = Workspace.import_to(root, data.bundle, apply=apply)
+        except (WorkspaceError, OSError) as exc:
+            raise HTTPException(422, f"工作区 bundle 无法处理：{exc}") from exc
+        return {**result, "workspace_id": workspace.workspace_id}
+
+    def import_fulltext_sources(paper_id: str, data: FullTextWorkspaceImport,
+                                request: Request, *, apply: bool):
+        owner = owner_of(request)
+        try:
+            root = managed_workspace_path(store.db.path, owner, data.workspace_id)
+            workspace = Workspace(root).open(create=False, workspace_id=data.workspace_id)
+            sources = [(source_id, workspace.read(source_id)) for source_id in data.source_ids]
+        except (WorkspaceError, OSError) as exc:
+            # The same refusal covers a foreign workspace and a source ID it does not hold.
+            raise HTTPException(404, "工作区或所选来源不存在") from exc
+        return store.import_fulltext_chunks(paper_id, data.paper_version_id, sources,
+                                           owner=owner, apply=apply)
 
     @app.middleware("http")
     async def request_guard(request: Request, call_next):
@@ -320,6 +410,18 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
     def get_paper(paper_id: str, request: Request):
         return store.get_paper(paper_id, owner=owner_of(request))
 
+    @app.get("/api/papers/{paper_id}/knowledge")
+    def paper_knowledge(paper_id: str, request: Request):
+        return store.knowledge(paper_id, owner=owner_of(request))
+
+    @app.post("/api/papers/{paper_id}/knowledge/fulltext/preview")
+    def preview_fulltext_import(paper_id: str, data: FullTextWorkspaceImport, request: Request):
+        return import_fulltext_sources(paper_id, data, request, apply=False)
+
+    @app.post("/api/papers/{paper_id}/knowledge/fulltext/import")
+    def confirm_fulltext_import(paper_id: str, data: FullTextWorkspaceImport, request: Request):
+        return import_fulltext_sources(paper_id, data, request, apply=True)
+
     @app.put("/api/papers/{paper_id}")
     def edit_paper(paper_id: str, data: PaperInput, request: Request):
         return store.update_paper(paper_id, data, owner=owner_of(request))
@@ -336,6 +438,64 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
     def add_topic(data: TopicInput, request: Request):
         store.add_topic(data.name, owner=owner_of(request))
         return store.topics(owner=owner_of(request))
+
+    @app.get("/api/knowledge/templates")
+    def knowledge_templates(request: Request):
+        return store.templates(owner=owner_of(request))
+
+    @app.post("/api/knowledge/templates/{template_key}", status_code=201)
+    def create_knowledge_template(template_key: str, data: ResearchTemplateDefinition,
+                                  request: Request):
+        return store.create_template_version(template_key, data, owner=owner_of(request))
+
+    @app.post("/api/papers/{paper_id}/topic-assignments", status_code=201)
+    def assign_template_topic(paper_id: str, data: TopicAssignmentInput, request: Request):
+        return store.assign_template_topic(paper_id, data, owner=owner_of(request))
+
+    @app.delete("/api/papers/{paper_id}/topic-assignments/{assignment_id}", status_code=204)
+    def remove_template_topic(paper_id: str, assignment_id: str, request: Request):
+        store.remove_topic_assignment(paper_id, assignment_id, owner=owner_of(request))
+
+    @app.post("/api/papers/{paper_id}/relations", status_code=201)
+    def add_research_relation(paper_id: str, data: ResearchRelationInput, request: Request):
+        return store.add_relation(paper_id, data, owner=owner_of(request))
+
+    @app.get("/api/knowledge/relations")
+    def knowledge_relations(request: Request,
+                            paper_id: str = Query("", max_length=80),
+                            relation_type: str = Query("", pattern="^(|uses_method|evaluated_on|has_resource|claim)$"),
+                            q: str = Query("", max_length=200),
+                            limit: int = Query(50, ge=1, le=100),
+                            offset: int = Query(0, ge=0, le=10000)):
+        return store.list_relations(owner=owner_of(request), paper_id=paper_id,
+                                    relation_type=relation_type, query=q,
+                                    limit=limit, offset=offset)
+
+    @app.get("/api/workspaces")
+    def list_workspaces(request: Request):
+        return workspaces_for(owner_of(request))
+
+    @app.get("/api/workspaces/{workspace_id}/export")
+    def export_workspace(workspace_id: str, request: Request):
+        owner = owner_of(request)
+        try:
+            root = managed_workspace_path(store.db.path, owner, workspace_id)
+            if not root.is_dir() or not (root / ".re0-workspace.json").is_file():
+                raise WorkspaceError("工作区不存在")
+            workspace = Workspace(root).open(create=False, workspace_id=workspace_id)
+            bundle = workspace.bundle()
+        except (WorkspaceError, OSError) as exc:
+            raise HTTPException(404, "工作区不存在或无法导出") from exc
+        return JSONResponse(bundle, headers={"Content-Disposition":
+                                            f'attachment; filename="re0-workspace-{workspace_id}.json"'})
+
+    @app.post("/api/workspaces/import/preview")
+    def preview_workspace_import(data: WorkspaceBundleInput, request: Request):
+        return import_workspace_bundle(data, request, apply=False)
+
+    @app.post("/api/workspaces/import", status_code=201)
+    def import_workspace(data: WorkspaceBundleInput, request: Request):
+        return import_workspace_bundle(data, request, apply=True)
 
     @app.post("/api/papers/{paper_id}/resources", status_code=201)
     def add_resource(paper_id: str, data: ResourceInput, request: Request):
@@ -519,7 +679,7 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
 
     @app.get("/")
     def index():
-        return FileResponse(WEB / "agent.html")
+        return FileResponse(web / "agent.html")
 
     @app.get("/login")
     def login_page():
@@ -529,13 +689,13 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
         local mode the honest answer is that there is nothing to log into, which is worth saying out
         loud rather than 404ing on a link every page carries.
         """
-        return FileResponse(WEB / "login.html")
+        return FileResponse(web / "login.html")
 
     @app.get("/library")
     def library_index():
-        return FileResponse(WEB / "index.html")
+        return FileResponse(web / "index.html")
 
-    app.mount("/static", StaticFiles(directory=WEB), name="static")
+    app.mount("/static", StaticFiles(directory=web), name="static")
     return app
 
 

@@ -20,7 +20,7 @@ dependencies = [
 re0 = "re0.cli:main"
 
 [project.optional-dependencies]
-test = ["pytest==9.0.2"]
+test = ["pytest==9.0.2", "build==1.6.1"]
 # PDF text extraction. Optional on purpose: an HTML-only read needs nothing beyond the standard
 # library, and a PDF backend should be a choice the installer makes rather than a dependency every
 # user inherits. pypdf is BSD-3-Clause and pure Python, so it adds no compiled extension. Without
@@ -45,6 +45,39 @@ where = ["backend"]
   "skills/re0-paper-search/references/credentials.md",
   "skills/re0-paper-search/references/open-source-status.md",
   "skills/re0-paper-search/references/publication-status.md",
+  "skills/re0-paper-search/references/venue-filter.md",
+]
+
+# The browser UI ships the same way the skill does, so an installed wheel can actually serve
+# a page. Without this the app resolves `web/` relative to a repository that is not there, and
+# create_app fails at startup instead of starting a server with no interface. TOML cannot glob,
+# so the list is explicit and `backend/tests/test_paths.py` fails when it drifts from the tree.
+"share/re0/web" = [
+  "web/agent-core.js",
+  "web/agent.css",
+  "web/agent.html",
+  "web/agent.js",
+  "web/api.js",
+  "web/app.js",
+  "web/core.js",
+  "web/favicon.svg",
+  "web/icons.js",
+  "web/index.html",
+  "web/login-core.js",
+  "web/login.css",
+  "web/login.html",
+  "web/login.js",
+  "web/search-core.js",
+  "web/search.css",
+  "web/search.html",
+  "web/search.js",
+  "web/skill.css",
+  "web/skill.html",
+  "web/skill.js",
+  "web/styles.css",
+  "web/theme-bootstrap.js",
+  "web/theme.css",
+  "web/theme.js",
 ]
 
 [tool.pytest.ini_options]

@@ -61,7 +61,7 @@ def test_import_previews_by_default_then_is_idempotent_on_apply(tmp_path):
     target.open()
     with pytest.raises(WorkspaceError) as caught:
         target.import_bundle(bundle)
-    assert "different workspace" in str(caught.value)
+    assert "其他工作区" in str(caught.value)
 
     # A workspace copied to another directory keeps its identity, marker and all.
     moved = tmp_path / "three"
@@ -86,6 +86,52 @@ def test_an_import_never_approves_a_paper_and_says_so(tmp_path):
     result = origin.import_bundle(origin.bundle(), apply=True)
     assert result["papers_approved"] == 0
     assert "human-confirmed" in result["note"]
+
+
+def test_import_to_a_new_directory_previews_without_writing_then_records_unverified_transfer(tmp_path):
+    origin = Workspace(tmp_path / "origin").open()
+    origin.record(DOCUMENT, tool="search_papers")
+    bundle = origin.bundle()
+    target = tmp_path / "new destination"
+
+    preview_workspace, preview = Workspace.import_to(target, bundle)
+    assert preview_workspace.workspace_id == origin.workspace_id
+    assert preview["applied"] is False and len(preview["new"]) == 1
+    assert not target.exists(), "preview must not create its destination or marker"
+
+    imported_workspace, applied = Workspace.import_to(target, bundle, apply=True)
+    source = applied["new"][0]
+    assert imported_workspace.workspace_id == origin.workspace_id
+    assert applied["applied"] and applied["papers_approved"] == 0
+    assert imported_workspace.read(source)["imported_by_user"] is True
+    assert Workspace.import_to(target, bundle)[1]["already_present"] == [source]
+
+
+def test_bundle_import_refuses_unknown_fields_and_oversized_sources_without_dropping_them(tmp_path):
+    origin = Workspace(tmp_path / "origin").open()
+    origin.record(DOCUMENT, tool="search_papers")
+    bundle = origin.bundle()
+    bundle["sources"][0]["api_key"] = "must not be stored or silently discarded"
+    target = tmp_path / "target"
+    workspace, report = Workspace.import_to(target, bundle, apply=True)
+    assert report["new"] == [] and report["conflicts"][0]["fields"] == ["api_key"]
+    assert workspace.identifiers() == []
+    assert not report["provenance_verified"]
+
+    oversized = origin.bundle()
+    oversized["sources"][0]["content"] = "x" * (256 * 1024 + 1)
+    _workspace, report = Workspace.import_to(tmp_path / "large", oversized)
+    assert report["new"] == [] and "大小上限" in report["conflicts"][0]["reason"]
+
+
+def test_a_corrupt_marker_is_refused_without_replacing_it(tmp_path):
+    root = tmp_path / "broken"
+    root.mkdir()
+    marker = root / ".re0-workspace.json"
+    marker.write_text("not-json", encoding="utf-8")
+    with pytest.raises(WorkspaceError):
+        Workspace(root).open()
+    assert marker.read_text(encoding="utf-8") == "not-json"
 
 
 def test_a_bundle_that_is_not_a_workspace_bundle_is_refused(tmp_path):

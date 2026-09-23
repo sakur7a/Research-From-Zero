@@ -59,6 +59,7 @@ python -m pytest
 npm test
 npm run check
 python scripts/http_smoke.py
+python scripts/install_smoke.py .data/install-smoke
 
 # 可选浏览器测试：需要 Playwright 和 Chromium
 python -m pip install playwright
@@ -1313,3 +1314,101 @@ URL，Cookie 由**浏览器**保存并回传（`Set-Cookie` 原样转发，只�
 - 库页 `/library` 没有加"身份与会话"入口（它未登录时会直接被弹到登录页）；只有工作台与检索页导航里有。
 - 会话到期后的实际表现依赖服务器返回 401，本机没有等待真实 TTL 的用例。
 - 前两节与更早各节的既有限制（无真实 LLM Key、真实账号 Zotero 同步未授权、托管模式不可交付）依然成立。
+
+## 2026-09-23 #14：Skill 审计导入后的人工复核与交付路径
+
+### 复核记录现在能走完一圈
+
+`/static/search.html` 仍只读取 Skill 的版本化 JSON；用户预览并确认后，结果进入自己的文献库。
+从资源的证据历史打开“记录人工复核”，归属、作者发布声明或版本对应的肯定判断必须附带
+可跳转来源，且要求写明本次复核说明。保存使用已有的
+`POST /api/resources/{id}/confirmations`，服务器追加 `record_kind=confirmation`，原始
+`observation` 保持不变。虚构演示资源不提供复核入口。
+
+`Evidence` 本身允许低层工具记录被拒绝的输入 URL（例如 `file:`），因为那条记录描述的是拒绝；
+写入可导出的 `ResourceAudit` 时，声明证据和类别覆盖来源必须是无凭据的 HTTP(S) URL。
+`backend/tests/test_api.py` 覆盖恶意来源无法经导入或人工复核落库。
+
+### 数据恢复和静态资源分发
+
+`restore_database()` / `scripts/restore.py` 只把 SQLite 备份恢复到新文件，校验核心 Re0 表、schema
+版本和外键，并拒绝覆盖目标；恢复后由操作者检查，再通过 `RE0_DB` 指向它。两项新增恢复测试
+验证无关 SQLite 文件被拒绝、已有文件保持原样。Dockerfile 复制备份/恢复命令；Compose 显式
+使用 hosted，缺少 session secret、HTTPS entry 或 allowed origins 时应用按原有启动门槛拒绝。
+宿主机端口只映射到 loopback。
+
+### 本轮执行记录
+
+- `python -m pytest`: **522 passed**, 1 个 Starlette `BlockingPortal` 弃用警告。
+- `npm test`: **83 passed**；`npm run check`: passed。
+- `scripts/browser_smoke.py`: 12 个阶段通过，包含“缺少来源时不发请求”及“确认作为新记录追加”，0 页面错误。
+- `scripts/agent_browser_smoke.py`: 11 项通过；`scripts/search_browser_smoke.py`: 8 项通过；
+  `scripts/login_browser_smoke.py`: 9 项通过、72 个请求；均为 fixture/TestClient 浏览器验证，不代表公网服务。
+- `scripts/real_http_browser_smoke.py`: Chromium 直接访问单独启动的 `run.py` 回环 HTTP 进程，31 个
+  本机请求、5 个阶段通过：载入 Skill JSON、预览零写入、确认导入、追加人工修订且保留原观察、窄屏记录窗口。
+  浏览器无非本地请求、无页面错误、没有模型调用；这是实际本机 HTTP 验收，不是 HTTPS 反向代理或多用户验收。
+- `scripts/http_smoke.py`: 本地真实回环 HTTP 进程通过；Skill HTML、JS、CSS 均为 200；缺 client header、无模型配置、跨源写入守卫仍分别返回预期 403/422/403。
+- `scripts/install_smoke.py`: 从工作树构建并安装 wheel 到新 venv，在仓库外导入 wheel 中的包；25 个 Web 资源齐全，`re0 doctor` 报 `installed`，`re0 serve` 的页面和数据库写入通过真实 HTTP。
+- Docker 构建**未运行**：当前环境没有 Docker CLI。TLS 终止、真实反向代理、真实第二账户/设备和线上恢复演练仍未验收；不据此开放公网。
+
+## 2026-09-23 #10：版本化知识记录与可追溯关系
+
+- `python -m pytest`: **528 passed**, 1 个 Starlette `BlockingPortal` 弃用警告。
+- `npm test`: **83 passed**；`npm run check`: passed。
+- `scripts/browser_smoke.py`: **14 阶段通过、0 页面错误**；新增关系索引在论文筛选无匹配时仍可用，以及来源/版本绑定、claim 门槛和追加式修订检查。
+- 回归浏览器：`agent_browser_smoke.py` **11 项**、`search_browser_smoke.py` **8 项**、`login_browser_smoke.py` **9 项**均通过且无页面错误。
+- `scripts/real_http_browser_smoke.py`: Chromium 直接访问独立回环 HTTP 进程，**5 阶段、31 个本机请求**通过；没有模型调用、外部请求或页面错误。它不验证 HTTPS、反代或多用户。
+- `scripts/http_smoke.py` 与 `scripts/install_smoke.py`: 回环服务和干净 wheel 安装/服务流程通过；skill 页面资源与 API 守卫通过。
+- Schema v3 和人工关系录入/检索/导出已有测试覆盖；仍未实现 DOI/arXiv 冲突映射与全文快照导入，所以实际 claim 记录暂不可用。代表性真实旧库迁移、TLS/反代与第二账户验收仍未完成。
+
+## 2026-09-23 #3：wheel/sdist 干净安装与 CLI 握手
+
+- `scripts/install_smoke.py .data/issue3-artifact-smoke-final`: **通过**。从工作树构建 wheel 和 sdist，确认 sdist 中含 `SKILL.md`、检索包装脚本及 Skill 页面资源；两个 artifact 分别安装到仓库外的新 venv。
+- wheel 环境：`re0 doctor` 报 `installed`；独立 stdio 进程完成 MCP initialize 与 tools/list（2 条 JSON-RPC 回复、8 个只读工具、stdout 无杂项）；Skill preview 零写入，随后安装到带空格的 host 路径；错误 `RE0_HOME` 返回可执行说明且无 traceback；serve 页面/静态资源全部 200，API 写入在临时 `RE0_DATA_DIR` 创建数据库。
+- sdist 环境：安装后 `doctor`、安装资源检查及相同 MCP 握手通过。构建隔离可能访问包索引以取得构建后端；smoke 不调用论文/资源服务，也不调用模型。
+- 发现并修复 console entry point 缺陷：`re0 mcp` 原先把外层 `mcp` 再传给 MCP 参数解析器，导致握手前退出；补 `test_top_level_mcp_command_does_not_reparse_its_own_command_name` 固定无额外参数及 `--workspace` 转发。
+- 验证：`python -m pytest` **529 passed**（1 个既有 Starlette 弃用警告）、`npm test` **83 passed**、`npm run check` 通过；单独 `test_mcp.py` **19 passed**，`py_compile` 通过。CI workflow 已改为构建两种 artifact 并执行此 smoke；本地修改尚未触发远程 CI。实际宿主兼容性仍依赖 #1 的选择与验收。
+
+## 2026-09-23 #7：公开 connector 通道复跑
+
+- `python evals/runner.py`: 6 个预设公开来源任务完成记录；`reveallayer-paper-and-repo`、`stable-layers-paper-and-repo`、`gated-or-absent-resource` 均 `pending_human`；`recall-unworld-design` `completed`；`recall-stable-layers` `partial/missed`；`recall-reveallayer` `unknown`。
+- `recall-stable-layers` 本次成功取回 OpenAlex 25 条，但目标 arXiv ID 不在其中，按召回缺口记 `missed`，没有改写成不存在。`recall-reveallayer` 因 OpenAlex 要求等待约 35 秒而超出本次调用时间预算，记 `unknown`，没有将限流当零结果。
+- `python evals/score.py`: connector 汇总 **completed=1、partial=1、pending_human=3、unknown=1**；recall miss 1，coverage unknown ratio 0.125；官方归属准确率仍为 `no value`，3 个标签未由人确认。provider 未报告用量，6 条记录均为 unknown。
+- 本轮只跑 connector 网络通道，不跑 `--channel live`；保存的 live case 仍是 `blocked`（没有模型配置）。该小样本是当日来源快照，不是研究质量或普适召回率结论；汇总在 `evals/results/SUMMARY.md`。
+
+## 2026-09-23 #4：来源 bundle 导入 Web 与追问复用
+
+- `re0 workspace export/import` 现在可在两个显式选定目录之间传递版本化 JSON；导入默认只预览，`--apply` 才写入；输出文件默认拒绝覆盖，`--force` 会先保留旧文件备份。重复来源保持幂等，不增加论文记录。
+- Web API 提供 owner-scoped workspace list/import preview/import/export。每个导入工作区写入 server-managed `data/workspaces/<owner-hash>/<workspace-id>`；请求体不接受路径或 owner。`GET /api/workspaces/{id}/export` 和两种 owner 的隔离已有 API 测试。
+- Agent Web 新增文件预览、导入确认、下载 bundle 和追问时按 workspace/source ID 选取来源。Chromium `scripts/agent_browser_smoke.py`: **12 阶段通过、0 页面错误**，覆盖“预览零写入 → 导入 → 下载 → 选择来源 → 发起追问”；390px 展开追问区无横向溢出。
+- `scripts/install_smoke.py`: wheel console script 执行 workspace export → preview → `--apply` → re-export 往返通过，所有路径含空格；wheel 和 sdist 均安装/运行通过。
+- Python bundle/API/session/auth 目标集：**19 passed**；`npm test` **83 passed**；`npm run check` 通过。
+- 补齐 #4 跨入口同一 fixture：CLI JSON、MCP `structuredContent` 和 Web workbench fixture 逐字段相等；标题、发表状态、资源审计候选、失败来源和审计分母均保留。`python -m pytest`: **541 passed**，1 个既有 Starlette 弃用警告。
+- 每条导入快照带 `imported_by_user`，model context 明说 bundle 的来源工具声明未由本服务加密认证；不自动批准论文。Web hosted follow-up 不能提交服务器路径；local CLI 路径只用于本地模式。正式托管/TLS、官方宿主渲染验收仍未完成。
+- Workspace 文件保存在 SQLite 旁边的 `workspaces/` 子目录；SQLite-only backup 不包含这些 sidecar 文件。README 与 [DELIVERY](DELIVERY.md) 已明确这项恢复边界。
+
+## 2026-09-23 #10：从 workspace 预览并导入全文段落
+
+- `POST /api/papers/{id}/knowledge/fulltext/preview` 读取当前账户管理的 workspace source ID，展示全文块、原 URL、解析状态和 locator；预览不写 SourceSnapshot。`.../import` 在显式确认后追加到用户选定的 PaperVersion，不自动创建论文或关系。
+- 导入只接受 `fetch_paper_text` 产生的全文块，按 arXiv 精确版本或 ACL Anthology ID 匹配，不按标题关联；locator 必须出现在被选全文块的正文中。相同 workspace source ID 重试时返回 `already_present`。
+- 通过 bundle 导入的来源持续标记 `provenance_verified=false`；这类来源的 claim 只能按 `human_confirmation` 保存。跨账户请求返回 404。
+- Chromium `scripts/browser_smoke.py`: **15 阶段通过、0 页面错误**，新增“全文 bundle → 预览零写入 → 核对原文和 locator → 确认导入 → 绑定版本 → 人工确认 claim”；窄屏旧流程仍通过。`scripts/agent_browser_smoke.py`: **12 阶段通过、0 页面错误**。
+- `python -m pytest`: **544 passed**, 1 个既有 Starlette 弃用警告；`npm test`: **83 passed**；`npm run check`: passed；`git diff --check`: 无空白错误。
+- 新增 API 用例覆盖版本不匹配、无写入预览、重复导入、locator 越界、未经人工确认的 claim 拒绝和 hosted 跨账户隔离。示例正文与来源来自离线 fixture；真实论文的人工 claim 复核仍待完成。
+
+## 2026-09-23 #10：CSL 标识冲突预览和留痕
+
+- CSL 导入只按 DOI/arXiv 标识去重，不按标题合并；同标题、不同标识符保留为独立论文。完全重复的标识符仍跳过，不覆盖已有元数据或笔记。
+- DOI 与 arXiv 指向不同 Work、现有 Work 尚未确认新交叉标识、或同一 arXiv 编号版本不一致时，预览列出待复核项；预览零写入。用户确认后，在每个匹配 Work 追加 `identifier_declaration` 与 `identity_conflict` SourceSnapshot。记录没有 `source_url`，不能作为关系证据；重复导入通过现有快照 payload 比较复用记录，不增加哈希字段或 schema。
+- Chromium `scripts/browser_smoke.py`: **15 阶段通过、0 页面错误**，覆盖同标题不同 DOI、冲突跨 Work 预览与确认、只含冲突项的再次确认，以及 390px 无横向溢出；预览截图在 `test-results/browser/`。`scripts/agent_browser_smoke.py`: **12 阶段通过、0 页面错误**。
+- `python -m pytest`: **547 passed**, 1 个既有 Starlette `BlockingPortal` 弃用警告；`npm test`: **83 passed**；`npm run check`: passed；`git diff --check`: 无空白错误。
+- API 用例覆盖冲突预览无写入、对每个候选 Work 追加两种记录、来源不可用作关系证据、重复冲突不重复追加，以及 arXiv 版本差异。人工确认对应关系、跨代表性旧库验收和真实研究关系样例仍待完成。
+
+## 2026-09-23 #3/#14：Skill 静态演示页与分发验证
+
+- `skill-creator/scripts/quick_validate.py skills/re0-paper-search`: **Skill is valid**。入口保留五源检索、来源失败、分页覆盖、资源审计及按需参考资料；没有增加新的 Skill schema 或专用 UI 元数据。
+- `scripts/skill_browser_smoke.py`: **5 项通过、0 页面错误**。使用 loopback 静态文件服务器，不启动 Re0 API；拦截所有非本机请求，验证历史来源链、键盘切换、复制命令、390px 无横向溢出和静态资源状态。截图在 `test-results/skill-browser/`。
+- 案例链连接 arXiv `2106.09685`、摘要中的 Microsoft/LoRA 链接候选和固定 commit `c4593f0` 文件清单。页面区分来源声明与作者归属，标明这是 2026-09-22 历史记录，并提示重跑会联网及占用服务商额度。
+- `scripts/install_smoke.py test-results/skill-demo-smoke-20260923-search-retry`: **通过**。wheel 与 sdist 均在仓库外的干净虚拟环境安装；25 个 Web 文件和 Skill 包资源齐全，MCP 握手、Skill 预览/安装、`/static/skill.html` 及其静态资源均通过。两种安装都用 MockTransport 跑了一个 OpenAlex Skill 搜索 fixture，返回预期版本化 JSON；环境清空凭据，只访问 mock host。
+- 验证：`python -m pytest` **547 passed**，1 个既有 Starlette `BlockingPortal` 弃用警告；`npm test` **83 passed**；`npm run check` passed；Skill quick validator passed。
+- 此预览只证明本地可浏览静态原型；没有实时搜索、模型调用、在线托管或参赛作品链接验收。

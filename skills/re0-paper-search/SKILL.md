@@ -1,13 +1,15 @@
 ---
 name: re0-paper-search
-description: Find literature across arXiv, OpenAlex, Semantic Scholar, OpenReview and Crossref at once, merge the duplicates each source reports separately, report acceptance status and affiliations, and list which sources failed instead of reading a failure as "no such paper". Optionally verify that a paper's own code/data links resolve and are not empty. Use it for literature discovery, prior-art checks and topic surveys, and whenever a claim needs a source that can be checked.
+description: Search literature across arXiv, OpenAlex, Semantic Scholar, OpenReview and Crossref; merge duplicate records, preserve per-source failures and pagination coverage, and optionally audit candidate code/data resources. Use for literature discovery, prior-art checks, topic surveys, and claims that need checkable sources.
 ---
 
 # Re0 paper search
 
-One query, five scholarly sources, one de-duplicated list. The name is deliberately distinct from
-a plain `paper_search` skill: if both are installed, this one is the one that reports failed
-sources rather than silently returning fewer results.
+One search session, five scholarly sources, one de-duplicated candidate list. Submit one focused
+phrase with `--query`, or up to five short phrases together with `--queries`; the shared request
+budget and coverage report preserve which query and source found each record. The name is deliberately
+distinct from a plain `paper_search` skill: this one reports failed sources rather than silently
+returning fewer results.
 
 ## Installing it outside the repository
 
@@ -17,19 +19,11 @@ The script finds the `re0` package in this order, so a copy can live anywhere:
 2. the repository the skill still sits in (`<repo>/skills/<skill>/scripts/`);
 3. the ambient environment, i.e. an installed `re0-research` (`pip install -e <repo>`).
 
-`~/.codex/skills/<skill>/` is **another application's** directory; install there only if that
-agent is the one you want to use, and never let this skill write to it.
-
-```bash
-# A copy works as long as re0 is either installed or RE0_HOME points at a checkout.
-cp -r skills/re0-paper-search ~/.learnbuddy/skills/
-RE0_HOME=/path/to/re0 python ~/.learnbuddy/skills/re0-paper-search/scripts/paper_search.py \
-    --query "your topic"
-```
-
-**Or install it with the CLI, which previews first and never overwrites silently.** The
-distribution ships this directory as data, so an installed `re0` can put the skill where a host
-looks for it:
+Install it with the CLI, which previews first and never overwrites silently. The distribution ships
+this directory as package data, so an installed `re0` can put the skill in the host's skills root.
+`~/.codex/skills/<skill>/` is another application's directory; never let this skill write to it
+during a search. If Codex is the intended host, install it there only with the explicit
+`re0 skill install` command above.
 
 ```bash
 re0 skill show                                                # which directory ships, and its hashes
@@ -50,6 +44,10 @@ A copy is still a snapshot: re-install after changing the repository, or run it 
 ```bash
 python scripts/paper_search.py --query "KV cache compression for long-context LLMs" \
     --start-year 2024 --end-year 2026 --json /tmp/papers.json
+
+# Merge several short queries in one bounded search session.
+re0 paper search --queries "image layer decomposition RGBA|single image layer separation" \
+    --max-papers 20 --max-pages 2 --json ./papers.json
 
 # Equivalent, once the package is installed. Both call re0.skill_search, so they cannot drift.
 re0 paper search --query "KV cache compression for long-context LLMs" --start-year 2024
@@ -138,43 +136,10 @@ This tool returns candidates and does not rank them. A report is where the judge
 
 ## Conference papers
 
-Papers published only at a conference (CVPR, NeurIPS, ACL…) are **already covered**: Crossref,
-Semantic Scholar and OpenAlex all index proceedings, and the venue is reported. A live query for
-`CVPR diffusion model watermarking` returned the CVPR paper labelled
-`已收录于会议或期刊 · 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)`.
-
-`--venue NAME` applies a real filter where one can be verified, and a query hint everywhere else:
-
-```bash
-python scripts/paper_search.py --query "diffusion watermarking" --venue CVPR --start-year 2024
-```
-
-Which happened is printed, per source, and is also in `coverage.venue_filter`:
-
-| Route | Status |
-|---|---|
-| OpenAlex `primary_location.source.id` | **Verified live 2026-09-22.** The name is resolved through `/sources?filter=display_name.search:NAME`, a hit that does not actually carry the name is discarded, and the surviving IDs are OR-ed into the filter. Reported as `mode=strict`. |
-| DBLP — the obvious conference index | **Unusable.** It answers a non-browser client with a `<title>Making sure you're not a bot!</title>` challenge page instead of JSON. |
-| OpenAlex source-*name* filter | **Rejected by the API.** `primary_location.source.display_name.search` returns HTTP 400 — *"is not a valid field"*. Filtering by source needs the ID lookup above. |
-| Semantic Scholar `venue=` | Documented, but **still unverified**: every attempt was rate-limited without an API key, most recently HTTP 429 on 2026-09-22. So the name is prepended to the query and reported as `mode=hint`, never as a filter. |
-| arXiv, Crossref, OpenReview | No venue parameter here. `mode=hint` — the name joins the query and the result is **not** narrowed by venue. |
-
-**A strict filter is only as wide as what resolved, and that is why the names are printed.** OpenAlex
-indexes a conference family as one source per edition, and a live search for `CVPR` returned exactly
-one: `2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)`. Filtering on it is
-genuinely strict and genuinely narrower than "CVPR" means — so the run prints
-
-```
-会议/期刊条件（openalex）：来源按解析出的稳定 source ID 严格过滤 — 实际匹配到的 source：2022 IEEE/CVF …(CVPR)
-```
-
-and the coverage row carries `resolved_names`. If nothing resolves, the name falls back to a query
-hint and the row says `resolve_failed`: the result set got *wider*, not narrower, and nothing was
-silently dropped.
-
-**More sources would not fix the remaining gap.** The five sources already hold hundreds of millions
-of records including conference proceedings. What a keyword search still cannot ask is "everything
-this venue accepted in a year it has no source record for", and a sixth index would not change that.
+Conference proceedings are covered by the existing scholarly sources. `--venue NAME` is a strict
+filter only where a stable venue ID resolves; elsewhere it is reported as a query hint. The run
+prints the mode and any resolved names in `coverage.venue_filter`. See
+[references/venue-filter.md](references/venue-filter.md) for provider boundaries and recorded checks.
 
 ## Credentials
 
@@ -235,14 +200,16 @@ How a released artifact is found and checked, the audit state vocabulary, what e
 
 ## References
 
-SKILL.md is the entry point; the detail lives beside it so a first search does not require reading
-all of it. Nothing was summarised away — each file is the section that used to be here, verbatim.
+SKILL.md is the entry point; detailed credential, status and provider notes live beside it so a first
+search does not require reading all of them. Provider-specific live checks are dated observations,
+not guarantees of current API behavior.
 
 | File | What it holds |
 |---|---|
 | [references/credentials.md](references/credentials.md) | which keys change what, `GITHUB_TOKEN`, and per-provider credential scoping |
 | [references/publication-status.md](references/publication-status.md) | the four publication states, preprint-versus-accepted, affiliations |
 | [references/open-source-status.md](references/open-source-status.md) | artifact discovery and checks, the audit vocabulary, `--resource-matrix`, coverage denominators, confirming by hand |
+| [references/venue-filter.md](references/venue-filter.md) | provider-specific conference filtering, strict-filter scope, and query-hint limits |
 
 ## Related entry points
 

@@ -88,6 +88,15 @@ considering the selected provider's policies. Task text and evidence are stored
 locally in plaintext, and exports may be sensitive. No at-rest encryption or
 fine-grained retention controls are provided.
 
+Research-source workspace bundles are capped at 4 MiB and are imported into a
+server-selected directory derived from the database location and authenticated
+owner; Web requests never supply a server filesystem path. Preview creates no
+workspace files. An imported snapshot is marked `imported_by_user`: the JSON
+bundle is not signed, so its self-reported tool name/time is not proof that this
+server performed the retrieval. The UI labels that limitation, and the follow-up
+context asks the model to re-check the original locator. Bundle import never
+approves or creates a paper.
+
 The model API credential is sent only to the user-selected allowed model
 endpoint. GitHub credentials go only to `api.github.com`; Tavily credentials go
 only to `api.tavily.com`. They are not available as model tools or tool arguments.
@@ -194,12 +203,13 @@ Task records and approved papers share the original SQLite file. Use
 Back up before upgrading. Never commit `.data`, `.env`, credentials, exported
 private notes, live model responses or database files to GitHub.
 
-Upgrades that add the `owner` column (papers v1→v2, agent v2→v3, zotero v1→v2)
-copy the file with the SQLite backup API before writing anything, assign every
-existing row to the owner `local`, and compare row counts before dropping an old
-table. A database written by a newer build is refused rather than downgraded, and
-nothing is migrated in place without that copy beside it. `local` is a reserved
-account name, so no account can later claim the rows a migration assigned.
+Upgrades that add the `owner` column (papers v1→v2), the Work/version/snapshot
+projection (library v2→v3), or the agent/Zotero schemas copy the file with the
+SQLite backup API before writing anything. Legacy single-user rows belong to the
+owner `local`; uncertain historical paper versions remain unbound instead of
+being guessed from a title. A database written by a newer build is refused rather
+than downgraded, and nothing is migrated without the pre-upgrade copy. `local` is
+a reserved account name, so no account can later claim the rows a migration assigned.
 
 ## Reporting
 

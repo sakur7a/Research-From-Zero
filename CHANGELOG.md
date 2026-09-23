@@ -2,6 +2,79 @@
 
 ## Unreleased
 
+### Source workspace transfer into the Web workbench (#4)
+
+- Add bounded versioned workspace JSON export/import through `re0 workspace`; preview remains
+  read-only, `--apply` is explicit, unknown fields and oversized source records become visible
+  conflicts, corrupt markers are not replaced, and export replacement keeps a timestamped backup.
+- Add owner-scoped Web bundle preview/import/list/export endpoints and a follow-up picker for
+  imported source IDs. Hosted requests use server-managed owner directories and workspace IDs;
+  caller-provided filesystem paths are accepted only for local follow-up/CLI operation.
+- Imported rows carry `imported_by_user`; their claimed tool provenance is explicitly unverified.
+  Reuse records that fact in the model context, and bundle import never approves a paper.
+- Add fixtures for preview with zero writes, idempotent import, cross-account isolation, tampered
+  fields, size bounds, and a Chromium import → select source → follow-up flow.
+
+### Wheel and source distribution acceptance (#3)
+
+- Build both wheel and sdist in the packaging smoke, inspect required Skill/Web files in the sdist,
+  and install each artifact into a separate clean virtual environment. The smoke exercises the
+  installed console command, skill preview/install into a path containing spaces, invalid
+  `RE0_HOME` handling, MCP initialize/tools-list, and the wheel's real HTTP serve/write flow.
+- The installed MCP check exposed and fixed `re0 mcp` passing its outer command token back to the
+  MCP argument parser, which had made the stdio server exit before its handshake. `re0 mcp` now
+  forwards only its own arguments.
+- Add the pinned `build` frontend to the test extra; CI now builds both formats and runs the clean
+  install smoke. The real host/client compatibility check still depends on owner input in #1.
+- Verification on Windows/Python 3.12: wheel and sdist built; both installed outside the checkout;
+  wheel serve/write, Skill install, and MCP checks passed. Remote CI has not run for these changes.
+
+### Versioned knowledge records and source-linked relations (#10)
+
+- Add schema v3 tables for stable Works, explicit PaperVersions, immutable source snapshots,
+  versioned research templates, topic assignments and typed research relations. The v1/v2
+  migration preserves existing notes and observations, and does not infer a paper version from
+  title or bind an observation that lacks explicit version evidence.
+- Keep paper create/edit and Zotero/agent storage writes synchronized with the new projection.
+  Add owner-scoped template/version and topic-assignment APIs, source/version-checked relation
+  writes, superseding revisions, filtered relation queries, and schema-v3 knowledge export.
+- Add the evidence-linked relation index to the library graph view. It distinguishes saved
+  assertions from category/resource projection, requires a source snapshot and locator, and keeps
+  claims disabled until a full-text snapshot exists. No claim inference or full-text ingestion path
+  is included yet.
+- Verification: 528 Python tests, 83 Node tests, JS syntax check, five Chromium smoke scripts,
+  loopback HTTP and installed-wheel serve smokes passed. The knowledge graph remains incomplete;
+  see `docs/ROADMAP.md` for the remaining acceptance checks.
+
+### From imported Skill result to a reviewable library record (#14)
+
+- The retained library can now append a field-level human review to an imported resource audit.
+  Attribution, author declarations and version matches require source evidence; the saved
+  `confirmation` is shown separately from the original observation. Audit citations are validated
+  as credential-free HTTP(S) URLs before import or confirmation.
+- Add `scripts/restore.py` to restore a SQLite backup into a **new** validated file without
+  overwriting the current database. The hosted Compose template now declares its mode and required
+  identity/HTTPS settings, publishes only on host loopback, and carries the backup/restore scripts.
+- Pin the container to Python `3.13.15-slim-bookworm`; add the Skill page and its JS/CSS to real HTTP
+  and installed-wheel smoke coverage.
+- Verification: 522 Python tests, 83 Node tests, JS syntax check, five Chromium smoke scripts,
+  loopback HTTP smoke, and a clean wheel install/serve smoke passed. Docker build and real hosted
+  proxy/device acceptance were not run in this environment.
+
+### A static, evidence-bounded Skill preview
+
+- Add `/static/skill.html`, a standalone read-only page for the documented 2026-09-22
+  Microsoft/LoRA resource check. It says the check is historical, links to the checked repository
+  revision and the two listed adapter files, and keeps attribution/version uncertainty visible.
+- The page has no retrieval or model endpoint, accepts no API key and writes no research data. Its
+  tabs and command-copy action run only in the browser. It is a UI preview, not a live demo or a
+  substitute for the online competition delivery.
+- Bring the skill and CLI wording into line with multi-query search and move dated venue-filter
+  provider checks into `references/venue-filter.md`. Correct the README's stale dotenv lookup order.
+- Verification: 522 Python tests, 83 Node tests, `npm run check`, and the agent/search/login Chromium
+  smoke scripts passed. A separate 1440px/390px Chromium review of this page found no JS errors,
+  no horizontal overflow, and no non-local requests.
+
 ### The door: a login page, and a real browser that read the headers (#13)
 
 - Add `/login` (`web/login.html`, `web/login.js`, pure decisions in `web/login-core.js`). It asks

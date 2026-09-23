@@ -5,7 +5,8 @@ import {RUN_LABELS, TOOL_LABELS, SHIPPED_DEFAULTS, activeRun, budgetSummary, can
 initTheme();
 const workspace = document.querySelector('#workspace');
 const settings = document.querySelector('#settings');
-let config = {}, runs = [], current = null, events = [], tab = 'trace', epoch = 0, timer, toastTimer;
+let config = {}, runs = [], current = null, events = [], workspaces = [], pendingWorkspaceBundle = null,
+  tab = 'trace', epoch = 0, timer, toastTimer;
 // The conversation the open run belongs to: its cumulative ledger and caps. Fetched with the run so
 // the composer can show what a follow-up would be added to, rather than only what it may spend.
 let conversation = null;
@@ -14,13 +15,15 @@ const examples = [
   ['资源深查', '搜索图层分解与图层生成的论文，区分官方声明、代码、checkpoint 与数据集的实际线索，给出来源。'],
   ['Baseline 筛选', '检索图推荐系统的可复现实验工作，比较数据划分、评测脚本和训练代码线索，标记需要进一步确认的条件。']
 ];
-async function api(path, data, method = data === undefined ? 'GET' : 'POST') {
-  const response = await fetch('/api/agent' + path, {method, headers:{'Content-Type':'application/json','X-Re0-Client':'web'}, ...(data === undefined ? {} : {body:JSON.stringify(data)})});
+async function requestJson(base, path, data, method = data === undefined ? 'GET' : 'POST') {
+  const response = await fetch(base + path, {method, headers:{'Content-Type':'application/json','X-Re0-Client':'web'}, ...(data === undefined ? {} : {body:JSON.stringify(data)})});
   let result;
   try { result = await response.json(); } catch { throw new Error('服务响应无效，请确认 Python 服务仍在运行。'); }
   if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : (result.detail || []).map(x => `${(x.loc||[]).join('.')}: ${x.msg}`).join('；') || '操作未完成');
   return result;
 }
+const api = (path, data, method) => requestJson('/api/agent', path, data, method);
+const appApi = (path, data, method) => requestJson('/api', path, data, method);
 function notice(text) {
   clearTimeout(toastTimer);
   // A modal <dialog> and its blurred ::backdrop occupy the top layer, so a toast
@@ -123,6 +126,9 @@ function deltaHtml(delta) {
 function followupHtml() {
   const {choices, hidden} = reuseChoices(current.evidence);
   const defaults = normalizeDefaults(config.task_defaults);
+  const availableWorkspaces=workspaces.filter(item=>item.available&&item.sources?.length);
+  const workspaceOptions=availableWorkspaces.map(item=>`<option value="${e(item.workspace_id)}">${e(item.workspace_id)} · ${item.total_sources} 条</option>`).join('');
+  const workspaceSources=availableWorkspaces.flatMap(item=>item.sources.map(source=>`<label class="reuse workspace-source"><input type="checkbox" name="workspace_reuse" value="${e(source.source_id)}" data-workspace-id="${e(item.workspace_id)}" disabled> <span>${e(source.title||source.locator||source.source_id)}${source.imported_by_user?'<small>用户导入 · 来源声明未经认证</small>':''}</span></label>`)).join('');
   return `<details class="followup"><summary>在这一轮上追问 / 补充约束（第 ${(current.turn || 1) + 1} 轮）</summary>
     <form id="followup-form">
       <label>本轮新增或变更的条件
@@ -132,10 +138,15 @@ function followupHtml() {
         ${choices.map(ev => `<label class="reuse"><input type="checkbox" name="reuse" value="${e(ev.id)}"> ${e((ev.paper && ev.paper.title) || ev.locator || ev.kind || ev.id)}</label>`).join('') || '<p class="subtle">这一轮没有可复用的证据。</p>'}
         ${hidden ? `<p class="subtle">另有 ${hidden} 条未在这里列出；用 <code>re0 session scope</code> 或 API 指名。</p>` : ''}
       </fieldset>
+      <fieldset class="workspace-reuse"><legend>导入的来源工作区</legend>
+        <label>选择工作区<select name="workspace_id" id="workspace-choice"><option value="">不复用外部来源</option>${workspaceOptions}</select></label>
+        ${workspaceSources?`<div class="workspace-source-list">${workspaceSources}</div>`:'<p class="subtle">尚无已导入来源；导入 bundle 后可在这里选择。</p>'}
+        <div class="workspace-bundle-import"><label>导入来源 bundle（JSON）<input type="file" id="workspace-bundle-file" accept="application/json,.json"></label><div class="workspace-bundle-actions"><button type="button" class="button" data-action="workspace-preview">预览</button><button type="button" class="button" data-action="workspace-export" disabled>导出所选工作区</button><button type="button" class="button primary" data-action="workspace-import-confirm" hidden>确认导入</button></div><p class="subtle" id="workspace-import-status">预览不会写入；导入只保存来源快照，不会批准论文入库。Bundle 中的工具来源声明不会被加密认证。</p></div>
+      </fieldset>
       <label class="consent"><input type="checkbox" name="use_library"> 本轮授权发送本地文献库元数据（不从上一轮继承）</label>
       <label class="consent"><input type="checkbox" name="trust_destination"> 本轮模型服务与上一轮不同，我确认把历史材料发往它</label>
       <label class="consent"><input type="checkbox" name="authorize" required> 我确认这一轮会产生新的模型调用费用；会话累计额度不会因新建一轮而重置</label>
-      <p class="subtle">${e(ledgerLine(conversation))} · 本轮预算 模型 ${defaults.max_model_calls} / 工具 ${defaults.max_tool_calls}</p>
+      <p class="subtle ledger-note">${e(ledgerLine(conversation))} · 本轮预算 模型 ${defaults.max_model_calls} / 工具 ${defaults.max_tool_calls}</p>
       <div class="run-controls"><button class="primary" type="submit">发起追问</button>${canRetry(current) ? '<button class="button" type="button" data-action="retry">按原目标重试一轮</button>' : ''}</div>
     </form></details>`;
 }
@@ -162,6 +173,8 @@ async function selectRun(id) {
     if (token!==epoch) return;
     current=r; events=ev;
     conversation = r.conversation_id ? await api('/conversations/'+r.conversation_id) : null;
+    try { workspaces=(await appApi('/workspaces')).workspaces||[]; }
+    catch(err) { workspaces=[]; notice(`未能读取已导入工作区：${err.message}`); }
     if (token!==epoch) return;
     runView(); poll(token);
   } catch(err){notice(err.message);}
@@ -241,10 +254,60 @@ document.addEventListener('click', async event => {
       case 'cancel':await api('/runs/'+current.id+'/cancel',{});notice('已请求停止，将在当前调用结束或超时后生效。');break;
       case 'resume':if(confirm('使用同一模型从检查点继续？可能再次产生调用费用，累计调用预算不重置。')){await api('/runs/'+current.id+'/resume',{confirmed:true});await selectRun(current.id);}break;
       case 'retry':if(confirm('按上一轮的目标原文重试一轮？会新增模型调用费用，会话累计额度不重置。')){const r=await api('/retries',{parent_run:current.id,authorize_spend:true,consent_to_send:true,idempotency_key:`web-retry-${current.id}-${current.turn||1}`});await refreshHistory();await selectRun(r.id);}break;
+      case 'workspace-preview':{
+        const form=button.closest('#followup-form'), file=form?.querySelector('#workspace-bundle-file')?.files?.[0];
+        if(!file){notice('先选择一个 JSON bundle 文件。');break;}
+        if(file.size>4*1024*1024){notice('Bundle 超过 4 MiB 上限。');break;}
+        const bundle=JSON.parse(await file.text());
+        const preview=await appApi('/workspaces/import/preview',{bundle});
+        pendingWorkspaceBundle=bundle;
+        const status=form.querySelector('#workspace-import-status');
+        status.textContent=`工作区 ${preview.workspace_id} · 新来源 ${preview.new.length} · 已有 ${preview.already_present.length} · 冲突 ${preview.conflicts.length}。预览未写入；导入不会确认工具来源或批准论文。`;
+        form.querySelector('[data-action="workspace-import-confirm"]').hidden=false;
+        break;
+      }
+      case 'workspace-import-confirm':{
+        if(!pendingWorkspaceBundle){notice('请先预览 bundle。');break;}
+        const form=button.closest('#followup-form'), runId=current?.id;
+        const draft={goal:form?.elements.goal.value||'', reuse:[...form.querySelectorAll('input[name="reuse"]:checked')].map(input=>input.value),
+          useLibrary:Boolean(form?.elements.use_library.checked), trustDestination:Boolean(form?.elements.trust_destination.checked),
+          authorize:Boolean(form?.elements.authorize.checked)};
+        const result=await appApi('/workspaces/import',{bundle:pendingWorkspaceBundle});
+        pendingWorkspaceBundle=null;
+        workspaces=(await appApi('/workspaces')).workspaces||[];
+        if(current?.id===runId){
+          runView();
+          const replacement=document.querySelector('#followup-form');
+          if(replacement){replacement.elements.goal.value=draft.goal;replacement.elements.use_library.checked=draft.useLibrary;
+            replacement.elements.trust_destination.checked=draft.trustDestination;replacement.elements.authorize.checked=draft.authorize;
+            for(const input of replacement.querySelectorAll('input[name="reuse"]'))input.checked=draft.reuse.includes(input.value);}
+        }
+        notice(`已导入 ${result.new.length} 条来源快照；来源声明保持未认证，论文未入库。`);
+        break;
+      }
+      case 'workspace-export':{
+        const workspaceId=document.querySelector('#workspace-choice')?.value||'';
+        if(!workspaceId){notice('先选择要导出的工作区。');break;}
+        const bundle=await appApi(`/workspaces/${encodeURIComponent(workspaceId)}/export`);
+        const url=URL.createObjectURL(new Blob([JSON.stringify(bundle,null,2)],{type:'application/json'}));
+        const anchor=document.createElement('a');anchor.href=url;anchor.download=`re0-workspace-${workspaceId}.json`;
+        document.body.append(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+        break;
+      }
     }
   } catch(err){button.disabled=false;notice(err.message);}
 });
 document.addEventListener('change', event=>{
+  if(event.target.id==='workspace-choice'){
+    const exportButton=document.querySelector('[data-action="workspace-export"]');
+    if(exportButton)exportButton.disabled=!event.target.value;
+    for(const input of document.querySelectorAll('input[name="workspace_reuse"]')){
+      const enabled=input.dataset.workspaceId===event.target.value;
+      if(!enabled)input.checked=false;
+      input.disabled=!enabled;
+    }
+    return;
+  }
   if(event.target.id!=='preset')return;
   const value=event.target.value, field=document.querySelector('#base-url');
   // Candidate models belong to one provider; drop them when the provider changes.
@@ -265,7 +328,11 @@ document.addEventListener('submit', async event=>{
       config=await api('/defaults',{max_model_calls:Number(data.get('max_model_calls')),max_tool_calls:Number(data.get('max_tool_calls')),attempt_seconds:Number(data.get('attempt_seconds')),use_library:data.has('use_library')},'PUT');
       settings.close();sidebar();if(!current)home(document.querySelector('#goal')?.value || '');notice('任务默认值已保存；只影响之后新建的任务。');
     } else if(form.id==='followup-form') {
-      const payload=followupPayload({goal:data.get('goal'),reuse:data.getAll('reuse'),useLibrary:data.has('use_library'),trustNewDestination:data.has('trust_destination')},current,config.task_defaults);
+      const workspaceId=String(data.get('workspace_id')||'');
+      const workspaceReuse=[...form.querySelectorAll('input[name="workspace_reuse"]:checked')]
+        .filter(input=>input.dataset.workspaceId===workspaceId).map(input=>input.value);
+      const payload=followupPayload({goal:data.get('goal'),reuse:data.getAll('reuse'),workspaceId,
+        workspaceReuse,useLibrary:data.has('use_library'),trustNewDestination:data.has('trust_destination')},current,config.task_defaults);
       const problem=followupProblem(payload);
       if(problem){notice(problem);return;}
       payload.idempotency_key=idempotencyKeyFor(current,payload);

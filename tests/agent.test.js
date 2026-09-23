@@ -135,11 +135,14 @@ test('the reuse picker is bounded and says how much it withheld',()=>{
  assert.deepEqual(reuseChoices(undefined),{choices:[],hidden:0});
 });
 test('a follow-up payload carries every authorization and no invented one',()=>{
- const payload=followupPayload({goal:' 只保留有训练代码的两篇 ',reuse:['ev_1','',null],useLibrary:true},
+ const payload=followupPayload({goal:' 只保留有训练代码的两篇 ',reuse:['ev_1','',null],useLibrary:true,
+   workspaceId:'ws_0123456789abcdef',workspaceReuse:['src_0123456789abcdef','']},
    {id:'run-1'},{max_model_calls:8,max_tool_calls:12,attempt_seconds:300,use_library:false});
  assert.equal(payload.parent_run,'run-1');
  assert.equal(payload.goal,'只保留有训练代码的两篇');
  assert.deepEqual(payload.reuse_evidence,['ev_1']);
+ assert.equal(payload.workspace_id,'ws_0123456789abcdef');
+ assert.deepEqual(payload.reuse_sources,['src_0123456789abcdef']);
  assert.equal(payload.authorize_spend,true); assert.equal(payload.consent_to_send,true);
  assert.equal(payload.use_library,true);
  // Not inherited from the run's own defaults: the checkbox is the only source.
@@ -149,6 +152,7 @@ test('a follow-up payload carries every authorization and no invented one',()=>{
  assert.match(followupProblem(followupPayload({goal:'短'},{id:'r'},undefined)),/至少 5 字/);
  assert.match(followupProblem(followupPayload({goal:'x'.repeat(6001)},{id:'r'},undefined)),/过长/);
  assert.match(followupProblem({goal:'足够长的目标了',parent_run:''}),/缺少父任务/);
+ assert.match(followupProblem({goal:'足够长的目标了',parent_run:'r',reuse_sources:['src_1']}),/工作区/);
 });
 test('the idempotency key is stable for an unchanged form and differs for a changed one',()=>{
  const run={id:'run-1'};
@@ -157,6 +161,8 @@ test('the idempotency key is stable for an unchanged form and differs for a chan
  assert.equal(idempotencyKeyFor(run,base),idempotencyKeyFor(run,same));
  const other=followupPayload({goal:'改查数据划分',reuse:['ev_1']},run,undefined);
  assert.notEqual(idempotencyKeyFor(run,base),idempotencyKeyFor(run,other));
+ const otherWorkspace=followupPayload({goal:'只保留两篇',workspaceId:'ws_1',workspaceReuse:['src_1']},run,undefined);
+ assert.notEqual(idempotencyKeyFor(run,base),idempotencyKeyFor(run,otherWorkspace));
  assert.notEqual(idempotencyKeyFor({id:'run-2'},base),idempotencyKeyFor(run,base));
  assert.match(idempotencyKeyFor(run,base),/^web-[0-9a-z]+$/);
 });

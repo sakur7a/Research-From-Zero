@@ -17,6 +17,7 @@ import httpx
 from fastapi.testclient import TestClient
 from playwright.sync_api import sync_playwright
 from re0.main import create_app
+from re0.workspace import Workspace
 from test_agent import FixtureNetwork, CONFIG
 
 
@@ -146,7 +147,9 @@ def run(output):
         assert not page.evaluate("document.querySelector('.followup').open")
         page.locator('.followup summary').click()
         assert page.evaluate("document.querySelector('.followup').open")
-        assert '会话累计' in page.locator('.followup .subtle').first.inner_text()
+        assert page.locator('[data-action=workspace-import-confirm]').is_hidden()
+        assert page.locator('[data-action=workspace-export]').is_disabled()
+        assert '会话累计' in page.locator('.followup .ledger-note').inner_text()
         # Both consent gates are required attributes, so the form itself stops an unauthorized submit.
         assert page.locator('#followup-form [name=goal]').get_attribute('required') is not None
         assert page.locator('#followup-form [name=authorize]').get_attribute('required') is not None
@@ -180,8 +183,58 @@ def run(output):
         checked.append('followup_turn_reuses_evidence_and_states_its_delta')
         page.get_by_role('tab',name='研究报告').click()
         page.screenshot(path=str(output/'agent-report-fixture.png'),full_page=True)
+        # #4: move one source from the explicit MCP-style workspace bundle into this owner's
+        # server-managed workspace, preview it, confirm import, then reuse only that source by ID.
+        external=Workspace(output/'external-workspace').open()
+        external_source=external.record({"source_url":"https://export.arxiv.org/abs/2501.12345",
+                                         "locator":"fixture section 2 paragraph 3","kind":"paper",
+                                         "content":"FIXTURE bundle body; not a real paper claim.",
+                                         "paper":{"title":"Fixture imported workspace source"}},
+                                        tool="search_papers")
+        bundle_path=output/'workspace-bundle.json'
+        bundle_path.write_text(json.dumps(external.bundle(),ensure_ascii=False),encoding='utf-8')
+        assert client.get('/api/workspaces').json()['workspaces']==[]
+        page.locator('.followup summary').click()
+        page.locator('#workspace-bundle-file').set_input_files(str(bundle_path))
+        page.locator('[data-action=workspace-preview]').click()
+        page.wait_for_function("document.querySelector('#workspace-import-status')?.textContent.includes('新来源 1')")
+        assert client.get('/api/workspaces').json()['workspaces']==[], 'preview must write nothing'
+        page.locator('[data-action=workspace-import-confirm]').click()
+        page.wait_for_function("document.querySelector('#workspace-choice')?.querySelectorAll('option').length===2")
+        page.locator('.followup summary').click()
+        page.locator('#workspace-choice').select_option(external.workspace_id)
+        assert page.locator('[data-action=workspace-export]').is_enabled()
+        with page.expect_download() as pending_download:
+            page.locator('[data-action=workspace-export]').click()
+        download=pending_download.value
+        assert download.suggested_filename==f're0-workspace-{external.workspace_id}.json'
+        download.save_as(str(output/'downloaded-workspace-bundle.json'))
+        exported=json.loads((output/'downloaded-workspace-bundle.json').read_text(encoding='utf-8'))
+        assert exported['workspace_id']==external.workspace_id
+        assert len(exported['sources'])==1 and exported['sources'][0]['imported_by_user'] is True
+        assert page.locator('.workspace-source').inner_text().find('来源声明未经认证')>=0
+        page.screenshot(path=str(output/'agent-workspace-imported.png'),full_page=True)
+        page.locator('input[name=workspace_reuse]').check()
+        page.locator('#followup-form [name=goal]').fill('只使用导入的来源快照，并说明来源声明仍需复核')
+        page.locator('#followup-form [name=authorize]').check()
+        page.locator('#followup-form [type=submit]').click()
+        page.wait_for_function("document.querySelector('.run-controls span')?.textContent.includes('第 3 轮 · 追问')",timeout=20000)
+        page.wait_for_function("document.querySelector('.run-controls span')?.textContent.includes('第 3 轮 · 追问') && document.querySelector('.status')?.classList.contains('completed')",timeout=30000)
+        third=[row for row in client.get('/api/agent/runs').json() if row['turn']==3][0]
+        third_detail=client.get('/api/agent/runs/'+third['id']).json()
+        authorizations=third_detail['origin']['permissions']
+        assert authorizations['workspace_id']==external.workspace_id
+        assert authorizations['reuse_count']==1
+        assert str(external.root) not in json.dumps(third_detail)
+        assert any(item.get('reused_from',{}).get('provenance_verified') is False
+                   for item in third_detail['evidence'])
+        checked.append('workspace_bundle_preview_import_owner_scope_and_followup_reuse')
         page.set_viewport_size({'width':390,'height':844})
         assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+        page.locator('.followup summary').click()
+        assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+        page.screenshot(path=str(output/'agent-mobile-workspace-followup.png'),full_page=True)
+        page.locator('.followup summary').click()
         page.locator('[data-action=history]').click()
         assert page.locator('#history').is_visible()
         page.locator('[data-action=history]').click()

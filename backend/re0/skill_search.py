@@ -9,8 +9,9 @@ Credentials come from the environment. An explicit `RE0_ENV_FILE` is honoured ex
 `RE0_ENV_INCLUDE_AGENT_DIRS=1` asks for it. A variable that is already set always wins, and no
 value is ever printed, logged or written anywhere.
 
-One query per invocation. Merging across sources happens inside Re0, so a second
-query is a second invocation rather than a second merge pass.
+Pass one focused query with `--query` or up to five short phrases with `--queries`.
+One call merges across both queries and sources under a shared request budget; a
+second invocation has a separate budget and does not merge with the first.
 """
 from __future__ import annotations
 
@@ -383,6 +384,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def write_result_json(result: dict, destination: str | Path) -> dict:
+    """Write the CLI's versioned machine-readable result and return the exact structure written."""
+    structure = result_model.normalize(result)
+    Path(destination).write_text(json.dumps(structure, ensure_ascii=False, indent=2) + "\n",
+                                 encoding="utf-8")
+    return structure
+
+
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -455,9 +464,7 @@ def main(argv=None) -> int:
     if args.json_path:
         # The same versioned structure the MCP surface returns, so the two machine-readable exits
         # cannot describe the same call differently.
-        structure = result_model.normalize(result)
-        Path(args.json_path).write_text(json.dumps(structure, ensure_ascii=False, indent=2),
-                                        encoding="utf-8")
+        structure = write_result_json(result, args.json_path)
         print(f"完整结果已写入 {args.json_path}"
               f"（schema_version {structure['schema_version']}；文档正文在 documents[].body.excerpt，"
               "每篇的 resource_audits、artifact_candidates 与 artifact_search 都在，"

@@ -26,5 +26,5 @@ jobs:
       - run: python -m pytest
       - run: npm test
       - run: npm run check
-      # The distribution has to build from a clean checkout, not only from the author's venv.
-      - run: python -m pip wheel . --no-deps -w dist
+      # The smoke builds, inspects and installs both public artifact formats from a clean checkout.
+      - run: python scripts/install_smoke.py .data/ci-install-smoke

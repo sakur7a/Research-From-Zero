@@ -546,6 +546,35 @@ def test_reuse_from_a_workspace_keeps_the_original_retrieval_time(tmp_path):
     assert any("工作区" in note for note in scope.notes)
 
 
+def test_owner_scoped_web_workspace_reuse_uses_an_id_not_a_client_path(tmp_path):
+    from fastapi import HTTPException
+    from re0.agent.session import _collect_workspace
+    from re0.workspace import Workspace, managed_workspace_path
+
+    store = _store(tmp_path)
+    owner = "ws_0123456789abcdef"
+    workspace_id = "ws_fedcba9876543210"
+    root = managed_workspace_path(store.db.path, owner, workspace_id)
+    workspace = Workspace(root).open(workspace_id=workspace_id)
+    source_id = workspace.record({"source_url": "https://export.arxiv.org/abs/2501.12345",
+                                  "locator": "metadata", "kind": "paper", "content": "fixture"},
+                                 tool="search_papers")
+    reuse, seeds = [], []
+    notes, resolved_id = _collect_workspace(
+        store, _follow(parent_run="parent", reuse_sources=[source_id], workspace_id=workspace_id), reuse, seeds,
+        owner=owner)
+    assert resolved_id == workspace_id and len(reuse) == 1
+    assert seeds[0]["data"]["reused_from"]["workspace_id"] == workspace_id
+    assert any("工作区" in note for note in notes)
+
+    with pytest.raises(HTTPException) as caught:
+        _collect_workspace(store, _follow(parent_run="parent", reuse_sources=[source_id],
+                                          workspace=str(tmp_path / "outside")),
+                           [], [], owner=owner)
+    assert caught.value.status_code == 422
+    assert "不能读取请求中的服务器路径" in caught.value.detail
+
+
 def test_a_source_id_the_named_workspace_does_not_hold_is_refused(tmp_path):
     store = _store(tmp_path)
     rid, _ = _run(store)

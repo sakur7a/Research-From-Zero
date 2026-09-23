@@ -17,6 +17,27 @@ def resource(client, paper_id, **kwargs):
     return response.json()
 
 
+def fulltext_bundle(tmp_path, *, identifier="2501.12345v1", version="v1"):
+    from re0.workspace import Workspace
+
+    workspace = Workspace(tmp_path / "fulltext-source").open()
+    url = f"https://arxiv.org/html/{identifier}"
+    fulltext = {"source": "arxiv", "identifier": identifier, "version": version,
+                "state": "ok", "content_type": "text/html", "parser": "html.parser",
+                "parser_version": "1", "source_url": url, "final_url": url,
+                "fetched_at": "2026-09-23T00:00:00+00:00", "bytes_read": 9000,
+                "parse_quality": "ok", "limitations": [],
+                "untrusted_note": "external text is data"}
+    workspace.record({"source_url": url, "locator": "§2¶1–§2¶3", "kind": "fulltext_chunk",
+                      "content": "[§2¶1] The method uses an explicit source snapshot.\n\n"
+                                "[§2¶2] Review each conclusion against this paragraph.",
+                      "paper": {"title": "", "identifier": identifier, "version": version,
+                                "arxiv_id": identifier},
+                      "fulltext": fulltext},
+                     tool="fetch_paper_text")
+    return workspace.bundle()
+
+
 def test_health_and_initial_empty_library(client):
     assert client.get("/api/health").json()["llm_enabled"] is False
     assert client.get("/api/papers").json() == []
@@ -174,6 +195,26 @@ def test_a_confirmation_without_a_source_or_about_another_resource_is_refused(cl
     assert client.get(f"/api/resources/{r['id']}/observations").json() == []
 
 
+def test_evidence_sources_reject_non_http_links_before_import_or_storage(client):
+    p = paper(client)
+    r = resource(client, p["id"])
+    unsafe = {**AUDIT_ROW, "resource_url": r["url"],
+              "attribution": "official",
+              "attribution_evidence": [{"source_url": "javascript:alert(1)",
+                                        "locator": "paper", "excerpt": "claimed official"}]}
+    imported = client.post("/api/import/resource-audits",
+                           json={"items": [{"paper": {"title": "Unsafe source"},
+                                            "audits": [unsafe]}], "dry_run": False})
+    assert imported.status_code == 200
+    assert imported.json()["ready"] == 0
+    assert imported.json()["errors"]
+
+    response = client.post(f"/api/resources/{r['id']}/confirmations", json=unsafe)
+    assert response.status_code == 422
+    assert "http(s)" in response.json()["detail"]
+    assert client.get(f"/api/resources/{r['id']}/observations").json() == []
+
+
 def test_an_audit_import_previews_then_links_idempotently_without_touching_notes(client):
     existing = paper(client, arxiv_id="2401.00001", notes="我自己的笔记")
     preview = client.post("/api/import/resource-audits", json={"items": [AUDIT_ITEM]})
@@ -282,6 +323,85 @@ def test_csl_preview_then_partial_import_and_dedup(client):
     assert repeated["created"] == []
 
 
+def test_csl_import_keeps_same_title_with_distinct_identifiers(client):
+    items = [{"title": "A repeated title", "DOI": "10.1234/first"},
+             {"title": "A repeated title", "DOI": "10.1234/second"}]
+    preview = client.post("/api/import/csl", json={"items": items}).json()
+    assert preview["ready"] == 2
+    assert preview["skipped"] == []
+    assert preview["conflicts"] == []
+
+    imported = client.post("/api/import/csl", json={"items": items, "dry_run": False}).json()
+    assert len(imported["created"]) == 2
+    papers = client.get("/api/papers").json()
+    assert {paper["doi"] for paper in papers} == {"10.1234/first", "10.1234/second"}
+    assert {paper["title"] for paper in papers} == {"A repeated title"}
+
+
+def test_csl_cross_identifier_conflict_is_previewed_then_recorded_idempotently(client):
+    doi_work = paper(client, title="DOI record", doi="10.1234/doi-work", notes="Keep this")
+    arxiv_work = paper(client, title="arXiv record", arxiv_id="2401.00001v1")
+    items = [{"title": "Same title, new identity", "DOI": "10.1234/new-one"},
+             {"title": "Same title, new identity", "DOI": "10.1234/new-two"},
+             {"title": "Competing declaration", "DOI": "10.1234/doi-work",
+              "URL": "https://arxiv.org/abs/2401.00001v1"}]
+
+    preview = client.post("/api/import/csl", json={"items": items}).json()
+    assert preview["ready"] == 2
+    assert len(preview["conflicts"]) == 1
+    conflict = preview["conflicts"][0]
+    assert "分别指向不同文献" in conflict["reason"]
+    assert {row["work_id"] for row in conflict["matches"]} == {doi_work["id"], arxiv_work["id"]}
+    for work in (doi_work, arxiv_work):
+        bundle = client.get(f"/api/papers/{work['id']}/knowledge").json()
+        assert not any(row["snapshot_kind"] in {"identifier_declaration", "identity_conflict"}
+                       for row in bundle["source_snapshots"])
+
+    applied = client.post("/api/import/csl", json={"items": items, "dry_run": False}).json()
+    assert len(applied["created"]) == 2
+    saved = applied["conflicts"][0]
+    assert set(saved["recorded_work_ids"]) == {doi_work["id"], arxiv_work["id"]}
+    assert len(saved["recorded_snapshots"]) == 2
+    snapshot_ids = {}
+    for work in (doi_work, arxiv_work):
+        bundle = client.get(f"/api/papers/{work['id']}/knowledge").json()
+        records = [row for row in bundle["source_snapshots"]
+                   if row["snapshot_kind"] in {"identifier_declaration", "identity_conflict"}]
+        assert {row["snapshot_kind"] for row in records} == {"identifier_declaration", "identity_conflict"}
+        assert all(row["source_url"] == "" for row in records)
+        assert all(row["payload"]["state"] == "requires_manual_review" for row in records)
+        assert all("Keep this" not in json.dumps(row["payload"]) for row in records)
+        snapshot_ids[work["id"]] = {row["id"] for row in records}
+
+    repeated = client.post("/api/import/csl", json={"items": items, "dry_run": False}).json()
+    assert repeated["created"] == []
+    assert repeated["conflicts"][0]["recorded_work_ids"] == saved["recorded_work_ids"]
+    assert {row["work_id"]: set(row["source_snapshot_ids"])
+            for row in repeated["conflicts"][0]["recorded_snapshots"]} == snapshot_ids
+    for work in (doi_work, arxiv_work):
+        bundle = client.get(f"/api/papers/{work['id']}/knowledge").json()
+        records = [row for row in bundle["source_snapshots"]
+                   if row["snapshot_kind"] in {"identifier_declaration", "identity_conflict"}]
+        assert len(records) == 2
+
+
+def test_csl_arxiv_version_mismatch_is_conflict_not_duplicate(client):
+    work = paper(client, title="Archive v2", arxiv_id="2301.00001v2")
+    item = {"title": "Archive v1 declaration", "URL": "https://arxiv.org/abs/2301.00001v1"}
+    preview = client.post("/api/import/csl", json={"items": [item]}).json()
+    assert preview["ready"] == 0
+    assert len(preview["conflicts"]) == 1
+    assert "版本不同" in preview["conflicts"][0]["reason"]
+
+    applied = client.post("/api/import/csl", json={"items": [item], "dry_run": False}).json()
+    assert applied["created"] == []
+    assert applied["conflicts"][0]["recorded_work_ids"] == [work["id"]]
+    bundle = client.get(f"/api/papers/{work['id']}/knowledge").json()
+    conflict = next(row for row in bundle["source_snapshots"]
+                    if row["snapshot_kind"] == "identity_conflict")
+    assert conflict["payload"]["declared_metadata"]["arxiv_id"] == "2301.00001v1"
+
+
 def test_csl_invalid_structure_and_large_import(client):
     assert client.post("/api/import/csl", json={"items": [{}] * 501}).status_code == 422
     assert client.post("/api/import/csl", json={"items": ["bad"]}).status_code == 422
@@ -294,9 +414,8 @@ def test_export_contains_evidence_and_safe_bibtex(client):
     r = resource(client, p["id"])
     client.post(f"/api/resources/{r['id']}/check", json={})
     data = client.get("/api/export").json()
-    # Version 2 because the export now names whose library it is: a file that does not say can be
-    # imported into somebody else's, and then the answer is wrong in a way nobody can see.
-    assert data["schema_version"] == 2
+    # Version 3 carries Work/Version/SourceSnapshot alongside the legacy bibliography projection.
+    assert data["schema_version"] == 3
     assert data["owner"] == LOCAL_OWNER
     assert data["papers"][0]["resources"][0]["observations"][0]["evidence"]
     bib = client.get("/api/export?format=bibtex")
@@ -345,3 +464,143 @@ def test_sqlite_persists_between_app_instances(tmp_path):
 def test_invalid_metadata_identifier_does_not_fetch(client):
     result = client.post("/api/metadata/resolve", json={"identifier": "http://127.0.0.1/private"})
     assert result.status_code == 422
+
+
+def test_workspace_bundle_preview_is_read_only_and_import_is_idempotent_owner_local(client, tmp_path):
+    from re0.workspace import Workspace, managed_workspace_path
+
+    source = Workspace(tmp_path / "mcp-source").open()
+    source_id = source.record({"source_url": "https://export.arxiv.org/abs/2501.12345",
+                               "locator": "metadata from arxiv", "kind": "paper",
+                               "content": "Fixture source bundle body",
+                               "paper": {"title": "Fixture Bundle Paper"}},
+                              tool="search_papers")
+    bundle = source.bundle()
+    target = managed_workspace_path(client.app.state.store.db.path, "local", source.workspace_id)
+    assert not target.exists()
+
+    preview = client.post("/api/workspaces/import/preview", json={"bundle": bundle})
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["new"] == [source_id] and preview.json()["applied"] is False
+    assert not target.exists(), "preview must not create a workspace marker or source file"
+    assert client.get("/api/workspaces").json()["workspaces"] == []
+
+    imported = client.post("/api/workspaces/import", json={"bundle": bundle})
+    assert imported.status_code == 201, imported.text
+    assert imported.json()["papers_approved"] == 0
+    assert imported.json()["provenance_verified"] is False
+    rows = client.get("/api/workspaces").json()["workspaces"]
+    assert len(rows) == 1 and rows[0]["workspace_id"] == source.workspace_id
+    assert rows[0]["sources"][0]["source_id"] == source_id
+    assert rows[0]["sources"][0]["imported_by_user"] is True
+    exported = client.get(f"/api/workspaces/{source.workspace_id}/export")
+    assert exported.status_code == 200
+    assert exported.headers["content-disposition"].endswith(
+        f'filename="re0-workspace-{source.workspace_id}.json"')
+    assert exported.json()["sources"][0]["imported_by_user"] is True
+    repeated = client.post("/api/workspaces/import", json={"bundle": bundle})
+    assert repeated.status_code == 201 and repeated.json()["new"] == []
+    assert repeated.json()["already_present"] == [source_id]
+    assert client.get("/api/papers").json() == [], "a source bundle never imports or approves papers"
+
+
+def test_workspace_import_reports_conflicting_source_without_storing_it(client, tmp_path):
+    from re0.workspace import Workspace
+
+    source = Workspace(tmp_path / "mcp-source").open()
+    source.record({"source_url": "https://export.arxiv.org/abs/2501.12345",
+                   "locator": "metadata", "kind": "paper", "content": "fixture"},
+                  tool="search_papers")
+    bundle = source.bundle()
+    bundle["sources"][0]["api_key"] = "must be rejected"
+    response = client.post("/api/workspaces/import", json={"bundle": bundle})
+    assert response.status_code == 201, response.text
+    assert response.json()["new"] == []
+    assert response.json()["conflicts"][0]["fields"] == ["api_key"]
+    assert client.get("/api/workspaces").json()["workspaces"][0]["sources"] == []
+
+
+def test_fulltext_snapshot_import_is_previewed_version_bound_and_idempotent(client, tmp_path):
+    paper_row = paper(client, arxiv_id="2501.12345v1", version_label="v1", notes="keep this note")
+    version_rows = client.get(f"/api/papers/{paper_row['id']}/knowledge").json()["versions"]
+    version_id = next(row["id"] for row in version_rows if row["arxiv_id"] == "2501.12345v1")
+
+    bundle = fulltext_bundle(tmp_path)
+    workspace_import = client.post("/api/workspaces/import", json={"bundle": bundle})
+    assert workspace_import.status_code == 201, workspace_import.text
+    # The content-addressed identifier is retained when the workspace bundle is imported.
+    source_id = workspace_import.json()["new"][0]
+    listed_source = client.get("/api/workspaces").json()["workspaces"][0]["sources"][0]
+    assert listed_source["fulltext"]["identifier"] == "2501.12345v1"
+    assert "content" not in listed_source, "workspace listing is metadata-only"
+    request = {"workspace_id": bundle["workspace_id"], "source_ids": [source_id],
+               "paper_version_id": version_id}
+    base = f"/api/papers/{paper_row['id']}/knowledge/fulltext"
+
+    preview = client.post(base + "/preview", json=request)
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["applied"] is False and preview.json()["provenance_verified"] is False
+    assert preview.json()["new"][0]["content"].startswith("[§2¶1]")
+    assert preview.json()["new"][0]["fulltext"]["parser_version"] == "1"
+    before = client.get(f"/api/papers/{paper_row['id']}/knowledge").json()
+    assert not any(row["snapshot_kind"] == "fulltext_chunk" for row in before["source_snapshots"])
+    assert client.get(f"/api/papers/{paper_row['id']}").json()["notes"] == "keep this note"
+
+    applied = client.post(base + "/import", json=request)
+    assert applied.status_code == 200, applied.text
+    snapshot_id = applied.json()["new"][0]["source_snapshot_id"]
+    assert applied.json()["new"][0]["provenance_verified"] is False
+    after = client.get(f"/api/papers/{paper_row['id']}/knowledge").json()
+    snapshot = next(row for row in after["source_snapshots"] if row["id"] == snapshot_id)
+    assert snapshot["snapshot_kind"] == "fulltext_chunk"
+    assert snapshot["paper_version_id"] == version_id
+    assert snapshot["locator"] == "§2¶1–§2¶3"
+    assert snapshot["payload"]["content"].startswith("[§2¶1]")
+    assert snapshot["payload"]["provenance_verified"] is False
+
+    repeated = client.post(base + "/import", json=request)
+    assert repeated.status_code == 200 and repeated.json()["new"] == []
+    assert repeated.json()["already_present"][0]["source_snapshot_id"] == snapshot_id
+
+    claim = {"relation_type": "claim", "target": "method", "statement": "The paper describes a method.",
+             "conditions": "Only for the cited version and paragraph.", "assertion_kind": "model_inference",
+             "source_snapshot_id": snapshot_id, "paper_version_id": version_id, "locator": "§2¶2"}
+    refused = client.post(f"/api/papers/{paper_row['id']}/relations", json=claim)
+    assert refused.status_code == 422 and "人工核对" in refused.json()["detail"]
+    claim["assertion_kind"] = "human_confirmation"
+    accepted = client.post(f"/api/papers/{paper_row['id']}/relations", json=claim)
+    assert accepted.status_code == 201, accepted.text
+    assert accepted.json()["paper_version_id"] == version_id
+    claim["locator"] = "§9¶99"
+    outside_chunk = client.post(f"/api/papers/{paper_row['id']}/relations", json=claim)
+    assert outside_chunk.status_code == 422 and "实际段落／页码 locator" in outside_chunk.json()["detail"]
+
+    updated = {key: value for key, value in paper_row.items()
+               if key not in {"id", "created_at", "updated_at", "is_demo", "resources"}}
+    updated.update(arxiv_id="2501.12345v2", version_label="v2")
+    assert client.put(f"/api/papers/{paper_row['id']}", json=updated).status_code == 200
+    version_rows = client.get(f"/api/papers/{paper_row['id']}/knowledge").json()["versions"]
+    version_v2 = next(row["id"] for row in version_rows if row["arxiv_id"] == "2501.12345v2")
+    mismatch = client.post(base + "/preview", json={**request, "paper_version_id": version_v2})
+    assert mismatch.status_code == 200
+    assert mismatch.json()["new"] == []
+    assert mismatch.json()["conflicts"][0]["source_id"] == source_id
+
+
+def test_owner_workspace_bundle_survives_app_restart(tmp_path):
+    from re0.workspace import Workspace
+
+    db_path = str(tmp_path / "workspace-persistence.sqlite3")
+    source = Workspace(tmp_path / "external").open()
+    source_id = source.record({"source_url": "https://export.arxiv.org/abs/2501.12345",
+                               "locator": "section 2", "kind": "paper", "content": "persistent fixture"},
+                              tool="search_papers")
+    with TestClient(create_app(db_path), headers={"X-Re0-Client": "web"}) as first:
+        imported = first.post("/api/workspaces/import", json={"bundle": source.bundle()})
+        assert imported.status_code == 201, imported.text
+
+    with TestClient(create_app(db_path), headers={"X-Re0-Client": "web"}) as restarted:
+        response = restarted.get("/api/workspaces")
+        assert response.status_code == 200
+        assert response.json()["workspaces"][0]["sources"][0]["source_id"] == source_id
+        assert restarted.get(f"/api/workspaces/{source.workspace_id}/export").json()["sources"][0]["content"] == "persistent fixture"

@@ -69,3 +69,69 @@ protocol tests are fixtures, not live research-quality evaluations.
 
 Remote CI status is recorded in GitHub Actions for this commit. A source push,
 local test pass, or old CI run is not proof of this commit's remote CI outcome.
+
+## Docker Compose：托管模板
+
+Compose 将容器内服务绑定到 `0.0.0.0:8000`，但把宿主机端口只发布在
+`127.0.0.1:8000`。因为进程看不见 Docker 端口映射，模板明确使用
+`RE0_MODE=hosted`；`RE0_SESSION_SECRET`、`RE0_PUBLIC_ENTRY` 和
+`RE0_ALLOWED_ORIGINS` 留空时服务会拒绝启动，不会退回无登录的本地模式。
+TLS 由同一台机器上受信任的反向代理终止，代理再连回环端口。不要把容器端口改成
+公网映射，也不要把本模板的存在当成公网安全验收。
+
+Dockerfile 使用固定的 `python:3.13.15-slim-bookworm` 标签；Python 依赖由
+`requirements.txt` 的精确版本约束。更新任一版本后，应重新构建并跑容器 HTTP 验收。
+
+在部署主机上用密钥管理器设置三个托管变量，或在仅本人可读、已被 Git 忽略的本地
+`.env` 中填写它们。生成新会话密钥时，先构建镜像再运行一次性命令：
+
+```bash
+docker compose build
+docker compose run --rm --no-deps re0 python -m re0 auth secret
+```
+
+把命令给出的新值放进 `RE0_SESSION_SECRET`；再填写真实的 HTTPS 域名：
+
+```dotenv
+RE0_SESSION_SECRET=<fresh-random-value>
+RE0_PUBLIC_ENTRY=https://research.example.org
+RE0_ALLOWED_ORIGINS=https://research.example.org
+```
+
+然后启动、创建首个账户：
+
+```bash
+docker compose up -d
+docker compose exec re0 python -m re0 auth create-user
+```
+
+模型 Key 仍由每个用户在自己的登录会话里提交，只保留在服务进程内存；不要把模型 Key
+写进 Compose 环境或 `.env`。
+
+### 容器数据库备份与恢复
+
+备份会使用 SQLite backup API，因此也包含已提交到 WAL 的数据。输出文件名必须未被使用：
+
+```bash
+docker compose exec re0 python scripts/backup.py --output /app/.data/re0-backup-20260923.sqlite3
+```
+
+注意：`backup.py` 只备份 SQLite。Agent Web 导入的来源 bundle 保存在同一数据卷的
+`workspaces/` 子目录中，但不在 SQLite 内；完整灾备还要单独导出各 workspace JSON
+或复制整个 `/app/.data/workspaces/` 目录。单独使用下面的 SQLite restore 不会重建这些来源文件。
+
+恢复前先停止服务，并将目标备份放在同一持久卷里。恢复命令创建一个新数据库文件，先做
+SQLite 完整性、外键和 Re0 schema 检查；它拒绝覆盖任何已有文件：
+
+```bash
+docker compose stop re0
+docker compose run --rm --no-deps re0 python scripts/restore.py --source /app/.data/re0-backup-20260923.sqlite3 --destination /app/.data/re0-restored.sqlite3
+```
+
+检查新文件无误后，在私有 Compose 环境中将 `RE0_DB` 改为
+`/app/.data/re0-restored.sqlite3` 并启动服务。原数据库和备份都不被改写；回滚时把
+`RE0_DB` 改回旧路径。备份与数据库含有私人研究记录，应另行复制到加密的受控存储，不能
+提交到仓库或和服务的唯一数据卷放在一起。
+
+Compose/镜像构建、真实 TLS 反代、第二用户和独立设备验收需要 Docker 引擎及受控部署环境；
+本仓库代码和离线测试不能替代这些发布门槛。

@@ -43,6 +43,7 @@
 
 /* Continuing a conversation: the composer sits under the run controls and stays collapsed until
    asked for, so a first turn's page is unchanged. */
+[hidden]{display:none!important}
 .followup { margin: 14px 0; border: 1px solid var(--line, #d8dee9); border-radius: 10px; padding: 10px 14px; background: var(--surface-2, #fbfcfe); }
 .followup > summary { cursor: pointer; font-weight: 600; }
 .followup form { display: grid; gap: 10px; margin-top: 12px; }
@@ -52,6 +53,8 @@
 .followup .reuse { display: block; font-size: .86rem; margin: 3px 0; }
 .followup .consent { display: block; font-size: .86rem; margin: 3px 0; }
 .followup .run-controls { margin-top: 4px; }
+.workspace-reuse>label{display:grid;gap:5px;font-size:.86rem}.workspace-reuse select,.workspace-bundle-import input[type=file]{width:100%;min-width:0;padding:8px;border:1px solid var(--line,#d8dee9);border-radius:7px;background:var(--paper,#fff)}
+.workspace-source-list{max-height:190px;overflow:auto;margin:8px 0;padding:5px 8px;border:1px solid var(--line,#d8dee9);border-radius:7px}.workspace-source{display:flex!important;gap:8px;align-items:flex-start}.workspace-source input{margin-top:5px}.workspace-source span{min-width:0;overflow-wrap:anywhere}.workspace-source small{display:block;color:var(--ink-2);font-size:.72rem}.workspace-bundle-import{margin-top:10px;padding-top:10px;border-top:1px solid var(--line,#d8dee9);display:grid;gap:7px}.workspace-bundle-actions{display:flex;gap:8px;flex-wrap:wrap}.workspace-bundle-import #workspace-import-status{overflow-wrap:anywhere}
 .report-delta { margin-top: 18px; padding-top: 12px; border-top: 1px dashed var(--line, #d8dee9); }
 .report-delta h3 { margin: 0 0 6px; }
 .report-delta p { margin: 2px 0; font-size: .9rem; }

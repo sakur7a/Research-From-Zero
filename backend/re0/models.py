@@ -142,6 +142,93 @@ class TopicInput(StrictModel):
     name: str = Field(min_length=1, max_length=80)
 
 
+TEMPLATE_KINDS = ("direction", "task", "method", "input", "output", "experiment_condition")
+
+
+class TemplateDimension(StrictModel):
+    key: str = Field(min_length=1, max_length=50, pattern=r"^[a-z][a-z0-9_]*$")
+    label: str = Field(min_length=1, max_length=80)
+
+
+class TemplateConcept(StrictModel):
+    key: str = Field(min_length=1, max_length=80, pattern=r"^[a-z][a-z0-9_]*$")
+    kind: Literal["direction", "task", "method", "input", "output", "experiment_condition"]
+    label: str = Field(min_length=1, max_length=120)
+    aliases: list[str] = Field(default_factory=list, max_length=20)
+    parent: str | None = Field(default=None, max_length=80)
+
+    @field_validator("aliases")
+    @classmethod
+    def clean_aliases(cls, values: list[str]) -> list[str]:
+        cleaned = [value.strip() for value in values]
+        if any(not value or len(value) > 120 for value in cleaned):
+            raise ValueError("别名须为 1–120 字符")
+        return list(dict.fromkeys(cleaned))
+
+
+class ResearchTemplateDefinition(StrictModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=1000)
+    dimensions: list[TemplateDimension] = Field(min_length=1, max_length=12)
+    concepts: list[TemplateConcept] = Field(min_length=1, max_length=300)
+
+    @model_validator(mode="after")
+    def template_tree_is_well_formed(self):
+        dimensions = [item.key for item in self.dimensions]
+        keys = [item.key for item in self.concepts]
+        if len(dimensions) != len(set(dimensions)):
+            raise ValueError("方向模板的维度 key 不能重复")
+        if len(keys) != len(set(keys)):
+            raise ValueError("方向模板的概念 key 不能重复")
+        if any(item.kind not in dimensions for item in self.concepts):
+            raise ValueError("每个概念类型都必须出现在 dimensions 中")
+        by_key = {item.key: item for item in self.concepts}
+        for item in self.concepts:
+            if item.parent and item.parent not in by_key:
+                raise ValueError(f"概念 {item.key} 的父节点不存在")
+            if item.parent == item.key:
+                raise ValueError(f"概念 {item.key} 不能以自身为父节点")
+        for item in self.concepts:
+            seen = {item.key}
+            parent = item.parent
+            while parent:
+                if parent in seen:
+                    raise ValueError("方向模板父子关系不能形成循环")
+                seen.add(parent)
+                parent = by_key[parent].parent
+        names: dict[str, str] = {}
+        for item in self.concepts:
+            for name in [item.label, *item.aliases]:
+                folded = name.casefold()
+                if folded in names and names[folded] != item.key:
+                    raise ValueError(f"名称或别名冲突：{name}")
+                names[folded] = item.key
+        return self
+
+
+class TopicAssignmentInput(StrictModel):
+    template_version_id: str = Field(min_length=1, max_length=100)
+    concept_key: str = Field(min_length=1, max_length=80, pattern=r"^[a-z][a-z0-9_]*$")
+
+
+class ResearchRelationInput(StrictModel):
+    relation_type: Literal["uses_method", "evaluated_on", "has_resource", "claim"]
+    target: str = Field(min_length=1, max_length=300)
+    statement: str = Field(min_length=1, max_length=2000)
+    conditions: str = Field(default="", max_length=2000)
+    assertion_kind: Literal["author_statement", "model_inference", "human_confirmation"]
+    source_snapshot_id: str = Field(min_length=1, max_length=100)
+    paper_version_id: str = Field(default="", max_length=100)
+    locator: str = Field(min_length=1, max_length=1000)
+    supersedes_id: str = Field(default="", max_length=100)
+
+    @model_validator(mode="after")
+    def claim_has_conditions(self):
+        if self.relation_type == "claim" and not self.conditions.strip():
+            raise ValueError("claim 关系需要填写假设或适用条件")
+        return self
+
+
 class Evidence(StrictModel):
     source_url: str
     locator: str = ""
@@ -311,6 +398,31 @@ class ResourceAudit(StrictModel):
             raise ValueError("记录作者发布声明时请附原文出处")
         if self.version_match != "unknown" and not self.version_evidence:
             raise ValueError("判断论文与资源版本是否对应时请附依据")
+        return self
+
+    @model_validator(mode="after")
+    def audit_sources_are_safe_links(self):
+        """Audits are durable, exportable claims; every citation must be a real web source.
+
+        Low-level provider observations may describe a rejected input URL, so the shared Evidence
+        shape stays permissive there. Once those observations become an audit or a human revision,
+        citation links must be safe HTTP(S) URLs before they can be imported or stored.
+        """
+        groups = [self.attribution_evidence, self.author_declaration_evidence, self.evidence]
+        for group in groups:
+            for item in group:
+                try:
+                    if not safe_url(item.source_url):
+                        raise ValueError
+                except ValueError as exc:
+                    raise ValueError("资源审计的证据来源必须是无凭据的 http(s) 链接") from exc
+        for finding in self.coverage.values():
+            for source in finding.sources:
+                try:
+                    if not safe_url(source):
+                        raise ValueError
+                except ValueError as exc:
+                    raise ValueError("类别覆盖的证据来源必须是无凭据的 http(s) 链接") from exc
         return self
 
     @property

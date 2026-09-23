@@ -39,8 +39,8 @@ def finding(state, sources=(), paths=()):
     return ComponentFinding(state=state, sources=list(sources), paths=list(paths))
 
 
-def build() -> dict:
-    """The normalized structure one `re0 paper search --json` run would have written."""
+def source_payload() -> dict:
+    """The single fake tool result consumed by CLI JSON, MCP, and the Web workbench."""
     documents = []
 
     # 1. A conference paper with an official repository that was actually read.
@@ -189,7 +189,12 @@ def build() -> dict:
         "audit": resource_audit.run_coverage(documents, budget),
     }
 
-    return result_model.normalize(payload)
+    return payload
+
+
+def build() -> dict:
+    """The normalized structure one `re0 paper search --json` run would have written."""
+    return result_model.normalize(source_payload())
 
 
 def main(destination: pathlib.Path = OUT) -> pathlib.Path:

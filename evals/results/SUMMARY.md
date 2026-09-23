@@ -1,14 +1,14 @@
 # Evaluation summary — channel `connector`
 
 - task set version: 1
-- tasks run: 6 (completed=2, partial=1, pending_human=3)
+- tasks run: 6 (completed=1, partial=1, pending_human=3, unknown=1)
 - blocked for want of credentials: 0
-- steps: contradicted=0, deferred=1, human=4, missed=1, ok=5, unknown=2
+- steps: contradicted=0, deferred=1, human=4, missed=1, ok=6, unknown=1
 - recall misses (expected identifier not in the results): 1
 
 - **Official-candidate accuracy: no value** — no sample in this channel has been judged official yet; 3 label(s) are recorded as unknown
 - **Resource availability false-positive rate: 0.0** (0/3)
-- **Coverage unknown ratio: 0.25** (2/8)
+- **Coverage unknown ratio: 0.125** (1/8)
 
 - human review still pending: 4 expectation(s)
 - usage: unknown reported by the provider (6 record(s) without usage)

@@ -21,6 +21,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from ..db import Database, encode
+from ..knowledge import append_source_snapshot, ensure_paper_version, metadata_snapshot
 from ..models import PaperInput, now
 from .schemas import SessionCaps
 
@@ -523,6 +524,16 @@ class TaskStore:
                             "is_demo,owner) VALUES (?,?,?,?,?,?,0,?)",
                             (pid, encode(paper.model_dump(mode="json")), paper.doi, arxiv, stamp,
                              stamp, owner))
+            paper_data = paper.model_dump(mode="json")
+            version_id = ensure_paper_version(con, pid, owner, paper_data,
+                                              origin="agent_approved_import", created_at=now(),
+                                              is_current=created)
+            append_source_snapshot(con, work_id=pid, owner=owner,
+                                   paper_version_id=version_id, kind="agent_approved_source",
+                                   payload={"paper": metadata_snapshot(paper_data),
+                                            "locator": source.get("locator", "")},
+                                   retrieved_at=now(), source_url=source.get("source_url", ""),
+                                   locator=source.get("locator", ""))
             con.execute("INSERT OR REPLACE INTO agent_imports VALUES (?,?,?,?)", (rid, eid, pid, now()))
             con.execute("INSERT INTO agent_events(run_id,at,kind,data) VALUES (?,?,?,?)", (rid, now(), "approved_import", encode({"evidence_id": eid, "paper_id": pid, "created": created})))
         return {"paper_id": pid, "created": created}

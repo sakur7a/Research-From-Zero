@@ -157,6 +157,8 @@ export function followupPayload(input, run, defaults) {
     parent_run: run.id,
     goal,
     reuse_evidence: (source.reuse || []).filter(Boolean),
+    workspace_id: String(source.workspaceId || ''),
+    reuse_sources: (source.workspaceReuse || []).filter(Boolean),
     authorize_spend: true,
     consent_to_send: true,
     use_library: Boolean(source.useLibrary),
@@ -173,6 +175,7 @@ export function followupPayload(input, run, defaults) {
 // bill me for it", so the composer refuses it here rather than letting the server explain.
 export function followupProblem(payload) {
   if (!payload || !payload.parent_run) return '缺少父任务';
+  if ((payload.reuse_sources || []).length && !payload.workspace_id) return '选择要复用来源的工作区';
   const length = (payload.goal || '').length;
   if (length < FOLLOWUP_GOAL_MIN) return `请写清本轮新增或变更的条件（至少 ${FOLLOWUP_GOAL_MIN} 字）`;
   if (length > FOLLOWUP_GOAL_MAX) return `本轮目标过长（上限 ${FOLLOWUP_GOAL_MAX} 字）`;
@@ -196,7 +199,9 @@ export function deltaSummary(delta) {
 // the key unique per click and defeat the only thing it is for.
 export function idempotencyKeyFor(run, payload) {
   const text = [run && run.id, String((payload && payload.goal) || '').trim(),
-    ((payload && payload.reuse_evidence) || []).slice().sort().join(',')].join('|');
+    ((payload && payload.reuse_evidence) || []).slice().sort().join(','),
+    String((payload && payload.workspace_id) || ''),
+    ((payload && payload.reuse_sources) || []).slice().sort().join(',')].join('|');
   let hash = 0;
   for (let index = 0; index < text.length; index += 1) hash = (hash * 31 + text.charCodeAt(index)) >>> 0;
   return `web-${hash.toString(36)}`;

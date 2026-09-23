@@ -6,6 +6,7 @@ development (see docs/TESTING.md); that check is not part of this suite because 
 would pull a large dependency tree into the test extra.
 """
 import io
+import importlib.util
 import json
 import pathlib
 
@@ -66,6 +67,16 @@ def test_handshake_echoes_the_client_version_and_exposes_only_read_only_tools(mo
         assert tool["description"] and tool["inputSchema"]["type"] == "object"
     # Task-protocol, task-scoped and consent-gated tools must never appear here.
     assert "search_web" not in names
+
+
+def test_top_level_mcp_command_does_not_reparse_its_own_command_name(monkeypatch):
+    from re0 import cli
+
+    received = []
+    monkeypatch.setattr(mcp_server, "main", lambda argv=None: received.append(argv))
+    assert cli.main(["mcp"]) == 0
+    assert cli.main(["mcp", "--workspace", "a workspace path"]) == 0
+    assert received == [[], ["--workspace", "a workspace path"]]
 
 
 def test_notifications_and_malformed_lines_produce_no_response():
@@ -261,6 +272,34 @@ def test_the_cli_json_and_the_mcp_structured_content_are_the_same_shape():
     assert mcp_server.result_model is result_model
     assert "result_model.normalize(result)" in pathlib.Path(skill_search.__file__).read_text(
         encoding="utf-8")
+
+
+def test_one_fixture_has_the_same_cli_mcp_and_web_result_contract(tmp_path):
+    """The Web fixture is normalized from this same fake result; each surface keeps the facts."""
+    from re0 import skill_search
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    generator_path = root / "scripts" / "gen_search_fixture.py"
+    spec = importlib.util.spec_from_file_location("shared_search_fixture", generator_path)
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    payload = generator.source_payload()
+
+    cli_json = tmp_path / "cli-result.json"
+    cli_structure = skill_search.write_result_json(payload, cli_json)
+    (answer,) = exchange([paper_search_call()], StubTools(payload))
+    mcp_structure = answer["result"]["structuredContent"]
+    web_fixture = json.loads((root / "tests" / "fixtures" / "search-result.json")
+                             .read_text(encoding="utf-8"))
+
+    assert json.loads(cli_json.read_text(encoding="utf-8")) == cli_structure
+    assert cli_structure == mcp_structure == web_fixture
+    assert cli_structure["documents"][0]["paper"]["title"].startswith("LayerKit:")
+    assert cli_structure["documents"][0]["publication"]["state"] == "venue"
+    assert cli_structure["documents"][0]["publication"]["label"] == "有会议或期刊版本"
+    assert cli_structure["documents"][0]["resource_audits"]
+    assert cli_structure["coverage"]["source_failures"][0]["source"] == "semanticscholar"
+    assert cli_structure["audit"]["name_search"]["denominator"] == 4
 
 
 def test_a_supported_version_is_echoed_and_a_tool_call_before_the_handshake_is_refused():

@@ -174,8 +174,8 @@ def _reuse_row(data: dict, origin: dict) -> Reuse:
 
 
 def collect_reuse(store, params, conversation_id: str, *,
-                  owner: str) -> tuple[list[Reuse], list[dict], list[str]]:
-    """Resolve the named ids to evidence bodies. Returns (reuse, seed_rows, notes).
+                  owner: str) -> tuple[list[Reuse], list[dict], list[str], str]:
+    """Resolve named ids to evidence bodies. Returns (reuse, seed_rows, notes, workspace_id).
 
     Refusals are errors, not omissions. An id from another conversation says so explicitly, because
     "not found" would send the caller looking for a typo where the real problem is scope.
@@ -183,6 +183,7 @@ def collect_reuse(store, params, conversation_id: str, *,
     reuse: list[Reuse] = []
     seeds: list[dict] = []
     notes: list[str] = []
+    workspace_id = ""
     wanted = list(dict.fromkeys([*(params.reuse_evidence or []), *(params.reuse_sources or [])]))
     if len(wanted) > REUSE_LIMIT:
         raise HTTPException(422, f"一轮最多复用 {REUSE_LIMIT} 条材料；请缩小范围，其余留到下一轮")
@@ -202,41 +203,58 @@ def collect_reuse(store, params, conversation_id: str, *,
         reuse.append(item)
         seeds.append({"data": {**data, "reused_from": item.origin, "reuse_note": REUSE_NOTE}, "reused_from": item.origin})
     if params.reuse_sources:
-        notes.extend(_collect_workspace(store, params, reuse, seeds))
-    return reuse, seeds, notes
+        workspace_notes, workspace_id = _collect_workspace(store, params, reuse, seeds, owner=owner)
+        notes.extend(workspace_notes)
+    return reuse, seeds, notes, workspace_id
 
 
 REUSE_NOTE = ("复用自更早的轮次：来源时间、版本与父轮记录原样保留，本轮没有重新抓取。"
               "它仍是工具返回的观察，不是人工确认的结论。")
 
 
-def _collect_workspace(store, params, reuse: list, seeds: list) -> list[str]:
+def _collect_workspace(store, params, reuse: list, seeds: list, *, owner: str) -> tuple[list[str], str]:
     """Bring in sources a trusted tool recorded into an opt-in workspace.
 
     The workspace itself enforces the two boundaries that matter here: only tool-returned payloads
     are stored at all, and an id from a different workspace is refused rather than merged.
     """
-    from ..workspace import Workspace, WorkspaceError
+    from ..workspace import (Workspace, WorkspaceError, managed_workspace_path)
 
-    if not params.workspace:
-        raise HTTPException(422, "复用 source id 需要同时给出 workspace 目录；没有目录就没有可读的来源")
-    try:
-        workspace = Workspace(params.workspace).open()
-    except (WorkspaceError, OSError) as exc:
-        raise HTTPException(422, f"工作区打不开：{exc}") from exc
+    if params.workspace and params.workspace_id:
+        raise HTTPException(422, "workspace_id 与本地 workspace 路径不能同时指定")
+    if params.workspace_id:
+        try:
+            root = managed_workspace_path(store.db.path, owner, params.workspace_id)
+            workspace = Workspace(root).open(create=False, workspace_id=params.workspace_id)
+        except (WorkspaceError, OSError) as exc:
+            raise HTTPException(422, f"owner 工作区打不开：{exc}") from exc
+    elif params.workspace:
+        if owner != "local":
+            raise HTTPException(422, "托管 Web 不能读取请求中的服务器路径；请先导入 bundle 并使用 workspace_id")
+        try:
+            workspace = Workspace(params.workspace).open(create=False)
+        except (WorkspaceError, OSError) as exc:
+            raise HTTPException(422, f"本地工作区打不开：{exc}") from exc
+    else:
+        raise HTTPException(422, "复用 source id 需要 workspace_id；本地 CLI 也可指定已有 workspace 目录")
     notes = [f"工作区 {workspace.workspace_id} 被显式引入；其中 source id 与 content 一一对应"]
+    imported_sources = False
     for sid in params.reuse_sources:
         try:
             document = workspace.read(sid)
         except WorkspaceError as exc:
             raise HTTPException(409, str(exc)) from exc
+        imported_sources = imported_sources or bool(document.get("imported_by_user"))
         origin = {"route": "workspace", "workspace_id": workspace.workspace_id, "source_id": sid,
-                  "tool": document.get("tool", "")}
+                  "tool": document.get("tool", ""),
+                  "provenance_verified": not bool(document.get("imported_by_user"))}
         item, data = _reuse_row(document, origin)
         reuse.append(item)
         seeds.append({"data": {**data, "reused_from": origin, "reuse_note": REUSE_NOTE},
                       "reused_from": origin})
-    return notes
+    if imported_sources:
+        notes.append("本轮复用的 bundle 来源由用户导入；来源工具声明未经当前服务加密认证，请按原定位复核")
+    return notes, workspace.workspace_id
 
 
 def check_destination(parent_config: dict, vault_public: dict, trusted: bool) -> list[str]:
@@ -328,7 +346,8 @@ def validate_followup(store, params, *, owner: str, vault_public: dict,
                      notes=["命中同一个 idempotency_key，返回已创建的那一轮，没有新建任务"],
                      owner=owner), []
     notes: list[str] = []
-    reuse, seeds, workspace_notes = collect_reuse(store, params, conversation_id, owner=owner)
+    reuse, seeds, workspace_notes, workspace_id = collect_reuse(
+        store, params, conversation_id, owner=owner)
     notes.extend(workspace_notes)
     notes.extend(check_destination(parent["config"], vault_public, params.trust_new_destination))
     ledger, caps = check_ledger(store, conversation_id, budgets, params, notes, owner=owner)
@@ -350,7 +369,7 @@ def validate_followup(store, params, *, owner: str, vault_public: dict,
         "trust_new_destination": bool(params.trust_new_destination),
         "reuse_routes": sorted({item.origin.get("route", "") for item in reuse}),
         "reuse_count": len(reuse),
-        "workspace": params.workspace or "",
+        "workspace_id": workspace_id,
         "raise_session_caps": params.raise_session_caps.model_dump() if params.raise_session_caps else None,
         "idempotency_key": idempotency_key,
     }

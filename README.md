@@ -56,6 +56,10 @@ python run.py
 
 > **托管模式还不是可交付状态。** 登录接口和登录页（`/login`）都有了，配额、限流与全站熔断也有了；缺的是**真实部署下的复验**：没有真实 TLS 终端、没有真实第二用户、没有独立设备上的验收。已经实现并有离线测试的是：身份、按账户隔离、按账户的密钥作用域、启动前拒绝、请求与任务配额、全站熔断、登录页。剩下每一条都写在 [SECURITY.md](SECURITY.md) 与 [TESTING.md](docs/TESTING.md) 文末的 `#13` 三节里。自己用请继续用 `local`。
 
+### Docker Compose（托管模式模板）
+
+`compose.yaml` 只提供托管模式模板：端口仅发布到宿主机回环地址；必须配置会话密钥、HTTPS 入口和允许来源，缺失时应用拒绝启动。它不含 TLS 终端，也没有经过真实反向代理或第二账户验收，**不能据此把服务开放到公网**。构建、开户、备份与恢复步骤见[交付说明](docs/DELIVERY.md)。
+
 ## v0.2 已实现的架构
 
 ```text
@@ -253,6 +257,12 @@ official 时，准确率报 `no value` 并给出原因；② **未命中就是�
 标识符时记 `missed`，任务变 `partial`（这条是评测自己第一次运行就抓到的 bug：当时把一次**召回未命中**
 报成了 `completed`）。
 
+截至 **2026-09-23** 的最近一次 connector 实跑记录 6 个任务：1 个 `completed`、1 个 `partial`、3 个
+`pending_human`、1 个 `unknown`；其中一条 25 篇 OpenAlex 结果没有覆盖目标论文，另一条因限流等待会超出
+本次预算而保留为 `unknown`。归属判断仍无人标为 `official`，准确率是 `no value`；本次没有运行 live
+模型任务。完整快照与限制见 [`evals/results/SUMMARY.md`](evals/results/SUMMARY.md)。这批小样本不代表
+全领域质量或普适召回率。
+
 其余状态严格区分：`unknown` = **本次没查成**（网络/限流），不是否定结果；`deferred` = 从同一任务的
 另一步读取；`human` = 需要人判断，跑不出来。**记录里永不写入密钥值**，只记哪些变量名被配置过。
 
@@ -265,12 +275,17 @@ re0 doctor                                            # 现在能跑什么、当
 re0 paper search --query "layer decomposition" --start-year 2025
 re0 mcp                                               # 只读工具走 stdio，本机可用
 re0 mcp --workspace ./ws                              # 可选：把工具取得的来源存成稳定 ID
+re0 workspace export --directory ./ws --output ./sources.json
+re0 workspace import --directory ./ws-copy --input ./sources.json  # 先预览
+re0 workspace import --directory ./ws-copy --input ./sources.json --apply
 re0 session list                                      # 会话与它们的累计账本（不联网、不花钱）
 re0 session scope <run id> --goal "只保留有训练代码的两篇" --reuse-evidence ev_xxx
 re0 auth list                                         # 托管模式的账户与会话；本地模式会说明没有账户这一步
 ```
 
-`mcp` **默认无状态**：不打开目录、不碰文献数据库。只有显式给 `--workspace DIR` 才会把工具取得的来源存下来，每份有**稳定 ID**（按内容寻址，同一来源不会存成两份），可导出/导入。导入**默认只预览**、幂等、**不会自动把论文入文献库**，并且**拒绝来自别的工作区的包**。**模型写出的文字不允许当成来源存进去** —— 工作区里只有工具真正取回的材料。
+`mcp` **默认无状态**：不打开目录、不碰文献数据库。只有显式给 `--workspace DIR` 才会把工具取得的来源存下来，每份有**稳定 ID**（按内容寻址，同一来源不会存成两份）。`re0 workspace export/import` 以版本化 JSON 传递来源；导入默认只预览，`--apply` 才写入。Agent Web 也可以预览/确认 bundle，然后在追问时显式选择来源。服务端将 Web 工作区保存在当前账户分区下，浏览器只提交 workspace/source ID，不提交服务器路径。导入会标注 `imported_by_user`：bundle 自述的来源工具没有签名验证，需要回到原定位复核；这不批准论文，也不把导入来源当成人工确认。模型文字不会通过工作区 API 伪装成新工具结果。
+
+Web 工作区文件与 SQLite 放在同一数据目录下，但 `scripts/backup.py` 的 SQLite 备份**不包括**这些文件。需要完整保留时，请使用 Web 的“导出所选工作区”逐份保存 bundle，或一并备份数据目录中的 `workspaces/`；只恢复数据库不会恢复来源 bundle。
 
 `doctor` 会分清**不需要模型**的能力（`paper search`、`paper text`、`mcp`、`skill` 与 `session list/show/delta/scope`）和**需要 BYOK** 的独立任务（一个自主任务，以及 `session follow-up`／`retry`）；网络探针**只有**传 `--probe-network` 才会跑，所以日常自检不会产生费用或触发限流。CLI 自己**不会启动第二个 LLM** —— 宿主工具模式和独立 agent 模式是两件事。`re0 paper search --help` 打印的就是 skill 自己的真实参数，不是另一份简化版。
 
@@ -321,7 +336,7 @@ locator 是从读到的字节推出来的：HTML 是"第几节第几段"，PDF �
 - **来源失败不是负面结果。** 限流、超时、坏 token 都会被显式列出；"没搜到"与"没搜成"必须分开，否则会把一次故障读成"这工作不存在"。
 - **不设"模型记忆"来源。** 让模型凭训练数据回忆论文，是文献列表长出"看起来很像但不存在"的标题的最常见方式。这里只返回服务真正返回的东西；经典老论文若在所有源都缺失，这个缺口会被如实报告，而不是用记忆补上。
 
-凭据全部来自环境变量，**没有任何硬编码**。脚本按 `$RE0_ENV_FILE` → `./.env` → `~/.codex/skills/.env` → `~/.re0/.env` 顺序找到第一个可用文件，只填充**尚未设置**的变量；真实环境变量永远优先。运行时只打印载入了几个变量，**从不打印值**。
+凭据全部来自环境变量，**没有任何硬编码**。对 Skill 而言，显式设置 `RE0_ENV_FILE` 时只读该文件；否则依次尝试 `./.env` 与 `~/.re0/.env`。已有进程环境变量优先且不会被文件覆盖；其他客户端的凭据目录默认不读，只有显式设置 `RE0_ENV_INCLUDE_AGENT_DIRS=1` 才会尝试读取。运行时只报告变量名与是否配置，**从不打印值**。
 
 ### 检索工作台：读一份结果，而不是再跑一次检索
 
@@ -341,6 +356,14 @@ locator 是从读到的字节推出来的：HTML 是"第几节第几段"，PDF �
 这一页**不检索**：检索在命令行、skill 或任务里跑，页面只读结果文件，所以不存在第二个会分叉的检索实现。
 文件在浏览器里解析，不上传到任何地方；唯一发出的请求是你自己点的那次同源入库导入。若误选了
 `--resource-matrix` 写出的矩阵 JSON，页面会说明它不是检索结果，而不是渲染成一张看起来空空的表。
+
+另有 `/static/skill.html` 作为**独立静态展示页**：它呈现文档记录的一次历史资源检查，只在浏览器本地切换视图或复制命令，不启动检索、不调用模型，也不把该历史记录说成当前实时结果。想单独预览页面而不启动 Re0 服务，可在仓库根目录运行：
+
+```bash
+python -m http.server 8765 --bind 127.0.0.1 --directory web
+```
+
+然后打开 `http://127.0.0.1:8765/skill.html`。该页是 UI 原型，不代表在线 Web Agent 已完成。
 
 > 页面测试用的夹具在 `tests/fixtures/search-result.json`，由 `scripts/gen_search_fixture.py`
 > 通过真实代码路径（`paper_document` → `ResourceAudit` → `run_coverage` → `result_model.normalize`）
@@ -448,7 +471,7 @@ python -m re0.mcp_server
 
 没有删除或重建原论文表；新增独立版本的 agent 表。原文献、笔记、分类、静态检查记录均保留，旧界面移到 `/library`。
 
-**加了 owner 之后的结构升级**（papers v1→v2、agent v2→v3、zotero v1→v2）在启动时自动完成：先用 SQLite 备份 API 把文件复制成 `<原名>.pre-v2-<时间戳>.sqlite3`，再改结构；已有记录全部归到 owner `local`，重建表的行数对不上就不会删旧表；`PRAGMA foreign_key_check` 不干净也算失败。比当前版本**更新**的 schema 会被拒绝启动而不是降级。所以升级前自己再备份一次仍然是建议动作，但漏了也不会拿唯一的原库去冒险。`local` 是保留账户名，托管模式下没有人能占用它，也就没有人能认领迁移刚分配出去的那些行。
+**结构升级**（papers v1→v2 的 owner、library v2→v3 的 Work/版本/来源快照，以及 agent v1→v3、zotero v1→v2）在启动时自动完成：先用 SQLite 备份 API 把文件复制成 `<原名>.pre-v3-<时间戳>.sqlite3`，再改结构；既有论文映射为 Work，只有显式版本快照才绑定到历史版本，缺证据的观察保持未绑定；`PRAGMA foreign_key_check` 不干净也算失败。比当前版本**更新**的 schema 会被拒绝启动而不是降级。所以升级前自己再备份一次仍然是建议动作，但漏了也不会拿唯一的原库去冒险。`local` 是保留账户名，托管模式下没有人能占用它，也就没有人能认领迁移刚分配出去的那些行。
 
 先用旧版自带备份工具建立完整备份，再停止旧服务、替换代码、启动新版：
 

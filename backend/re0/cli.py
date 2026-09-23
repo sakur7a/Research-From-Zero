@@ -55,6 +55,7 @@ def print_deployment() -> bool:
     refused, and an operator reading `re0 doctor` is the first one they will ask.
     """
     from re0.deployment import DeploymentError, from_env
+    from re0.paths import describe as describe_layout
     from re0.quota import quota_limits_from_env
 
     deployment = from_env()
@@ -80,6 +81,14 @@ def print_deployment() -> bool:
     else:
         print("            单人本地模式：没有账户也没有登录这一步，只应绑回环地址；")
         print("            run.py 会拒绝非回环的 RE0_HOST，远程访问请用 SSH 隧道")
+    facts = describe_layout()
+    print(f"            布局 {facts['layout']}；web 资源 {facts['web']}；"
+          f"数据库默认路径 {facts['database-default']}"
+          + ("（RE0_DB 可覆盖）" if not os.getenv("RE0_DATA_DIR") else "（RE0_DATA_DIR 已设置）"))
+    if facts["web"].startswith("缺失"):
+        # The service would refuse to start on this layout, so it is a problem, not a note.
+        print(f"            {facts['web']}")
+        return False
     print("            配额：" + "、".join(
         f"{label} {limits[name] if limits[name] else '不限'}"
         for name, label in (("RE0_REQUESTS_PER_MINUTE", "每账户请求/分钟"),
@@ -216,6 +225,11 @@ def build_parser() -> argparse.ArgumentParser:
                                help="also run the network probes (spends requests; never implied)")
 
     subcommands.add_parser("mcp", help="serve the read-only tools over stdio (no model key needed)")
+    subcommands.add_parser("workspace", add_help=False,
+                           help="export/import a source workspace bundle (no model key needed)")
+    subcommands.add_parser("serve",
+                           help="run the web service; one worker, and a public bind is refused "
+                                "unless RE0_MODE=hosted")
 
     # Its own parser, reached by passthrough: `re0 session follow-up --help` must print the real
     # flags rather than a thinner copy of them kept here.
@@ -261,6 +275,15 @@ def main(argv=None) -> int:
     skill's own parser and prints the real flags rather than a second, thinner copy of them.
     """
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["workspace"]:
+        from re0.workspace_cli import main as workspace_main
+        return workspace_main(argv[1:])
+    if argv[:1] == ["mcp"]:
+        # The MCP parser owns its flags. Passing the full process argv made it see the outer
+        # `mcp` token again and exit before initialize; keep workspace options available here.
+        from re0.mcp_server import main as mcp_main
+        mcp_main(argv[1:])
+        return 0
     if argv[:1] == ["session"]:
         # Dispatched before this parser runs, so the session subcommands keep their own flags and
         # their own help text instead of a second, thinner copy of them here.
@@ -293,10 +316,9 @@ def main(argv=None) -> int:
     if arguments.command == "paper" and arguments.action == "text":
         from re0.fulltext_cli import main as text_main
         return text_main(passthrough)
-    if arguments.command == "mcp":
-        from re0.mcp_server import main as mcp_main
-        mcp_main()
-        return 0
+    if arguments.command == "serve":
+        from re0.serve import main as serve_main
+        return serve_main(passthrough)
     if arguments.command == "skill":
         return skill_command(arguments)
     parser.print_help()

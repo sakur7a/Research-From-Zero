@@ -80,9 +80,12 @@ def test_the_pyproject_data_files_list_matches_the_real_tree():
     """Drift guard: TOML cannot glob, so a file added to skills/ and not listed here would simply
     be missing from every wheel built afterwards — silently."""
     document = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    # Only the skill's own groups: `web/` ships through the same mechanism and is pinned by
+    # test_paths.py, so comparing every data-files group against `skills/` would fail on any second
+    # tree the distribution ever carries.
     declared = {Path(name).name
-                for group in (document["tool"]["setuptools"]["data-files"] or {}).values()
-                for name in group}
+                for group, names in (document["tool"]["setuptools"]["data-files"] or {}).items()
+                if "skills" in group for name in names}
     on_disk = {path.name for path in (REPO_ROOT / "skills" / SKILL_NAME).rglob("*")
                if path.is_file() and "__pycache__" not in path.parts
                and path.suffix not in {".pyc", ".bak", ".tmp"}}

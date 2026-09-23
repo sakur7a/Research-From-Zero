@@ -26,7 +26,7 @@ from typing import Iterator
 
 from .deployment import LOCAL_OWNER
 
-SCHEMA_TARGET = 2
+SCHEMA_TARGET = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -64,8 +64,9 @@ CREATE INDEX IF NOT EXISTS papers_owner ON papers(owner, updated_at DESC, id);
 # begins with its own vocabulary rather than inheriting a stranger's.
 DEFAULT_TOPICS = ("图层分解 / 生成", "Layout 生成", "推荐系统")
 
-MIGRATION_NOTE = ("papers schema v1→v2：为 papers 与 topics 增加 owner，既有行归入 'local'，"
-                  "并把全局唯一的 DOI/arXiv 索引换成按所有者唯一。没有删除任何行，也没有改写 data。")
+MIGRATION_NOTE = ("library schema v1→v2 为 papers/topics 增加 owner；v2→v3 增加 Work、PaperVersion、"
+                  "SourceSnapshot、版本化方向模板、主题成员和可追溯关系表。既有 paper.id 成为 Work id，"
+                  "历史观察只绑定其显式版本快照；无法确定的版本保持未绑定。")
 
 
 def encode(value: object) -> str:
@@ -98,6 +99,41 @@ def backup_database(source: Path, destination: Path) -> Path:
         destination.unlink(missing_ok=True)
         raise
     return destination
+
+
+def restore_database(source: Path, destination: Path) -> Path:
+    """Restore a backup to a *new* SQLite file and validate it before it can be selected.
+
+    Restoring in place is unsafe while a process might still have the old database open or its WAL
+    sidecars on disk. Requiring a fresh destination keeps the existing database untouched; an
+    operator can point `RE0_DB` at the restored file after reviewing it, and roll back by changing
+    that setting again.
+    """
+    source = source.expanduser().resolve()
+    destination = destination.expanduser().absolute()
+    if destination.exists():
+        raise FileExistsError(f"恢复目标已存在，未覆盖：{destination}")
+    if source == destination.resolve():
+        raise ValueError("恢复目标不能是备份源文件")
+    copied = backup_database(source, destination)
+    try:
+        with closing(sqlite3.connect(copied.as_uri() + "?mode=ro", uri=True)) as con:
+            tables = {row[0] for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            required = {"schema_version", "papers", "resources", "observations", "topics"}
+            if not required.issubset(tables):
+                missing = ", ".join(sorted(required - tables))
+                raise sqlite3.DatabaseError(f"恢复文件缺少 Re0 文献库表：{missing}")
+            version = con.execute("SELECT version FROM schema_version").fetchone()[0]
+            if not isinstance(version, int) or not 1 <= version <= SCHEMA_TARGET:
+                raise sqlite3.DatabaseError(f"不支持恢复数据库版本：{version!r}")
+            broken = con.execute("PRAGMA foreign_key_check").fetchall()
+            if broken:
+                raise sqlite3.DatabaseError(f"恢复文件有 {len(broken)} 条无效外键")
+    except Exception:
+        copied.unlink(missing_ok=True)
+        raise
+    return copied
 
 
 class Database:
@@ -161,7 +197,13 @@ class Database:
                         f"topics 迁移数量不符（{moved} != {expected}）；未删除原表")
                 con.execute("DROP TABLE topics")
                 con.execute("ALTER TABLE topics_migrated RENAME TO topics")
-            con.execute("UPDATE schema_version SET version=?", (SCHEMA_TARGET,))
+            con.execute("UPDATE schema_version SET version=2")
+            version = 2
+        if version < 3:
+            from .knowledge import migrate_v3
+
+            migrate_v3(con)
+            con.execute("UPDATE schema_version SET version=3")
         broken = con.execute("PRAGMA foreign_key_check").fetchall()
         if broken:
             # Reported rather than ignored: a migration that leaves a dangling reference has already

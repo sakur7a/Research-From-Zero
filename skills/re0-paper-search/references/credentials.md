@@ -3,16 +3,20 @@
 Reference material for the `re0-paper-search` skill. The entry point is [SKILL.md](../SKILL.md); this file holds the detail that does not need to be read
 to run a first search.
 
-Everything comes from the environment, and nothing is hardcoded. The script loads the
-first file it finds, filling only variables that are **not already set** — a real
-environment variable always wins:
+Everything comes from the environment, and nothing is hardcoded. The script fills only
+variables that are **not already set** — a real environment variable always wins. Its
+credential-file rules are:
 
 | Order | Location |
 |---|---|
-| 1 | `$RE0_ENV_FILE` (explicit override) |
-| 2 | `./.env` |
-| 3 | `~/.codex/skills/.env` |
-| 4 | `~/.re0/.env` |
+| 1 | `$RE0_ENV_FILE` (when set, this file is used alone) |
+| 2 | `./.env` (only when `$RE0_ENV_FILE` is unset) |
+| 3 | `~/.re0/.env` (only when `$RE0_ENV_FILE` is unset and `./.env` supplied no values) |
+| opt-in | `~/.codex/skills/.env` only when `RE0_ENV_INCLUDE_AGENT_DIRS=1`; it is another product's credential file and is not searched by default |
+
+If an explicit file is missing, empty, or contributes no unset variables, the skill reports that
+fact and does not silently fall back. Without an explicit file, the two Re0-owned defaults are
+tried in order. The other application's file is considered only after the opt-in above.
 
 Recognised names, each sent only to the service that owns it:
 

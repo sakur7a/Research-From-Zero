@@ -38,7 +38,9 @@ def run(output: Path):
                             raise RuntimeError('Local server did not become ready; inspect installed dependencies')
                         time.sleep(0.1)
                     assert response.json()['version'] == '0.2.0' and not response.json()['llm_enabled']
-                    paths = ['/api/health', '/', '/library', '/static/agent.js', '/static/agent.css', '/api/agent/config', '/openapi.json']
+                    paths = ['/api/health', '/', '/library', '/static/agent.js', '/static/agent.css',
+                             '/static/skill.html', '/static/skill.js', '/static/skill.css',
+                             '/api/agent/config', '/openapi.json']
                     results = []
                     for path in paths:
                         res = client.get(path)

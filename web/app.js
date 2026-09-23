@@ -5,15 +5,22 @@ import {READING,KINDS,ACCESS,OWNERSHIP,CLAIMS,INDICATORS,e,link,paperInput,needs
 
 const app = document.querySelector('#app');
 const overlays = document.querySelector('#overlays');
-const state = {papers:[],topics:[],view:'library',query:'',topic:'',status:'',sort:'updated',hideDemo:false,mode:'cards',selected:new Set()};
+let toastTimer;
+const state = {papers:[],topics:[],relations:null,relationQuery:'',relationType:'',relationOffset:0,relationRequest:0,
+  relationPaperChoice:'',view:'library',query:'',topic:'',status:'',sort:'updated',hideDemo:false,mode:'cards',selected:new Set()};
 const kindIcon = {code:'code',checkpoint:'box',dataset:'database',evaluation:'shield',environment:'settings',demo:'external'};
+const RELATION_LABELS = {uses_method:'采用方法',evaluated_on:'评测对象',has_resource:'关联资源',claim:'主张'};
+const ASSERTION_LABELS = {author_statement:'作者声明',model_inference:'模型推断',human_confirmation:'人工确认'};
 
 function toast(message, error = false) {
+  const container = document.querySelector('#toasts');
+  clearTimeout(toastTimer);
+  container.replaceChildren();
   const node = document.createElement('div');
   node.className = 'toast' + (error ? ' toast-error' : '');
   node.textContent = message;
-  document.querySelector('#toasts').append(node);
-  setTimeout(() => node.remove(), error ? 9000 : 4500);
+  container.append(node);
+  toastTimer = setTimeout(() => { node.remove(); toastTimer = null; }, error ? 9000 : 4500);
 }
 function button(text, action, {primary=false, cls='', disabled=false} = {}) {
   return `<button type="button" class="btn ${primary?'primary':''} ${cls}" data-action="${action}" ${disabled?'disabled':''}>${text}</button>`;
@@ -22,10 +29,24 @@ function badge(status, text) { return `<span class="badge badge-${e(status)}"><i
 function currentPapers() { return filteredPapers(state.papers, {...state, attention:state.view === 'audit'}); }
 async function refresh() {
   const [papers,topics] = await Promise.all([api('/papers'),api('/topics')]);
-  state.papers = papers; state.topics = topics;
+  state.papers = papers; state.topics = topics; state.relations = null;
   const available = new Set(papers.map(p => p.id));
   state.selected.forEach(id => { if(!available.has(id)) state.selected.delete(id); });
+  if(state.relationPaperChoice&&!available.has(state.relationPaperChoice))state.relationPaperChoice='';
   render();
+}
+async function loadRelations() {
+  const request=++state.relationRequest;
+  const query=new URLSearchParams();
+  if(state.relationQuery.trim())query.set('q',state.relationQuery.trim());
+  if(state.relationType)query.set('relation_type',state.relationType);
+  query.set('limit','50');
+  query.set('offset',String(state.relationOffset));
+  const suffix=query.toString();
+  const result=await api('/knowledge/relations'+(suffix?'?'+suffix:''));
+  if(request!==state.relationRequest)return;
+  state.relations=result;
+  if(state.view==='graph')renderResults();
 }
 function openDialog(body, {drawer=false, wide=false} = {}) {
   const dialog = document.createElement('dialog');
@@ -83,9 +104,10 @@ function render() {
   renderResults();
   bindShell();
   initTheme();
+  if(state.view==='graph' && state.relations===null)loadRelations().catch(error=>toast(error.message,true));
 }
 function bindShell() {
-  app.querySelectorAll('[data-nav]').forEach(node=>node.addEventListener('click',event=>{event.preventDefault();state.view=node.dataset.nav;state.topic='';state.query='';state.status='';render();}));
+  app.querySelectorAll('[data-nav]').forEach(node=>node.addEventListener('click',event=>{event.preventDefault();state.view=node.dataset.nav;state.topic='';state.query='';state.status='';if(state.view==='graph')state.relations=null;render();}));
   app.querySelectorAll('[data-topic]').forEach(node=>node.addEventListener('click',()=>{state.view='library';state.topic=node.dataset.topic;state.query='';state.status='';render();}));
   app.querySelectorAll('[data-mode]').forEach(node=>node.addEventListener('click',()=>{state.mode=node.dataset.mode;render();}));
   app.querySelectorAll('[data-action]').forEach(node=>{ if(!node.closest('#results'))node.addEventListener('click',()=>handleAction(node.dataset.action,node)); });
@@ -125,6 +147,7 @@ function renderResults() {
   else root.innerHTML=(state.view==='audit'?'<div class="inline-note">'+icon('info',16)+' 仅列出含未核验、失败或无法判断资源的论文；没有关联资源的论文仍可在文献库中补充。</div>':'')+(state.mode==='table'?tableView(papers):`<div class="paper-grid">${papers.map(paperCard).join('')}</div>`);
   root.querySelectorAll('[data-open]').forEach(node=>node.addEventListener('click',()=>openPaper(node.dataset.open)));
   root.querySelectorAll('[data-action]').forEach(node=>node.addEventListener('click',()=>handleAction(node.dataset.action,node)));
+  root.querySelector('#relation-paper')?.addEventListener('change',event=>{state.relationPaperChoice=event.target.value;});
   root.querySelectorAll('[data-select]').forEach(node=>node.addEventListener('change',()=>{
     if(node.checked && state.selected.size>=6) { node.checked=false;toast('首版最多同时对比 6 篇论文。');return; }
     node.checked?state.selected.add(node.dataset.select):state.selected.delete(node.dataset.select);
@@ -143,7 +166,7 @@ function compareView() {
   })).join('')}${row('研究笔记',p=>`<div class="compare-notes">${e(p.notes||'未记录')}</div>`)}</tbody></table></div>`;
 }
 function graphView(papers) {
-  if(!papers.length)return emptyState(state.papers.length>0);
+  if(!papers.length)return `${relationIndexView(state.papers)}${emptyState(state.papers.length>0)}`;
   const visible=papers.slice(0,16), topics=[...new Set(visible.flatMap(p=>p.topics))];
   const width=1000,height=Math.max(420,visible.length*70+70);
   let lines='',nodes='';
@@ -157,7 +180,17 @@ function graphView(papers) {
     if(res)nodes+=`<g class="graph-resource"><rect x="815" y="${y-18}" width="130" height="36" rx="18"/><text x="880" y="${y+4}" text-anchor="middle">${res} 个关联资源</text></g>`;
   });
   topics.forEach((t,i)=>nodes+=`<g class="graph-topic"><rect x="20" y="${ty.get(t)-23}" width="180" height="46" rx="8"/><text x="110" y="${ty.get(t)+4}" text-anchor="middle">${e(t)}</text></g>`);
-  return `<div class="graph-legend"><span><i class="topic-dot color-0"></i>研究方向</span><span><i class="topic-dot color-1"></i>论文</span><span><i class="topic-dot color-2"></i>资源汇总</span><small>最多显示当前筛选的 16 篇论文 · 点击论文查看详情</small></div><div class="graph-wrap"><svg viewBox="0 0 ${width} ${height}" role="group" aria-label="已保存的论文和方向关联">${lines}${nodes}</svg></div><p class="graph-disclaimer">连线仅表示已保存的分类和资源关联，不表示引用、理论依赖或结论支持关系。</p>`;
+  return `${relationIndexView(state.papers)}<div class="graph-legend"><span><i class="topic-dot color-0"></i>研究方向</span><span><i class="topic-dot color-1"></i>论文</span><span><i class="topic-dot color-2"></i>资源汇总</span><small>最多显示当前筛选的 16 篇论文 · 点击论文查看详情</small></div><div class="graph-wrap"><svg viewBox="0 0 ${width} ${height}" role="group" aria-label="已保存的论文和方向关联">${lines}${nodes}</svg></div><p class="graph-disclaimer">图中连线只投影分类和资源关联，不表示研究结论。可追溯的 uses_method / evaluated_on / has_resource / claim 记录见上表，每条都有来源、定位与判断类别。</p>`;
+}
+function relationIndexView(papers) {
+  const result=state.relations;
+  const rows=result?.relations||[];
+  const table=rows.length?`<div class="table-wrap relation-table-wrap"><table class="relation-table"><thead><tr><th>论文 / 版本</th><th>关系</th><th>对象</th><th>陈述与条件</th><th>判断类别</th><th>来源定位</th><th>操作</th></tr></thead><tbody>${rows.map(row=>`<tr><td><button class="table-title" data-open="${e(row.work_id)}">${e(row.paper_title)}</button><small>${e(row.version_label||'版本未指定')}</small></td><td>${e(RELATION_LABELS[row.relation_type]||row.relation_type)}</td><td>${e(row.target)}</td><td><strong>${e(row.statement)}</strong>${row.conditions?`<small>${e(row.conditions)}</small>`:''}</td><td>${e(ASSERTION_LABELS[row.assertion_kind]||row.assertion_kind)}</td><td><a href="${link(row.source_url)}" target="_blank" rel="noopener noreferrer">${e(row.locator)} ↗</a><small>${e(row.snapshot_kind)} · ${e(timeLabel(row.created_at))}</small></td><td><button class="text-btn" data-action="new-relation" data-paper="${e(row.work_id)}" data-supersedes="${e(row.id)}">追加修订</button></td></tr>`).join('')}</tbody></table></div>`:`<div class="small-empty">${result?'还没有符合筛选条件的结构化关系。':'正在读取结构化关系…'} 图中的分类线不会自动转换成 uses_method 或 claim。</div>`;
+  return `<section class="knowledge-relations"><div class="relations-heading"><div><div class="eyebrow">EVIDENCE-LINKED RECORDS</div><h2>结构化关系与主张</h2><p>只显示用户明确保存的关系，不从引用、标题相似或模型记忆自动补边。claim 必须引用全文快照及定位。</p></div></div>
+    <div class="relation-tools"><input id="relation-query" aria-label="搜索结构化关系" placeholder="搜索论文、对象、陈述或条件…" value="${e(state.relationQuery)}"><select id="relation-type" aria-label="关系类型"><option value="">全部关系</option>${Object.entries(RELATION_LABELS).map(([key,label])=>`<option value="${key}" ${state.relationType===key?'selected':''}>${e(label)}</option>`).join('')}</select><button class="btn" data-action="search-relations">查询</button><select id="relation-paper" aria-label="选择要添加关系的论文"><option value="">选择论文…</option>${papers.map(p=>`<option value="${e(p.id)}" ${state.relationPaperChoice===p.id?'selected':''}>${e(p.title)}</option>`).join('')}</select><button class="btn primary" data-action="new-relation">添加关系</button></div>
+    <p class="relation-count">${result?`匹配 ${result.total} 条 · 本页 ${rows.length} 条`:''}</p>${table}
+    ${result&&result.total>result.requested.limit?`<div class="relation-pagination"><button class="btn" data-action="relations-previous" ${result.requested.offset===0?'disabled':''}>上一页</button><span>${result.requested.offset+1}–${Math.min(result.requested.offset+rows.length,result.total)} / ${result.total}</span><button class="btn" data-action="relations-next" ${result.requested.offset+rows.length>=result.total?'disabled':''}>下一页</button></div>`:''}
+    <p class="relation-footnote">人工修订会新增一条记录并可指向它修订的上一条；不会覆写原关系。外部模型输出不会直接写入本表。</p></section>`;
 }
 async function handleAction(action,node) {
   if(action==='add-paper')return openPaperForm();
@@ -174,6 +207,26 @@ async function handleAction(action,node) {
   if(action==='compare-selected') {
     if(state.selected.size<2)return toast('请先勾选至少 2 篇论文。');
     state.view='compare';state.topic='';render();
+  }
+  if(action==='search-relations') {
+    state.relationQuery=app.querySelector('#relation-query')?.value||'';
+    state.relationType=app.querySelector('#relation-type')?.value||'';
+    state.relationOffset=0;
+    return loadRelations().catch(error=>toast(error.message,true));
+  }
+  if(action==='relations-next') {
+    state.relationOffset+=50;
+    return loadRelations().catch(error=>toast(error.message,true));
+  }
+  if(action==='relations-previous') {
+    state.relationOffset=Math.max(0,state.relationOffset-50);
+    return loadRelations().catch(error=>toast(error.message,true));
+  }
+  if(action==='new-relation') {
+    const selection=app.querySelector('#relation-paper')?.value||state.relationPaperChoice;
+    const paperId=node.dataset.paper||(state.papers.some(item=>item.id===selection)?selection:'');
+    if(!paperId)return toast('先选择一篇论文。',true);
+    return openRelationForm(paperId,node.dataset.supersedes||'');
   }
 }
 
@@ -274,7 +327,9 @@ async function openEvidence(paper,resource) {
   const dialog=openDialog(`${modalHead('EVIDENCE LOG',resource.label,'每次检查单独保存，保留当时的版本、范围和不确定性。')}<label class="history-select">检查记录<select id="history-select">${history.map((h,i)=>`<option value="${i}">${i===0?'最近一次 · ':''}${e(timeLabel(h.checked_at))} · ${e(ACCESS[h.status])} · #${h.id}</option>`).join('')}</select></label><div id="evidence-content"></div>`,{wide:true});
   function show(index) {
     const observation=history[index],previous=history[index+1];
+    const audit=auditForConfirmation(observation);
     dialog.querySelector('#evidence-content').innerHTML=`<div class="observation-summary">${badge(observation.status)}<p>${e(observation.summary)}</p>${previous?`<small>相较上次：${e(ACCESS[previous.status])} → ${e(ACCESS[observation.status])}。状态相同也不代表文件内容未变化。</small>`:''}</div>
+    <div class="record-provenance"><span>记录类型：<b>${observation.record_kind==='confirmation'?'人工复核':'来源观察'}</b>${observation.record_origin?` · 来源 ${e(observation.record_origin)}`:''}</span>${audit&&!paper.is_demo?'<button type="button" class="btn btn-small" id="revise-audit">记录人工复核</button>':''}</div>
     <dl class="metadata-list"><dt>核验提供商</dt><dd>${e(observation.provider)}</dd><dt>检查范围</dt><dd>${e(observation.scope)}</dd><dt>验证深度</dt><dd>${e({metadata_only:'元数据',file_listing:'文件清单（非运行验证）',not_verified:'未完成验证',demo:'虚构演示'}[observation.depth]||observation.depth)}</dd><dt>资源版本</dt><dd class="mono">${e(observation.revision||'未取得')}</dd><dt>论文版本快照</dt><dd>${e(typeof observation.paper_version_snapshot==='object'?JSON.stringify(observation.paper_version_snapshot):observation.paper_version_snapshot||'未记录')}</dd><dt>许可证声明</dt><dd>${e(observation.license_id||'未取得；不代表无许可证')}<small>仅记录提供商声明，不判断适用权限。</small></dd></dl>
     ${Object.values(observation.indicators||{}).some(v=>v.length)?`<h3 class="evidence-section-title">候选文件线索 <small>仅按文件名识别</small></h3><div class="indicator-grid">${Object.entries(observation.indicators).filter(([,v])=>v.length).map(([key,files])=>`<div><strong>${e(INDICATORS[key]||key)}</strong>${files.map(f=>`<code>${e(f)}</code>`).join('')}</div>`).join('')}</div>`:''}
     <div class="limitations"><strong>${icon('info',15)} 本次检查的边界</strong>${(observation.limitations||[]).map(text=>`<p>${e(text)}</p>`).join('')}</div>
@@ -282,8 +337,193 @@ async function openEvidence(paper,resource) {
     ${observation.discovered?.length?`<h3 class="evidence-section-title">README 中的候选资源</h3><p class="muted">尚未跟随链接或确认与论文的关联；可能是依赖或其他工作。</p>${observation.discovered.map((c,i)=>`<div class="discovered-row"><div><strong>${e(KINDS[c.kind])}候选</strong><a href="${link(c.url)}" target="_blank" rel="noopener noreferrer">${e(c.url)}</a></div><button class="btn btn-small" data-candidate="${i}">检查后添加 ${icon('plus',13)}</button></div>`).join('')}`:''}
     ${observation.content_sha256?`<details class="hash-details"><summary>响应集合指纹（SHA-256）</summary><code>${e(observation.content_sha256)}</code><p>由本次成功读取的 API 响应指纹生成；不是文件完整性或复现成功证明。</p></details>`:''}`;
     dialog.querySelectorAll('[data-candidate]').forEach(node=>node.onclick=()=>{const candidate=observation.discovered[Number(node.dataset.candidate)];dialog.close();openResourceForm(paper,candidate);});
+    const revise=dialog.querySelector('#revise-audit');
+    if(revise)revise.onclick=()=>openAuditConfirmation(paper,resource,observation,dialog);
   }
   show(0);dialog.querySelector('#history-select').onchange=event=>show(Number(event.target.value));
+}
+
+const RESOURCE_AUDIT_FIELDS=['paper_title','work_identifier','work_version','resource_url','resource_type','candidate_origin',
+  'attribution','attribution_evidence','author_declaration','author_declaration_evidence','status','provider_status',
+  'provider','summary','access','scope','revision','checked_at','verification_depth','coverage','evidence','licences',
+  'version_match','version_evidence','limitations'];
+function auditForConfirmation(observation) {
+  const source=observation?.resource_audit||observation;
+  if(!source?.paper_title||!source?.resource_url)return null;
+  return Object.fromEntries(RESOURCE_AUDIT_FIELDS.filter(key=>source[key]!==undefined).map(key=>[key,source[key]]));
+}
+function firstEvidence(rows) { return Array.isArray(rows)&&rows.length?rows[0]:{}; }
+function reviewSourceFields(prefix,label,item={}) {
+  return `<div class="form-grid"><label class="field span-2"><span>${e(label)}来源 URL</span><input type="url" name="${prefix}_source_url" value="${e(item.source_url||'')}" placeholder="https://..." autocomplete="url"></label><label class="field span-2"><span>来源摘录 / 定位</span><textarea name="${prefix}_excerpt" rows="2" maxlength="8000" placeholder="记录支持这项判断的原文或可定位说明">${e(item.excerpt||'')}</textarea></label></div>`;
+}
+function openAuditConfirmation(paper,resource,observation,historyDialog) {
+  const original=auditForConfirmation(observation);
+  if(!original)return toast('这条记录没有字段级审计数据，无法生成结构化复核。',true);
+  const attributionEvidence=firstEvidence(original.attribution_evidence);
+  const declarationEvidence=firstEvidence(original.author_declaration_evidence);
+  const versionEvidence={source_url:'',excerpt:original.version_evidence||''};
+  const dialog=openDialog(`${modalHead('HUMAN REVIEW','记录一次人工复核','复核结果会作为新记录追加；原始观察和此前判断都保留。')}
+    <div class="inline-note">请只填写你亲自检查过的依据。资源可访问、作者声明和官方归属是不同判断；把“未确认”保留为当前结论也是有效复核。</div>
+    <form id="audit-confirmation-form"><div class="form-grid">
+      ${selectField('资源归属判断','attribution',OWNERSHIP,original.attribution||'unconfirmed')}
+      ${selectField('作者发布声明','author_declaration',CLAIMS,original.author_declaration||'undeclared')}
+      ${selectField('论文与资源版本对应','version_match',{unknown:'未知',matched:'已确认对应',mismatched:'不对应'},original.version_match||'unknown')}
+      <div class="field span-2"><span>固定对象</span><input value="${e(resource.url)}" readonly></div>
+      <div class="field span-2"><span>论文</span><input value="${e(paper.title)}" readonly></div>
+      <div class="field span-2"><span>归属判断依据</span>${reviewSourceFields('attribution','归属判断',attributionEvidence)}</div>
+      <div class="field span-2"><span>发布声明依据</span>${reviewSourceFields('declaration','发布声明',declarationEvidence)}</div>
+      <div class="field span-2"><span>版本对应依据</span>${reviewSourceFields('version','版本对应',versionEvidence)}</div>
+      <label class="field span-2"><span>人工复核说明 <b>*</b></span><textarea name="review_note" rows="3" maxlength="1000" required placeholder="说明本次复核了什么、仍有哪些限制"></textarea></label>
+    </div><div class="form-error" role="alert"></div><div class="modal-actions"><button type="button" class="btn" data-close>取消</button><button type="submit" class="btn primary">保存人工复核</button></div></form>`,{wide:true});
+  const form=dialog.querySelector('#audit-confirmation-form');
+  form.addEventListener('submit',async event=>{
+    event.preventDefault();
+    formError(form,'');
+    const submit=form.querySelector('[type=submit]');
+    submit.disabled=true;
+    try {
+      const data=new FormData(form);
+      const values=Object.fromEntries(data);
+      const evidence=(prefix,oldRows,value,oldValue,affirmative,fieldName)=>{
+        const url=String(values[`${prefix}_source_url`]||'').trim();
+        const excerpt=String(values[`${prefix}_excerpt`]||'').trim();
+        let rows=Array.isArray(oldRows)?[...oldRows]:[];
+        if(url||excerpt){
+          if(!url||!excerpt)throw new Error(`${fieldName}的来源 URL 和摘录需要同时填写`);
+          if(link(url)==='#')throw new Error(`${fieldName}来源必须是无凭据的 http(s) 链接`);
+          rows.push({source_url:url,locator:'用户人工复核',excerpt,category:'human_confirmation'});
+        }else if(value!==oldValue&&affirmative){
+          throw new Error(`更改为肯定的${fieldName}时，请补充本次复核依据`);
+        }
+        if(!affirmative)return [];
+        if(!rows.length)throw new Error(`${fieldName}需要可跳转的来源依据`);
+        return rows;
+      };
+      const attribution=values.attribution;
+      const authorDeclaration=values.author_declaration;
+      const versionMatch=values.version_match;
+      const reviewed={...original,checked_at:new Date().toISOString(),summary:String(values.review_note).trim(),
+        attribution,author_declaration:authorDeclaration,version_match:versionMatch,
+        attribution_evidence:evidence('attribution',original.attribution_evidence,attribution,original.attribution,
+          attribution!=='unconfirmed','资源归属'),
+        author_declaration_evidence:evidence('declaration',original.author_declaration_evidence,authorDeclaration,
+          original.author_declaration,authorDeclaration!=='undeclared','作者发布声明')};
+      const versionUrl=String(values.version_source_url||'').trim();
+      const versionExcerpt=String(values.version_excerpt||'').trim();
+      if(versionUrl||versionExcerpt){
+        if(!versionUrl||!versionExcerpt)throw new Error('版本对应的来源 URL 和摘录需要同时填写');
+        if(link(versionUrl)==='#')throw new Error('版本对应来源必须是无凭据的 http(s) 链接');
+        reviewed.version_evidence=`${versionExcerpt} (${versionUrl})`;
+      }else if(versionMatch!==original.version_match&&versionMatch!=='unknown'){
+        throw new Error('更改论文与资源版本的对应关系时，请补充本次复核依据');
+      }
+      if(versionMatch==='unknown')reviewed.version_evidence='';
+      await api(`/resources/${resource.id}/confirmations`,{method:'POST',body:reviewed});
+      dialog.close();historyDialog.close();
+      document.querySelectorAll('dialog.drawer').forEach(node=>node.close());
+      await refresh();
+      const updatedPaper=state.papers.find(item=>item.id===paper.id);
+      const updatedResource=updatedPaper?.resources.find(item=>item.id===resource.id);
+      if(updatedPaper&&updatedResource){openPaper(updatedPaper.id);await openEvidence(updatedPaper,updatedResource);}
+      toast('人工复核已追加为独立记录；原始来源观察仍保留。');
+    }catch(error){formError(form,error.message);}finally{if(submit.isConnected)submit.disabled=false;}
+  });
+}
+async function openRelationForm(paperId,supersedesId='') {
+  const bundle=await api(`/papers/${paperId}/knowledge`);
+  const workspaceData=await api('/workspaces');
+  const paper=state.papers.find(item=>item.id===paperId);
+  if(!paper)return toast('论文不在当前工作区。',true);
+  const sources=bundle.source_snapshots.filter(item=>item.source_url);
+  const fulltextGroups=new Map();
+  for(const workspace of workspaceData.workspaces||[]) {
+    if(!workspace.available)continue;
+    for(const source of workspace.sources||[]) {
+      const fulltext=source.fulltext;
+      if(source.kind!=='fulltext_chunk'||!fulltext?.identifier||!source.source_url)continue;
+      const key=[source.source_url,fulltext.source,fulltext.identifier,fulltext.version].join('|');
+      if(!fulltextGroups.has(key))fulltextGroups.set(key,{workspace_id:workspace.workspace_id,
+        fulltext,source_ids:[]});
+      fulltextGroups.get(key).source_ids.push(source.source_id);
+    }
+  }
+  const fulltextDocuments=[...fulltextGroups.values()];
+  const previousRelation=bundle.relations.find(item=>item.id===supersedesId);
+  const selectedSource=previousRelation?.source_snapshot_id||'';
+  const fulltext=sources.some(item=>['fulltext','fulltext_chunk','fulltext_snapshot'].includes(item.snapshot_kind));
+  const sourceOptions=sources.map(item=>{
+    const version=bundle.versions.find(row=>row.id===item.paper_version_id);
+    return `<option value="${e(item.id)}" ${item.id===selectedSource?'selected':''}>${e(item.snapshot_kind)} · ${e(version?.arxiv_id||version?.version_label||'版本未绑定')} · ${e(item.locator||'未记录定位')} · ${e(timeLabel(item.retrieved_at))} · ${e(item.source_url)}</option>`;
+  }).join('');
+  const selectedVersion=previousRelation?.paper_version_id||bundle.versions.find(item=>item.is_current)?.id||'';
+  const versionOptions=bundle.versions.map(item=>`<option value="${e(item.id)}" ${item.id===selectedVersion?'selected':''}>${item.is_current?'当前 · ':''}${e(item.arxiv_id||item.version_label||item.doi||item.version_key)}</option>`).join('');
+  const previousOptions=bundle.relations.map(item=>`<option value="${e(item.id)}" ${item.id===supersedesId?'selected':''}>${e(RELATION_LABELS[item.relation_type]||item.relation_type)} · ${e(item.target)} · ${e(timeLabel(item.created_at))}</option>`).join('');
+  const fulltextOptions=fulltextDocuments.map((item,index)=>`<option value="${index}">${e(item.fulltext.identifier)} · ${e(item.fulltext.version||'版本未标明')} · ${item.source_ids.length} 个全文块 · ${e(item.fulltext.parse_quality||'unknown')}</option>`).join('');
+  const dialog=openDialog(`${modalHead('EVIDENCE-LINKED RELATION','新增结构化关系','关系是可追溯的人工记录，不会由相似标题、引用或模型记忆自动生成。')}
+    ${sources.length?'':'<div class="inline-note">当前没有带安全 URL 的来源快照。请先导入或核验来源，再记录关系。</div>'}
+    <section class="fulltext-import-panel"><h3>导入已读全文块</h3><p>先在 Agent 工作区导入 <code>re0 paper text --workspace</code> 导出的 bundle，再选论文版本。预览会展示全文与 locator；确认后只追加来源快照，不会创建论文或自动生成 claim。</p>
+      ${fulltextDocuments.length?`<div class="fulltext-import-controls"><label class="field"><span>全文文档</span><select id="fulltext-document">${fulltextOptions}</select></label><label class="field"><span>绑定论文版本</span><select id="fulltext-version">${versionOptions}</select></label><button type="button" class="btn" id="fulltext-preview">预览全文块</button></div>`:'<div class="inline-note">当前没有可导入的全文块。请先导入含 `fetch_paper_text` 结果的工作区 bundle。</div>'}
+      <div id="fulltext-import-result" aria-live="polite"></div></section>
+    <form id="relation-form"><div class="form-grid">
+      <label class="field"><span>关系类型</span><select name="relation_type">${Object.entries(RELATION_LABELS).map(([key,label])=>`<option value="${key}" ${key===(previousRelation?.relation_type||'uses_method')?'selected':''} ${key==='claim'&&!fulltext?'disabled':''}>${e(label)}${key==='claim'&&!fulltext?'（需要全文来源）':''}</option>`).join('')}</select></label>
+      ${selectField('判断类别', 'assertion_kind', ASSERTION_LABELS, previousRelation?.assertion_kind||'human_confirmation')}
+      ${field('关系对象','target',previousRelation?.target||'',{required:true,placeholder:'方法、数据集、资源或主张主题'})}
+      ${selectField('对应论文版本','paper_version_id',{'':'不指定版本',...Object.fromEntries(bundle.versions.map(item=>[item.id,item.arxiv_id||item.version_label||item.doi||item.version_key]))},selectedVersion)}
+      <label class="field span-2"><span>陈述 <b>*</b></span><textarea name="statement" rows="3" maxlength="2000" required placeholder="写明来源实际支持的关系；区分作者原文与个人推断">${e(previousRelation?.statement||'')}</textarea></label>
+      ${field('假设 / 适用条件','conditions',previousRelation?.conditions||'',{rows:2,wide:true,placeholder:'主张关系必填；其他类型用于记录比较范围和适用条件'})}
+      <label class="field span-2"><span>来源快照 <b>*</b></span><select name="source_snapshot_id" ${sources.length?'required':'disabled'}>${sources.length?'<option value="">选择来源…</option>':'<option value="">没有可用来源</option>'}${sourceOptions}</select></label>
+      <label class="field span-2"><span>段落 / 文件定位 <b>*</b></span><input name="locator" value="${e(previousRelation?.locator||'')}" maxlength="1000" required placeholder="例如：论文 §3.2、README 第 4 段或 train.py:20–48"></label>
+      <label class="field span-2"><span>修订哪条关系（可选）</span><select name="supersedes_id"><option value="">新增关系</option>${previousOptions}</select></label>
+    </div><div class="inline-note">每条关系需要同一 Work 下的来源快照。claim 目前只接受 #8 的全文快照；没有全文时不能把摘要推断写成论文主张。</div><div id="relation-source-note" class="inline-note" hidden></div>
+    <div class="form-error" role="alert"></div><div class="modal-actions"><button type="button" class="btn" data-close>取消</button><button type="submit" class="btn primary" ${sources.length?'':'disabled'}>保存关系</button></div></form>`,{wide:true});
+  const form=dialog.querySelector('#relation-form');
+  function renderFulltextPreview(result,request) {
+    const target=dialog.querySelector('#fulltext-import-result');
+    const conflicts=(result.conflicts||[]).map(item=>`<li><code>${e(item.source_id||'来源')}</code>：${e(item.reason)}</li>`).join('');
+    const present=(result.already_present||[]).map(item=>`<li>${e(item.locator)} · 已导入</li>`).join('');
+    const chunks=(result.new||[]).map(item=>`<details class="fulltext-chunk"><summary>${e(item.locator)} · ${item.content.length} 字符 · ${e(item.fulltext.parse_quality||'unknown')}</summary><pre>${e(item.content)}</pre><a href="${link(item.source_url)}" target="_blank" rel="noopener noreferrer">打开原文来源 ↗</a></details>`).join('');
+    target.innerHTML=`<div class="inline-note">导入 bundle 的来源声明未经加密认证。请核对版本、链接、解析质量与正文；确认只会追加来源块。</div>${conflicts?`<h4>无法导入</h4><ul>${conflicts}</ul>`:''}${present?`<h4>已存在</h4><ul>${present}</ul>`:''}${chunks?`<h4>待追加 ${result.new.length} 个全文块</h4>${chunks}<button type="button" class="btn primary" id="fulltext-confirm">确认追加全文块</button>`:''}`;
+    target.querySelector('#fulltext-confirm')?.addEventListener('click',async event=>{
+      event.currentTarget.disabled=true;
+      try {
+        const applied=await api(`/papers/${paperId}/knowledge/fulltext/import`,{method:'POST',body:request});
+        const count=applied.new.length;
+        dialog.close();toast(`已追加 ${count} 个全文来源块；来源包未被认证，也没有自动创建 claim。`);
+        await openRelationForm(paperId,supersedesId);
+      }catch(error){target.textContent=error.message;}
+    });
+  }
+  dialog.querySelector('#fulltext-preview')?.addEventListener('click',async event=>{
+    const previewButton=event.currentTarget;
+    const document=fulltextDocuments[Number(dialog.querySelector('#fulltext-document').value)];
+    if(!document)return;
+    const request={workspace_id:document.workspace_id,source_ids:document.source_ids,
+      paper_version_id:dialog.querySelector('#fulltext-version').value};
+    previewButton.disabled=true;
+    try {
+      const result=await api(`/papers/${paperId}/knowledge/fulltext/preview`,{method:'POST',body:request});
+      renderFulltextPreview(result,request);
+    }catch(error){dialog.querySelector('#fulltext-import-result').textContent=error.message;}
+    finally{if(previewButton.isConnected)previewButton.disabled=false;}
+  });
+  form.elements.source_snapshot_id.addEventListener('change',()=>{
+    const selected=sources.find(item=>item.id===form.elements.source_snapshot_id.value);
+    form.elements.paper_version_id.value=selected?.paper_version_id||'';
+    const note=dialog.querySelector('#relation-source-note');
+    const provenance=selected?.payload?.provenance_verified;
+    note.hidden=provenance!==false;
+    if(provenance===false)note.textContent='此来源来自用户导入的 bundle，工具声明未经认证；claim 只能以“人工确认”类别保存。';
+  });
+  form.addEventListener('submit',async event=>{
+    event.preventDefault();formError(form,'');
+    const submit=form.querySelector('[type=submit]');submit.disabled=true;
+    try{
+      const payload=Object.fromEntries(new FormData(form));
+      await api(`/papers/${paperId}/relations`,{method:'POST',body:payload});
+      dialog.close();state.relationOffset=0;await loadRelations();
+      toast('关系已追加；来源、版本与判断类别已保留。');
+    }catch(error){formError(form,error.message);}finally{if(submit.isConnected)submit.disabled=false;}
+  });
 }
 function settingsDialog() {
   const total=counts(state.papers);
@@ -351,7 +591,7 @@ function zoteroDialog() {
 }
 function importDialog() {
   const dialog=openDialog(`${modalHead('IMPORT LIBRARY','带着已有积累，开始。','在 Zotero 中导出 CSL JSON，再导入这里；不读取原文 PDF 或私人批注。')}
-  <div class="import-choice"><div>${icon('code',24)}<h3>Zotero · CSL JSON</h3><p>论文元数据导入。先预览，再确认；重复 DOI / arXiv 或同标题会保守跳过，不覆盖现有笔记。</p></div><label class="btn">${icon('upload')} 选择 JSON 文件<input id="import-file" type="file" accept=".json,application/json" hidden></label></div><div id="import-preview"><div class="inline-note">${icon('info',16)} 支持最多 500 条、3 MiB 的 CSL JSON 数组。re0 自身导出的归档 JSON 不是 CSL 格式。</div></div>`,{wide:true});
+  <div class="import-choice"><div>${icon('code',24)}<h3>Zotero · CSL JSON</h3><p>精确重复的 DOI / arXiv 会跳过；交叉标识或版本冲突先复核。同标题但标识符不同的论文会分别保留。</p></div><label class="btn">${icon('upload')} 选择 JSON 文件<input id="import-file" type="file" accept=".json,application/json" hidden></label></div><div id="import-preview"><div class="inline-note">${icon('info',16)} 支持最多 500 条、3 MiB 的 CSL JSON 数组。re0 自身导出的归档 JSON 不是 CSL 格式。</div></div>`,{wide:true});
   let items=null;
   dialog.querySelector('#import-file').onchange=async event=>{
     const file=event.target.files[0];if(!file)return;
@@ -361,8 +601,11 @@ function importDialog() {
       if(file.size>3*1024*1024)throw new Error('文件不能超过 3 MiB。');
       items=JSON.parse(await file.text());if(!Array.isArray(items))throw new Error('需要 CSL JSON 数组。请在 Zotero 中选择 CSL JSON 导出格式。');
       const result=await api('/import/csl',{method:'POST',body:{items,dry_run:true}});
-      preview.innerHTML=`<div class="import-stats"><div><strong>${result.ready}</strong>可导入</div><div><strong>${result.skipped.length}</strong>重复跳过</div><div><strong>${result.errors.length}</strong>格式错误</div></div>${result.preview.length?`<div class="import-titles">${result.preview.map(p=>`<p>${icon('book',14)} ${e(p.title)}</p>`).join('')}</div>`:''}${result.errors.length?`<div class="form-error">${result.errors.slice(0,5).map(x=>'第 '+(x.index+1)+' 条：'+e(x.message)).join('<br>')}</div>`:''}<p class="muted">仅导入校验通过且不重复的条目；未显示全部预览时，仍会处理全部已校验条目。</p><div class="modal-actions"><button class="btn" data-close>取消</button><button class="btn primary" id="confirm-import" ${result.ready?'':'disabled'}>确认导入 ${result.ready} 篇</button></div>`;
-      preview.querySelector('#confirm-import').onclick=event=>busy(event.currentTarget,async()=>{const imported=await api('/import/csl',{method:'POST',body:{items,dry_run:false}});dialog.close();await refresh();toast(`已导入 ${imported.created.length} 篇；重复 ${imported.skipped.length+imported.conflicts.length} 条，格式错误 ${imported.errors.length} 条。`);});
+      const conflictRows=result.conflicts.map(row=>`<article><strong>第 ${row.index+1} 条 · ${e(row.title)}</strong><p>${e(row.reason)}</p><ul>${row.matches.map(match=>`<li><b>${match.work_id?'现有条目':'本次文件第 '+(match.item_index+1)+' 条'}：${e(match.title)}</b><span>${[match.doi&&'DOI '+match.doi,match.arxiv_id&&'arXiv '+match.arxiv_id].filter(Boolean).map(e).join(' · ')||'无可用标识符'}</span></li>`).join('')}</ul></article>`).join('');
+      const canApply=result.ready>0||result.conflicts.length>0;
+      const actionLabel=result.ready&&result.conflicts.length?`导入 ${result.ready} 篇并记录 ${result.conflicts.length} 条冲突`:result.ready?`确认导入 ${result.ready} 篇`:`记录 ${result.conflicts.length} 条待复核冲突`;
+      preview.innerHTML=`<div class="import-stats"><div><strong>${result.ready}</strong>可导入</div><div class="import-conflict-count"><strong>${result.conflicts.length}</strong>身份待复核</div><div><strong>${result.skipped.length}</strong>重复跳过</div><div><strong>${result.errors.length}</strong>格式错误</div></div>${result.preview.length?`<div class="import-titles">${result.preview.map(p=>`<p>${icon('book',14)} ${e(p.title)}</p>`).join('')}</div>`:''}${result.conflicts.length?`<section class="import-conflicts"><h3>身份冲突 · 不会自动合并</h3><p>确认后会把导入声明追加到匹配条目的待复核记录；不会覆盖已有元数据，也不会把这条声明当作关系证据。</p>${conflictRows}</section>`:''}${result.errors.length?`<div class="form-error">${result.errors.slice(0,5).map(x=>'第 '+(x.index+1)+' 条：'+e(x.message)).join('<br>')}</div>`:''}<p class="muted">确认后只导入校验通过的新条目并记录待复核冲突；重复项不会覆盖已有笔记。未显示全部预览时，仍会处理全部已校验条目。</p><div class="modal-actions"><button class="btn" data-close>取消</button><button class="btn primary" id="confirm-import" ${canApply?'':'disabled'}>${actionLabel}</button></div>`;
+      preview.querySelector('#confirm-import').onclick=event=>busy(event.currentTarget,async()=>{const imported=await api('/import/csl',{method:'POST',body:{items,dry_run:false}});dialog.close();await refresh();const recorded=imported.conflicts.filter(row=>row.recorded_snapshots?.length).length;const pending=imported.conflicts.length-recorded;toast(`已导入 ${imported.created.length} 篇；身份待复核 ${recorded} 条${pending?`、未能关联 ${pending} 条`:''}；重复跳过 ${imported.skipped.length} 条，格式错误 ${imported.errors.length} 条。`);});
     }catch(error){preview.innerHTML=`<div class="form-error">${e(error.message)}</div>`;items=null;}
   };
 }

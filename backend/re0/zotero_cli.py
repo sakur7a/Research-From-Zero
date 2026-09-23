@@ -18,17 +18,17 @@ import sys
 from pathlib import Path
 
 from .deployment import LOCAL_OWNER
+from .paths import default_database
 from .zotero import Connection, ZoteroError, ZoteroStore
 from .zotero_sync import sync
 
 PROGRAM = "re0 zotero"
-ROOT = Path(__file__).resolve().parents[2]
 KEY_ENVIRON = "ZOTERO_API_KEY"
 PREVIEW_ROWS = 20
 
 
 def database_path(explicit: str = "") -> str:
-    return explicit or os.getenv("RE0_DB") or str(ROOT / ".data" / "re0.sqlite3")
+    return explicit or os.getenv("RE0_DB") or str(default_database())
 
 
 def _stores(path: str):
