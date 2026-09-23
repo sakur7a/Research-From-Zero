@@ -9,6 +9,8 @@ import base64
 import csv as csv_module
 import io
 import json
+from pathlib import Path
+import re
 
 import httpx
 import pytest
@@ -570,6 +572,14 @@ def test_the_three_exports_are_written_from_one_structure(tmp_path):
     table = list(csv_module.reader(io.StringIO(written[2].read_text(encoding="utf-8"))))
     assert table[0][0] == "paper_title" and len(table) == 2
     assert len({len(line) for line in table}) == 1
+
+
+def test_python_and_web_matrix_exports_share_the_same_ordered_columns():
+    source = (Path(__file__).resolve().parents[2] / "web" / "search-core.js").read_text(encoding="utf-8")
+    match = re.search(r"export const MATRIX_COLUMNS = \[(.*?)\];", source, re.S)
+    assert match, "the browser matrix must publish its CSV contract"
+    browser_columns = tuple(re.findall(r"'([^']+)'", match.group(1)))
+    assert browser_columns == resource_matrix.COLUMNS
 
 
 def test_a_matrix_wider_than_a_comparison_set_says_so():

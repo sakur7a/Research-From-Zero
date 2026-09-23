@@ -290,10 +290,27 @@ class Finding(StrictModel):
     assessment: Literal["observed", "inference", "uncertain"] = "uncertain"
 
 
+class ResourceLink(StrictModel):
+    """A model-proposed paper/resource candidate; the owner still confirms library import."""
+    paper_evidence_id: str = Field(min_length=1, max_length=80)
+    resource_evidence_id: str = Field(min_length=1, max_length=80)
+    relation_evidence_ids: list[str] = Field(min_length=2, max_length=8)
+    rationale: str = Field(min_length=1, max_length=600)
+
+    @model_validator(mode="after")
+    def cites_both_sides(self):
+        if len(self.relation_evidence_ids) != len(set(self.relation_evidence_ids)):
+            raise ValueError("候选关联的证据 ID 不能重复")
+        if not {self.paper_evidence_id, self.resource_evidence_id}.issubset(self.relation_evidence_ids):
+            raise ValueError("候选关联必须同时引用论文证据和资源核验证据")
+        return self
+
+
 class Report(StrictModel):
     title: str = Field(min_length=1, max_length=160)
     summary: str = Field(min_length=1, max_length=4000)
     findings: list[Finding] = Field(default_factory=list, max_length=20)
+    resource_links: list[ResourceLink] = Field(default_factory=list, max_length=40)
     limitations: list[str] = Field(min_length=1, max_length=12)
     outcome: Literal["findings", "insufficient_evidence"]
 
@@ -303,3 +320,10 @@ class Report(StrictModel):
         if any(not x.strip() or len(x) > 1000 for x in limits):
             raise ValueError("限制说明过长或为空")
         return limits
+
+    @model_validator(mode="after")
+    def unique_resource_links(self):
+        pairs = [(link.paper_evidence_id, link.resource_evidence_id) for link in self.resource_links]
+        if len(pairs) != len(set(pairs)):
+            raise ValueError("同一篇论文与资源的候选关联只能提交一次")
+        return self

@@ -34,6 +34,30 @@ body.guest-door .shell{margin-left:0}
 .guest-side-action{display:block;width:100%;text-align:left;padding:6px 4px;color:var(--sidebar-text);font-size:10px}
 .guest-side-action:hover{color:var(--primary)}
 body.guest-door .topbar{padding-left:clamp(20px,5vw,64px)}
+.resource-matrix{display:grid;gap:18px;min-width:0}
+.matrix-toolbar{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:16px;border:1px solid var(--line);border-radius:10px;background:var(--paper)}
+.matrix-toolbar p{max-width:760px;margin-top:5px;color:var(--ink-2);font-size:11px}
+.matrix-downloads{display:flex;flex-wrap:wrap;gap:7px}
+.matrix-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,390px),1fr));gap:13px}
+.matrix-card{min-width:0;padding:16px;border:1px solid var(--line);border-radius:10px;background:var(--paper)}
+.matrix-card>header{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:10px}
+.matrix-card h3{font-size:15px;line-height:1.5;overflow-wrap:anywhere}
+.matrix-select{display:flex;align-items:center;gap:7px;color:var(--ink-2);font-size:11px}
+.matrix-status,.matrix-chip{display:inline-flex;max-width:100%;border:1px solid var(--line);border-radius:20px;background:var(--paper-2);padding:3px 9px;color:var(--ink-2);font-size:10px;overflow-wrap:anywhere}
+.matrix-ident{margin-top:5px;color:var(--ink-3);font-size:10px;overflow-wrap:anywhere}
+.matrix-resource{display:grid;gap:3px;margin:12px 0;padding:10px;border-left:3px solid var(--primary);background:var(--paper-2);font-size:12px;overflow-wrap:anywhere}
+.matrix-resource span{color:var(--ink-2);font-size:10px}
+.matrix-facts{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}
+.matrix-facts span{padding:3px 7px;border:1px solid var(--line);border-radius:6px;color:var(--ink-2);font-size:10px;overflow-wrap:anywhere}
+.matrix-details{margin-top:8px;border-top:1px solid var(--line);padding-top:8px;color:var(--ink-2);font-size:11px;overflow-wrap:anywhere}
+.matrix-details summary{cursor:pointer;color:var(--ink);font-weight:600}
+.matrix-coverage,.matrix-links{display:flex;flex-wrap:wrap;gap:5px;margin:10px 0}
+.matrix-source{display:grid;grid-template-columns:auto auto;justify-content:start;align-items:center;gap:4px 10px;margin-top:9px}
+.matrix-source small{grid-column:1/-1;color:var(--ink-3);overflow-wrap:anywhere}
+.matrix-batch{display:grid;justify-items:start;gap:9px;padding:13px;border:1px solid var(--line);border-radius:9px;background:var(--paper-2)}
+.matrix-batch #matrix-import-preview{font-size:11px;overflow-wrap:anywhere}
+.matrix-batch ul{margin:6px 0;padding-left:20px}
+@media(max-width:800px){.matrix-toolbar{flex-direction:column}.matrix-downloads{width:100%}.matrix-downloads .button{flex:1;text-align:center}.matrix-cards{grid-template-columns:minmax(0,1fr)}.matrix-card>header{flex-direction:column}.matrix-source{grid-template-columns:minmax(0,1fr)}.matrix-source small{grid-column:auto}}
 @media(max-width:800px){.guest-welcome{padding:32px 20px}.guest-welcome-grid{grid-template-columns:1fr}.guest-hero{padding-bottom:23px}.guest-hero h1{font-size:36px}.guest-start-card h2,.guest-history-card h2{font-size:18px}.guest-retention{flex-direction:column;gap:3px}}
 
 /* Paper evidence renders as a card: bibliographic text on the left, source and open-source

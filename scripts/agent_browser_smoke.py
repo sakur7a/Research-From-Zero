@@ -19,6 +19,7 @@ from playwright.sync_api import sync_playwright
 from re0.main import create_app
 from re0.workspace import Workspace
 from test_agent import FixtureNetwork, CONFIG
+from test_agent_matrix import MatrixFixture, CONFIG as MATRIX_CONFIG, GOAL as MATRIX_GOAL, HEADERS
 
 
 def run(output):
@@ -254,6 +255,53 @@ def run(output):
         page.locator('[data-action=new]').click()
         page.get_by_role('heading',name=re.compile('从一个问题')).wait_for()
         page.screenshot(path=str(output/'agent-home-mobile.png'),full_page=True)
+        # Second offline browser flow: a model proposes three evidence-bound paper/resource rows,
+        # then the reader previews and confirms them through the ordinary workbench UI.
+        matrix_fixture=MatrixFixture()
+        with TestClient(create_app(str(Path(temp)/'agent-matrix-browser.sqlite3'),
+                                   httpx.MockTransport(matrix_fixture)),headers=HEADERS) as matrix_client:
+            matrix_page=browser.new_page(viewport={'width':1440,'height':1080},device_scale_factor=1)
+            matrix_page.set_default_timeout(10000)
+            matrix_page.on('pageerror',lambda error:errors.append('matrix: '+str(error)))
+            matrix_page.on('dialog',lambda dialog:dialog.accept())
+            def matrix_bridge(path, options):
+                assert path.startswith('/api/'),path
+                response=matrix_client.request(options.get('method','GET'),path,
+                                               headers=options.get('headers'),content=options.get('body'))
+                return {'status':response.status_code,'body':response.text}
+            matrix_page.expose_function('re0TestRequest',matrix_bridge)
+            matrix_page.set_content(html)
+            matrix_page.evaluate('''()=>{window.fetch=async(path,options={})=>{const r=await window.re0TestRequest(path,{method:options.method||'GET',headers:options.headers||{},body:options.body});return new Response(r.body,{status:r.status,headers:{'Content-Type':'application/json'}});};}''')
+            matrix_page.add_script_tag(content='\n'.join(js),type='module')
+            matrix_page.get_by_role('heading',name=re.compile('从一个问题')).wait_for()
+            matrix_page.locator('.setup-note [data-action=settings]').click()
+            matrix_page.locator('[name=base_url]').fill(MATRIX_CONFIG['base_url'])
+            matrix_page.locator('[name=model]').fill(MATRIX_CONFIG['model'])
+            matrix_page.locator('[name=api_key]').fill(MATRIX_CONFIG['api_key'])
+            matrix_page.locator('[name=trust_endpoint]').check()
+            matrix_page.locator('#model-form [type=submit]').click()
+            matrix_page.wait_for_function("!document.querySelector('#settings').open")
+            matrix_page.locator('#goal').fill(MATRIX_GOAL['goal'])
+            matrix_page.locator('[name=consent_to_send]').check()
+            matrix_page.locator('#task-form [type=submit]').click()
+            matrix_page.wait_for_function("document.querySelector('.status')?.textContent==='报告已生成'",timeout=30000)
+            matrix_page.wait_for_selector('[data-tab="matrix"][aria-selected="true"]',timeout=12000)
+            assert matrix_page.locator('.matrix-card').count()==4
+            assert matrix_page.locator('.matrix-card input[name="matrix-selection"]').count()==3
+            assert '待人工确认' in matrix_page.locator('.resource-matrix').inner_text()
+            matrix_selections=matrix_page.locator('.matrix-card input[name="matrix-selection"]')
+            for index in range(matrix_selections.count()):matrix_selections.nth(index).check()
+            matrix_page.locator('[data-action=matrix-preview]').click()
+            matrix_page.wait_for_function("document.querySelector('#matrix-import-preview')?.textContent.includes('预览：2 组来源数据')")
+            assert matrix_client.get('/api/papers').json()==[]
+            matrix_page.locator('[data-action=matrix-confirm]').click()
+            matrix_page.wait_for_function("document.querySelector('#matrix-import-preview')?.textContent.includes('已保存：新增 2 篇论文')")
+            assert len(matrix_client.get('/api/papers').json())==2
+            matrix_page.set_viewport_size({'width':390,'height':844})
+            assert matrix_page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+            matrix_page.screenshot(path=str(output/'agent-resource-matrix-mobile.png'),full_page=True)
+            matrix_page.close()
+            checked.append('agent_report_to_evidence_linked_resource_matrix_preview_and_batch_approval')
         assert not errors,errors
         # 先落盘/打印报告再关闭浏览器:个别环境在浏览器进程回收阶段会中断,结果不应丢失。
         result={'mode':'offline Chromium + real TestClient + fixture HTTP; no live model','passed':checked,'browser_errors':errors}

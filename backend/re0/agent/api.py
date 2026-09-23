@@ -4,15 +4,34 @@ Every route here takes the request only to read one thing from it: the identity 
 verified. The owner is never a parameter a caller can send, because a parameter is something a caller
 can also change.
 """
-from fastapi import APIRouter, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, Response
+from pydantic import Field, model_validator
 
+from .. import resource_matrix
+from .matrix import build_run_matrix, selected_import_items
 from .model import ModelError
 from .schemas import (Approval, FollowUpInput, ModelConfig, ModelListRequest, RetryInput, SessionCaps,
-                      TaskDefaults, TaskInput)
+                      StrictModel, TaskDefaults, TaskInput)
 
 
-def agent_router(runtime):
+class MatrixSelection(StrictModel):
+    paper_evidence_id: str = Field(min_length=1, max_length=80)
+    resource_evidence_id: str = Field(min_length=1, max_length=80)
+
+
+class MatrixImportRequest(StrictModel):
+    selections: list[MatrixSelection] = Field(min_length=1, max_length=40)
+
+    @model_validator(mode="after")
+    def unique_selections(self):
+        pairs = [(item.paper_evidence_id, item.resource_evidence_id) for item in self.selections]
+        if len(pairs) != len(set(pairs)):
+            raise ValueError("同一候选关联不能重复选择")
+        return self
+
+
+def agent_router(runtime, library_store=None):
     router = APIRouter(prefix="/api/agent", tags=["Research agent"])
 
     def owner(request: Request) -> str:
@@ -146,5 +165,40 @@ def agent_router(runtime):
         # No raw prompts/checkpoint/messages or credentials in the export.
         return JSONResponse(runtime.tasks.get(run_id, owner=owner(request)),
                             headers={"Content-Disposition": 'attachment; filename="re0-research-task.json"'})
+
+    def matrix_for_run(run_id: str, request: Request) -> dict:
+        run = runtime.tasks.get(run_id, owner=owner(request))
+        if not run.get("report"):
+            raise HTTPException(409, "任务尚未提交结构化报告；完成后才能生成资源矩阵")
+        return build_run_matrix(run)
+
+    @router.get("/runs/{run_id}/matrix")
+    def matrix_export(run_id: str, request: Request,
+                      format: str = Query("json", pattern="^(json|csv|markdown)$")):
+        payload = matrix_for_run(run_id, request)
+        if format == "csv":
+            return Response(resource_matrix.csv_text(payload), media_type="text/csv; charset=utf-8",
+                            headers={"Content-Disposition": 'attachment; filename="re0-resource-matrix.csv"'})
+        if format == "markdown":
+            return Response(resource_matrix.markdown(payload), media_type="text/markdown; charset=utf-8",
+                            headers={"Content-Disposition": 'attachment; filename="re0-resource-matrix.md"'})
+        return JSONResponse(payload, headers={"Content-Disposition":
+                                              'attachment; filename="re0-resource-matrix.json"'})
+
+    @router.post("/runs/{run_id}/matrix/preview")
+    def matrix_import_preview(run_id: str, data: MatrixImportRequest, request: Request):
+        if library_store is None:
+            raise HTTPException(503, "文献库不可用")
+        payload = matrix_for_run(run_id, request)
+        items = selected_import_items(payload, [item.model_dump() for item in data.selections])
+        return library_store.import_audits(items, dry_run=True, owner=owner(request))
+
+    @router.post("/runs/{run_id}/matrix/confirm")
+    def matrix_import_confirm(run_id: str, data: MatrixImportRequest, request: Request):
+        if library_store is None:
+            raise HTTPException(503, "文献库不可用")
+        payload = matrix_for_run(run_id, request)
+        items = selected_import_items(payload, [item.model_dump() for item in data.selections])
+        return library_store.import_audits(items, dry_run=False, owner=owner(request))
 
     return router

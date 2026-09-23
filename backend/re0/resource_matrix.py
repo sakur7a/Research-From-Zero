@@ -22,7 +22,7 @@ import time
 
 from .models import AUDIT_COMPONENTS, AUDIT_LABELS, COMPONENT_LABELS, safe_url
 
-MATRIX_SCHEMA_VERSION = "1"
+MATRIX_SCHEMA_VERSION = "2"
 # A comparison set wider than this stops being comparable; the matrix says so rather than hiding
 # rows, because the reader chose the query that produced them.
 COMPARABLE_PAPERS = 6
@@ -119,6 +119,13 @@ def audit_row(row: dict, document: dict) -> dict:
         "sources": [item for item in links if item][:8],
         "limitations": list(row.get("limitations") or []),
         "record_kind": "observation",
+        "association_status": row.get("association_status", ""),
+        "paper_evidence_id": row.get("paper_evidence_id", ""),
+        "resource_evidence_id": row.get("resource_evidence_id", ""),
+        "association_evidence_ids": list(row.get("association_evidence_ids") or []),
+        "association_sources": list(row.get("association_sources") or []),
+        "association_note": row.get("association_note", ""),
+        "association_evidence": list(row.get("association_evidence") or []),
     }
     flat["blockers"] = blockers(flat)
     return flat
@@ -152,12 +159,21 @@ def absent_row(document: dict) -> dict:
         "sources": [],
         "limitations": list(detail.get("failures") or []),
         "record_kind": "observation",
+        "association_status": "",
+        "paper_evidence_id": "",
+        "resource_evidence_id": "",
+        "association_evidence_ids": [],
+        "association_sources": [],
+        "association_note": "",
+        "association_evidence": [],
     }
     row["blockers"] = ["没有可审计的资源候选：" + {
         "not_found_in_scope": "名称检索完成且未命中，检查范围内未找到",
         "access_failed": "名称检索未完成，可用性未知",
         "not_checked": "本次未检索（未开启、预算已尽或标题没有可检索的项目名）",
     }.get(state, state)]
+    if detail.get("reason_not_run"):
+        row["blockers"].append("本次未检索原因：" + str(detail["reason_not_run"])[:600])
     return row
 
 
@@ -175,7 +191,8 @@ COLUMNS = ("paper_title", "work_identifier", "work_version", "resource_url", "re
            "candidate_origin", "attribution", "author_declaration", "status", "status_label",
            "provider_status", "access", "verification_depth", "version_match", "revision",
            "checked_at", "coverage", "licences", "sources", "blockers", "limitations",
-           "record_kind")
+           "record_kind", "association_status", "paper_evidence_id", "resource_evidence_id",
+           "association_evidence_ids", "association_sources", "association_note")
 
 
 def approval_items(documents: list) -> list:
@@ -197,9 +214,17 @@ def approval_items(documents: list) -> list:
     return items
 
 
-def matrix(documents: list, coverage: dict, *, generated_at: str = "") -> dict:
+def matrix(documents: list, coverage: dict, *, generated_at: str = "",
+           row_metadata: list[dict] | None = None) -> dict:
     """The matrix as one structure. The Markdown and CSV exports are renderings of it."""
     found = rows(documents)
+    metadata_fields = {"association_status", "paper_evidence_id", "resource_evidence_id",
+                       "association_evidence_ids", "association_sources", "association_note",
+                       "association_evidence"}
+    for index, row in enumerate(found):
+        if index < len(row_metadata or []):
+            row.update({key: value for key, value in row_metadata[index].items()
+                        if key in metadata_fields})
     titles = {row["paper_title"] for row in found}
     return {
         "schema_version": MATRIX_SCHEMA_VERSION,
@@ -240,8 +265,10 @@ def markdown(payload: dict) -> str:
               "来源声明了什么许可证、以及为什么某一行还不能直接当 baseline 用。",
               "**这张表不能回答**：资源是否能跑通、结果能否复现、许可证是否允许你的用途、"
               "以及候选仓库是否真出自论文作者。这些都需要人工确认，确认后是另一条记录。", ""]
-    headers = ("论文", "资源", "类型", "候选来源", "状态", "访问", "核验深度", "版本对应",
-               "许可证", "类别覆盖", "不可直接比较的条件", "可跳转来源")
+    headers = ("论文", "资源", "类型", "候选来源", "状态", "提供商状态", "访问", "核验深度",
+               "归属", "作者声明", "版本对应", "revision", "检查时间", "许可证", "类别覆盖",
+               "不可直接比较的条件", "可跳转来源", "候选关联",
+               "关联证据 ID", "关联来源与时间", "关联说明")
     lines.append("| " + " | ".join(headers) + " |")
     lines.append("|" + "---|" * len(headers))
     for row in payload["rows"]:
@@ -251,9 +278,15 @@ def markdown(payload: dict) -> str:
         sources = " ".join(row["sources"][:3]) or "（无）"
         cells = (row["paper_title"][:80], row["resource_url"] or "（无候选）", row["resource_type"],
                  row["candidate_origin"] or "（无）",
-                 f"{row['status_label']} ({row['status']})", row["access"],
-                 row["verification_depth"], row["version_match"], licences, coverage_text,
-                 "; ".join(row["blockers"]) or "（无）", sources)
+                 f"{row['status_label']} ({row['status']})", row.get("provider_status", ""), row["access"],
+                 row["verification_depth"], row.get("attribution", "unconfirmed"),
+                 row.get("author_declaration", "undeclared"), row["version_match"],
+                 row.get("revision", ""), row.get("checked_at", ""), licences, coverage_text,
+                 "; ".join(row["blockers"]) or "（无）", sources,
+                 row.get("association_status", ""),
+                 "; ".join(row.get("association_evidence_ids") or []),
+                 "; ".join(row.get("association_sources") or []),
+                 row.get("association_note", ""))
         lines.append("| " + " | ".join(markdown_cell(cell) for cell in cells) + " |")
     lines += ["", "## 限制", ""]
     limits = sorted({text for row in payload["rows"] for text in row["limitations"]})

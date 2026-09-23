@@ -134,6 +134,16 @@ This tool returns candidates and does not rank them. A report is where the judge
   retrieval of its own — the file *is* the run — and it reads `coverage.requested`, `coverage.attempts`
   and `documents[].sources`, which the versioned structure now carries through instead of dropping.
 
+## From the Web Agent
+
+The Web Agent may also produce a paper/resource matrix from evidence retrieved during one task. Its
+`resource_links` are model-proposed candidates between that run's paper evidence and a completed
+resource audit; both evidence IDs must belong to that run. The workbench labels the relationship as
+unconfirmed, keeps the audit's original attribution/version/access fields, and requires a separate
+preview and human confirmation before adding paper/resources to the library. A title or repository
+name match alone never becomes official attribution. This is a different entry point from the CLI
+Skill: the static search matrix remains a rendering of its own versioned `--json` result.
+
 ## Conference papers
 
 Conference proceedings are covered by the existing scholarly sources. `--venue NAME` is a strict

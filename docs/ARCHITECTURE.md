@@ -80,8 +80,13 @@ web/agent.html + agent.js        web/index.html + app.js
    of a stored body on request.
 7. Repeat. The model can change queries, inspect discovered resources, read files,
    revise its plan, or finish; no fixed ordering is baked into this loop.
-8. `finish_report` must use valid per-task evidence IDs. On success the runtime
-   saves a report. The separate approval route imports source-derived paper data.
+8. `finish_report` must use valid per-task evidence IDs. Optional `resource_links`
+   must pair current-run paper evidence with a completed `resource_check` evidence
+   row, and cite both sides. They remain model-proposed relations with attribution
+   and version state untouched. The owner-scoped matrix route derives JSON/Markdown/
+   CSV and preview/confirm payloads from the same stored run evidence; preview is
+   read-only and confirm reuses the existing append-only resource-audit importer.
+   The separate paper approval route still imports source-derived paper data only.
 
 A schema-valid model answer can still be scientifically wrong. The current
 validator checks identity and structure, **not entailment**, official-resource

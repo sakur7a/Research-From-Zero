@@ -218,6 +218,7 @@ function auditRow(row, document) {
     attribution: row.attribution || 'unconfirmed',
     author_declaration: row.author_declaration || 'undeclared',
     status: row.status || 'not_checked',
+    status_label: AUDIT_LABELS[row.status || 'not_checked'] || row.status || 'not_checked',
     provider: row.provider || '',
     provider_status: row.provider_status || '',
     summary: row.summary || '',
@@ -231,6 +232,12 @@ function auditRow(row, document) {
     sources,
     limitations: [...(row.limitations || [])],
     record_kind: 'observation',
+    association_status: row.association_status || '',
+    paper_evidence_id: row.paper_evidence_id || '',
+    resource_evidence_id: row.resource_evidence_id || '',
+    association_evidence_ids: [...(row.association_evidence_ids || [])],
+    association_sources: [...(row.association_sources || [])],
+    association_note: row.association_note || '',
   };
   flat.blockers = blockers(flat);
   return flat;
@@ -252,6 +259,7 @@ function absentRow(document) {
     attribution: 'unconfirmed',
     author_declaration: 'undeclared',
     status: state,
+    status_label: AUDIT_LABELS[state] || state,
     provider: '',
     provider_status: '',
     summary: '',
@@ -265,6 +273,12 @@ function absentRow(document) {
     sources: [],
     limitations: [...(detail.failures || [])],
     record_kind: 'observation',
+    association_status: '',
+    paper_evidence_id: '',
+    resource_evidence_id: '',
+    association_evidence_ids: [],
+    association_sources: [],
+    association_note: '',
     blockers: ['没有可审计的资源候选：' + (NO_CANDIDATE[state] || state)],
   };
 }
@@ -280,9 +294,10 @@ export function safeLink(url) {
 }
 
 export const MATRIX_COLUMNS = ['paper_title', 'work_identifier', 'work_version', 'resource_url',
-  'resource_type', 'candidate_origin', 'attribution', 'author_declaration', 'status', 'provider_status',
-  'access', 'verification_depth', 'version_match', 'revision', 'checked_at', 'coverage', 'licences',
-  'sources', 'blockers', 'limitations', 'record_kind'];
+  'resource_type', 'candidate_origin', 'attribution', 'author_declaration', 'status', 'status_label',
+  'provider_status', 'access', 'verification_depth', 'version_match', 'revision', 'checked_at', 'coverage', 'licences',
+  'sources', 'blockers', 'limitations', 'record_kind', 'association_status', 'paper_evidence_id',
+  'resource_evidence_id', 'association_evidence_ids', 'association_sources', 'association_note'];
 
 export const COMPARABLE_PAPERS = 6;
 

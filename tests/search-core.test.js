@@ -36,9 +36,9 @@ test('refuses a payload with no schema_version rather than rendering an empty pa
 });
 
 test('names the matrix file when one is loaded by mistake', () => {
-  // Both files carry schema_version 1; rendering the matrix as a result would show zero candidates,
-  // which reads as "the search found nothing".
-  const parsed = parseResult('{"schema_version":"1","rows":[],"approval":[]}');
+  // Resource matrices have their own schema; rendering one as a search result would show zero
+  // candidates, which reads as "the search found nothing".
+  const parsed = parseResult('{"schema_version":"2","rows":[],"approval":[]}');
   assert.equal(parsed.ok, false);
   assert.match(parsed.error, /--resource-matrix/);
 });

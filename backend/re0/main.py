@@ -211,7 +211,7 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
     app.state.deployment = deployment
     app.state.accounts = accounts
     app.state.quota = quota
-    app.include_router(agent_router(agent))
+    app.include_router(agent_router(agent, store))
 
     @app.exception_handler(ModelError)
     async def model_error(request, exc):

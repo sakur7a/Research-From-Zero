@@ -8,7 +8,7 @@ const settings = document.querySelector('#settings');
 const side = document.querySelector('#app-side');
 let identity = {kind: 'local'};
 let config = {}, runs = [], current = null, events = [], workspaces = [], pendingWorkspaceBundle = null,
-  tab = 'trace', epoch = 0, timer, toastTimer;
+  resourceMatrix = null, pendingMatrixSelections = [], tab = 'trace', epoch = 0, timer, toastTimer;
 // The conversation the open run belongs to: its cumulative ledger and caps. Fetched with the run so
 // the composer can show what a follow-up would be added to, rather than only what it may spend.
 let conversation = null;
@@ -51,7 +51,7 @@ function sidebar() {
 }
 
 function guestLanding(deployment) {
-  epoch++; clearTimeout(timer); current = null; events = []; side.hidden = true;
+  epoch++; clearTimeout(timer); current = null; events = []; resourceMatrix = null; pendingMatrixSelections = []; side.hidden = true;
   document.body.classList.add('guest-door');
   document.querySelector('#breadcrumb').textContent = '开始研究';
   workspace.innerHTML = `<section class="guest-welcome">
@@ -80,7 +80,7 @@ function guestLanding(deployment) {
   document.querySelector('#guest-session-actions').hidden = true;
 }
 function home(goal = '') {
-  epoch++; clearTimeout(timer); current = null; events = []; sidebar();
+  epoch++; clearTimeout(timer); current = null; events = []; resourceMatrix = null; pendingMatrixSelections = []; sidebar();
   const defaults = normalizeDefaults(config.task_defaults);
   const fullText = config.capabilities?.full_text;
   const fullTextCopy = fullText?.enabled
@@ -108,7 +108,7 @@ function runView() {
     ${current.error ? `<div class="error-panel">${e(current.error)}</div>` : ''}
     ${canFollowUp(current) ? followupHtml() : ''}
     <div class="run-layout"><aside class="plan-panel"><div class="section-label">公开行动计划</div>${current.plan?.length ? `<ol>${current.plan.map(s=>`<li>${e(s)}</li>`).join('')}</ol>` : '<p class="subtle">agent 将在执行时制定计划。</p>'}<div class="plan-bottom">${current.evidence.length}<span>条来源证据</span></div><p class="subtle">计划由模型生成。执行记录来自实际工具调用，不展示模型私有思维。</p></aside>
-      <section class="results"><div class="tabs" role="tablist">${[['trace','执行记录'],['report','研究报告'],['evidence',`来源证据 (${current.evidence.length})`]].map(([key,title])=>`<button role="tab" aria-selected="${tab===key}" data-tab="${key}" class="${tab===key?'active':''}">${title}</button>`).join('')}</div><div id="result-panel" role="tabpanel"></div></section></div>
+      <section class="results"><div class="tabs" role="tablist">${[['trace','执行记录'],['report','研究报告'],...(resourceMatrix?[['matrix',`资源矩阵 (${resourceMatrix.rows.filter(row=>row.resource_url).length})`]]:[]),['evidence',`来源证据 (${current.evidence.length})`]].map(([key,title])=>`<button role="tab" aria-selected="${tab===key}" data-tab="${key}" class="${tab===key?'active':''}">${title}</button>`).join('')}</div><div id="result-panel" role="tabpanel"></div></section></div>
     <p class="footnote">模型报告是待复核分析；引用编号存在，不代表引用内容已经支持全部结论。Token 数以提供商实际返回为准，不估算金额。</p></section>`;
   panel(); sidebar();
   for(const id of opened){const details=document.getElementById(id)?.querySelector('details');if(details)details.open=true;}
@@ -149,6 +149,71 @@ function paperCardHtml(ev) {
 }
 
 function evidenceCard(ev) { return ev.kind === 'paper' && ev.paper ? paperCardHtml(ev) : plainCardHtml(ev); }
+
+function resourceMatrixHtml(payload) {
+  const rows = payload?.rows || [];
+  const linked = rows.filter(row => row.resource_url);
+  const cards = rows.map(row => {
+    const evidence = (row.association_evidence || []).map(source =>
+      '<div class="matrix-source"><button class="text-button" data-evidence="' + e(source.evidence_id)
+      + '">查看来源证据</button>' + (source.source_url
+        ? '<a href="' + link(source.source_url) + '" target="_blank" rel="noopener noreferrer">打开来源 ↗</a>' : '')
+      + '<small>' + e(source.locator) + ' · ' + e(timeLabel(source.retrieved_at)) + '</small></div>').join('');
+    const coverage = Object.entries(row.coverage || {}).map(([name,state]) =>
+      '<span class="matrix-chip">' + e(name) + ' · ' + e(state) + '</span>').join('');
+    const sources = (row.sources || []).map(url =>
+      '<a href="' + link(url) + '" target="_blank" rel="noopener noreferrer">打开核验来源 ↗</a>').join('');
+    const blockers = (row.blockers || []).map(item => '<li>' + e(item) + '</li>').join('');
+    const canSave = row.resource_url && row.resource_type !== 'unknown'
+      && row.paper_evidence_id && row.resource_evidence_id;
+    return '<article class="matrix-card"><header><label class="matrix-select">'
+      + (canSave ? '<input type="checkbox" name="matrix-selection" data-paper-evidence="'
+        + e(row.paper_evidence_id) + '" data-resource-evidence="' + e(row.resource_evidence_id)
+        + '"> 选择保存' : '<span class="quiet">未形成可保存的论文—资源关联</span>')
+      + '</label><span class="matrix-status">' + e(row.association_status || '未关联') + '</span></header>'
+      + '<h3>' + e(row.paper_title || '（论文来源未知）') + '</h3><p class="matrix-ident">'
+      + e(row.work_identifier || '') + (row.work_version ? ' · ' + e(row.work_version) : '') + '</p>'
+      + (row.resource_url ? '<p class="matrix-resource"><a href="' + link(row.resource_url)
+        + '" target="_blank" rel="noopener noreferrer">' + e(row.resource_url) + ' ↗</a><span>'
+        + e(row.resource_type) + ' · ' + e(row.candidate_origin || '资源核验证据') + '</span></p>'
+        : '<p class="matrix-resource quiet">本任务没有已关联的资源候选。</p>')
+      + '<div class="matrix-facts"><span>' + e(row.status_label || row.status || '未检查')
+      + '</span><span>访问 ' + e(row.access || 'unknown') + '</span><span>核验 '
+      + e(row.verification_depth || 'not_checked') + '</span><span>提供商 '
+      + e(row.provider_status || '未报告') + '</span><span>归属 '
+      + e(row.attribution || 'unconfirmed') + '</span><span>作者声明 '
+      + e(row.author_declaration || 'undeclared') + '</span><span>版本对应 '
+      + e(row.version_match || 'unknown') + '</span>'
+      + (row.checked_at ? '<span>检查时间 ' + e(row.checked_at) + '</span>' : '') + '</div>'
+      + '<details class="matrix-details"><summary>查看覆盖、限制和来源</summary><div class="matrix-coverage">'
+      + coverage + '</div><ul>' + blockers + '</ul><p>' + (row.limitations || []).map(e).join(' · ')
+      + '</p><div class="matrix-links">' + sources + '</div></details>'
+      + (evidence ? '<details class="matrix-details"><summary>查看候选关联依据</summary><p>'
+        + e(row.association_note || '') + '</p>' + evidence + '</details>' : '') + '</article>';
+  }).join('');
+  const unlinked = (payload?.unlinked_checks || []).map(item =>
+    '<li><a href="' + link(item.resource_url) + '" target="_blank" rel="noopener noreferrer">'
+    + e(item.resource_url) + '</a> · ' + e(item.status) + ' · ' + e(item.checked_at)
+    + ' — ' + e(item.note) + '</li>').join('');
+  const summary = payload?.coverage?.agent_run || {};
+  return '<section class="resource-matrix"><div class="matrix-toolbar"><div><strong>'
+    + e(summary.paper_evidence || 0) + ' 篇论文 · ' + e(summary.proposed_links || 0)
+    + ' 条候选关联</strong><p>' + e(payload?.association_note || payload?.note || '') + '</p></div>'
+    + '<div class="matrix-downloads"><a class="button" href="/api/agent/runs/' + e(current.id)
+    + '/matrix?format=json" download>JSON</a><a class="button" href="/api/agent/runs/' + e(current.id)
+    + '/matrix?format=markdown" download>Markdown</a><a class="button" href="/api/agent/runs/'
+    + e(current.id) + '/matrix?format=csv" download>CSV</a></div></div>'
+    + (linked.length ? '<div class="matrix-batch"><button class="button" data-action="matrix-preview">'
+      + '预览所选项</button><div id="matrix-import-preview" aria-live="polite"></div>'
+      + '<button class="primary" data-action="matrix-confirm" hidden>确认保存到我的文献库</button></div>'
+      : '<div class="empty-result"><h2>本次没有形成论文—资源候选关联</h2><p>'
+        + '论文、资源核验结果与未完成的检查仍可在“来源证据”和“执行记录”中查看；'
+        + '没有证据支持的关联不会自动补上。</p></div>')
+    + '<div class="matrix-cards">' + cards + '</div>'
+    + (unlinked ? '<details class="matrix-details"><summary>另有 '
+      + e(payload.unlinked_checks.length) + ' 条未关联的资源核验</summary><ul>' + unlinked + '</ul></details>' : '')
+    + '</section>';
+}
 
 // A continuing turn is a new version, so the difference from the previous one is shown next to the
 // report rather than folded into it: the earlier report stays readable and exportable on its own.
@@ -196,6 +261,8 @@ function panel() {
   if (!node || !current) return;
   if (tab === 'trace') {
     node.innerHTML = `<div class="trace">${events.length ? events.map(ev => `<article class="trace-row"><span class="trace-marker ${ev.kind==='tool_finished' && !ev.data.ok?'bad':''}"></span><div><small>${e(timeLabel(ev.at))} · ${e(ev.kind)}</small><p>${e(eventText(ev))}</p></div></article>`).join('') : '<p class="subtle">正在读取执行记录…</p>'}${activeRun(current)?'<div class="working"><span></span>正在执行；可离开此页面，任务由本地服务继续处理。</div>':''}</div>`;
+  } else if (tab === 'matrix') {
+    node.innerHTML = resourceMatrixHtml(resourceMatrix);
   } else if (tab === 'report') {
     const r=current.report;
     node.innerHTML = r ? `<article class="report"><div class="eyebrow">${r.outcome==='insufficient_evidence'?'EVIDENCE IS INCOMPLETE':'RESEARCH FINDINGS'} · 模型生成，待复核</div><h2>${e(r.title)}</h2><p class="report-summary">${e(r.summary)}</p><h3>发现与依据</h3>${r.findings.map((f,i)=>`<section class="finding"><small>${i+1} / ${{observed:'观察',inference:'推断',uncertain:'不确定'}[f.assessment]}</small><p>${e(f.claim)}</p><div class="citations">${f.evidence_ids.map(id=>`<button data-evidence="${e(id)}">${e(id)}</button>`).join('')}</div></section>`).join('') || '<p class="subtle">没有形成有充分依据的发现。</p>'}<h3>检查范围与剩余缺口</h3><ul>${r.limitations.map(x=>`<li>${e(x)}</li>`).join('')}</ul><div class="usage">提供商报告的 Token：${e(current.usage?.total_tokens || 0)}${current.usage?.unreported_calls ? `；${e(current.usage.unreported_calls)} 次调用未报告用量` : ''}</div>${deltaHtml(current.report_delta)}</article>` : '<div class="empty-result"><h2>报告还未生成</h2><p>报告只有在 agent 提交结构化结果后出现。任务失败或达到预算，不会自动填充虚构结论。</p><button class="button" data-tab="evidence">查看已收集的证据</button></div>';
@@ -207,11 +274,16 @@ async function refreshHistory() {
   [runs, config] = await Promise.all([api('/runs'),api('/config')]); sidebar();
 }
 async function selectRun(id) {
-  const token = ++epoch; clearTimeout(timer); tab='evidence'; events=[];
+  const token = ++epoch; clearTimeout(timer); tab='evidence'; events=[]; resourceMatrix=null; pendingMatrixSelections=[];
   try {
     const [r, ev] = await Promise.all([api('/runs/'+id),api('/runs/'+id+'/events')]);
     if (token!==epoch) return;
-    current=r; events=ev; if(!activeRun(r)&&r.report)tab='report';
+    current=r; events=ev;
+    if(!activeRun(r)&&r.report){
+      try {resourceMatrix=await api('/runs/'+id+'/matrix');}
+      catch(err){notice(`资源矩阵未能生成：${err.message}`);}
+      tab=resourceMatrix?.coverage?.agent_run?.proposed_links?'matrix':'report';
+    }
     conversation = r.conversation_id ? await api('/conversations/'+r.conversation_id) : null;
     try { workspaces=(await appApi('/workspaces')).workspaces||[]; }
     catch(err) { workspaces=[]; notice(`未能读取已导入工作区：${err.message}`); }
@@ -227,7 +299,14 @@ function poll(token) {
     try {
       const [r, ev] = await Promise.all([api('/runs/'+id),api('/runs/'+id+'/events?after='+(events.at(-1)?.id || 0))]);
       if(token!==epoch) return;
-      current=r; events.push(...ev); if(!activeRun(r)&&r.report&&tab==='evidence')tab='report'; runView();
+      current=r; events.push(...ev);
+      if(!activeRun(r)&&r.report&&!resourceMatrix){
+        try {resourceMatrix=await api('/runs/'+id+'/matrix');}
+        catch(err){notice(`资源矩阵未能生成：${err.message}`);}
+      }
+      if(!activeRun(r)&&r.report&&tab==='evidence')
+        tab=resourceMatrix?.coverage?.agent_run?.proposed_links?'matrix':'report';
+      runView();
       if(!activeRun(r)) await refreshHistory();
       poll(token);
     } catch(err) {if(token===epoch){notice(err.message);poll(token);}}
@@ -300,6 +379,34 @@ document.addEventListener('click', async event => {
       case 'new': await refreshHistory();home();break;
       case 'settings': config=await api('/config');openSettings();break;
       case 'close-settings':settings.close();break;
+      case 'matrix-preview':{
+        const selections=[...document.querySelectorAll('input[name="matrix-selection"]:checked')]
+          .map(input=>({paper_evidence_id:input.dataset.paperEvidence,
+                        resource_evidence_id:input.dataset.resourceEvidence}));
+        if(!selections.length){notice('先选择要一起预览的论文—资源候选。');break;}
+        const result=await api(`/runs/${current.id}/matrix/preview`,{selections});
+        pendingMatrixSelections=selections;
+        const preview=document.querySelector('#matrix-import-preview');
+        preview.innerHTML=`<strong>预览：${e(result.ready)} 组来源数据 · ${e(result.errors?.length||0)} 项错误</strong><ul>${(result.preview||[]).map(item=>`<li>${e(item.title)} · ${(item.resources||[]).map(e).join('、')}</li>`).join('')}</ul><p>${e(result.note||'已有论文笔记不会被覆盖；官方归属与版本判断仍待复核。')}</p>`;
+        document.querySelector('[data-action="matrix-confirm"]').hidden=!result.ready||Boolean(result.errors?.length);
+        break;
+      }
+      case 'matrix-confirm':{
+        if(!pendingMatrixSelections.length){notice('先预览所选论文和资源，再确认保存。');break;}
+        const selectedNow=[...document.querySelectorAll('input[name="matrix-selection"]:checked')]
+          .map(input=>({paper_evidence_id:input.dataset.paperEvidence,
+                        resource_evidence_id:input.dataset.resourceEvidence}));
+        const order=items=>items.map(item=>`${item.paper_evidence_id}|${item.resource_evidence_id}`).sort().join('\n');
+        if(order(selectedNow)!==order(pendingMatrixSelections)){notice('选择已变化；请重新预览后再确认。');break;}
+        const result=await api(`/runs/${current.id}/matrix/confirm`,{selections:pendingMatrixSelections});
+        pendingMatrixSelections=[];
+        document.querySelectorAll('input[name="matrix-selection"]').forEach(input=>{input.checked=false;});
+        const preview=document.querySelector('#matrix-import-preview');
+        preview.innerHTML=`<strong>已保存：新增 ${e(result.created?.length||0)} 篇论文，关联 ${e(result.linked?.length||0)} 条资源观察。</strong><p>${e(result.note||'')}</p>`;
+        document.querySelector('[data-action="matrix-confirm"]').hidden=true;
+        notice('所选论文和资源审计已加入文献库；重复项保持幂等，现有笔记没有覆盖。');
+        break;
+      }
       case 'reset-defaults':{
         const form=document.querySelector('#defaults-form');
         for(const [name,value] of Object.entries(SHIPPED_DEFAULTS)){const field=form.elements[name];if(!field)continue;if(field.type==='checkbox')field.checked=value;else field.value=value;}

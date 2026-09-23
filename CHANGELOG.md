@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Live Agent results to a reviewable resource matrix (#19)
+
+- Extend structured reports with evidence-bound candidate links between a paper tool result and a
+  completed `inspect_resource` audit. The runtime refuses missing/foreign evidence and preserves
+  the audit's unconfirmed attribution and unknown version-match state.
+- Derive a run-scoped matrix, JSON/Markdown/CSV downloads, and selected library-import payloads from
+  the same stored run evidence. The report view shows per-class coverage, provider status, candidate
+  source, locator and time, adapter/base-model limitations, and unlinked or failed resource checks.
+- Add batch selection → read-only preview → explicit confirmation. The existing source-derived
+  importer remains idempotent and leaves paper notes untouched; no model-supplied paper record is
+  accepted.
+- Offline Agent/MockTransport and Chromium flows exercise three papers, a shared baseline, an
+  adapter checkpoint, an unrelated same-name repository, a 404, exports and batch approval. This
+  does not satisfy the issue's real-model run and human review requirement; no live provider was used.
+
 ### Temporary guest sessions and one-step BYOK onboarding (#18)
 
 - Add an opt-in hosted guest entry: each visitor receives a separate two-hour owner, cookie and
