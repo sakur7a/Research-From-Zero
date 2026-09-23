@@ -218,11 +218,17 @@ can afford to fail silently.
   guessed, and `run.py` refuses a non-loopback `RE0_HOST` while the mode is local rather than letting
   an unauthenticated service listen on a network.
 - **A hosted start-up fails whole.** `require_startable()` collects every missing piece — session
-  secret, public entry, allowed origins — and raises once, naming all of them. One variable per
+  secret, public entry, allowed origins and an explicit storage contract — and raises once, naming
+  all of them. One variable per
   restart turns configuration into a guessing game, and the guess is usually "then it must be fine".
   It also refuses an http entry, a loopback origin in the allowlist (every visitor has their own
   localhost), `RE0_ALLOW_INSECURE_COOKIES`, and a documented example secret, including one repeated
   until it is long enough — because "太短" invites padding rather than generation.
+- **Storage mode is an operator contract.** `RE0_STORAGE_MODE=persistent` records that the host
+  retains both the SQLite file and workspace sources; `ephemeral-demo` declares that restarts may
+  lose them. The application does not infer a mounted disk from a path or manufacture a backup. When
+  `RENDER=true`, platform-provided URL/hostname values may supply Render defaults; explicit `RE0_*`
+  settings win, and a request's Host header is never used to configure trust.
 - **Identity.** `auth.py` stores opaque random session tokens as SHA-256, so a session can be
   revoked; a signed token cannot be, short of a blacklist, which is the same table with extra steps.
   Passwords are PBKDF2-HMAC-SHA256 at 210k rounds with a per-account salt. An unknown account still

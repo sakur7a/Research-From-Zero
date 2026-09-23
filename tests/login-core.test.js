@@ -12,7 +12,8 @@ import {loginFailure, loginRedirect, nextLabel, safeNext, sessionView} from '../
 
 const HOSTED_SIGNED_OUT = {
   identity: {user_id: '', workspace: '', authenticated: false, expires_at: ''},
-  deployment: {mode: 'hosted', auth_required: true, public_entry: 'https://re0.example.org'},
+  deployment: {mode: 'hosted', auth_required: true, public_entry: 'https://re0.example.org',
+               storage_mode: 'ephemeral-demo'},
   accounts_provisioned: 2,
   note: '托管模式：未登录时接口一律 401',
 };
@@ -98,6 +99,7 @@ test('the three states the page can be in come from the server, not from the URL
   assert.equal(signedOut.action, 'sign-in');
   assert.equal(signedOut.authenticated, false);
   assert.equal(signedOut.required, true);
+  assert.equal(signedOut.storageMode, 'ephemeral-demo');
   assert.equal(signedOut.next.path, '/library');
   assert.equal(signedOut.next.label, '文献库');
 
@@ -106,6 +108,7 @@ test('the three states the page can be in come from the server, not from the URL
   assert.equal(signedIn.who, 'usr_deadbeef');
   assert.equal(signedIn.workspace, 'ws_cafebabe');
   assert.equal(signedIn.expiresAt, '2026-09-23T12:00:00+00:00');
+  assert.equal(signedIn.storageMode, 'local');
   assert.equal(signedIn.next.path, '/');
 
   const local = sessionView(LOCAL, '/library');
@@ -113,6 +116,7 @@ test('the three states the page can be in come from the server, not from the URL
   // Local mode says so rather than showing a form that cannot work.
   assert.equal(local.required, false);
   assert.equal(local.mode, 'local');
+  assert.equal(local.storageMode, 'local');
 });
 
 test('nothing about a signed-out or local visitor invents an identity', () => {

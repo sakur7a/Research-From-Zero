@@ -81,7 +81,10 @@ def run(output):
         page.wait_for_function("!document.querySelector('#settings').open")
         page.locator('.topbar [data-action=settings]').click()
         assert page.locator('[name=api_key]').input_value()==''
-        assert '当前配置最晚有效至' in page.locator('#settings').inner_text()
+        saved_config=client.get('/api/agent/config').json()
+        assert saved_config['configured'] and saved_config['credential_expires_at'], saved_config
+        settings_text=page.locator('#settings').inner_text()
+        assert '当前配置最晚有效至' in settings_text, settings_text
         page.locator('[data-action=test-model]').click()
         page.wait_for_function("document.querySelector('#notice').textContent.includes('测试通过')")
         page.locator('[data-action=close-settings]').click()

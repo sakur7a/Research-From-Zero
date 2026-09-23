@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Hosted demo deployment contract (#17)
+
+- Require an explicit hosted storage contract (`persistent` or `ephemeral-demo`) and show the selected
+  mode through health/session/config responses; the login page warns before use when data is temporary.
+- Add one proposed Render Free Docker Blueprint. Read platform URL/hostname only when `RENDER=true`,
+  honor explicit `RE0_*` overrides, use injected `PORT`, and test the Render Host allowlist offline.
+- Add container build/start/health/Host validation plus a real hosted task `202 → poll → complete → export`
+  and remove/recreate cold-start check to CI. Its test-only fake model is outside the image and never
+  contacts a provider. The Render service and public URL are not created; the owner has not accepted
+  the temporary-storage and hosting decisions.
+
 ### Hosted model credential lifecycle and endpoint consistency (#16)
 
 - Apply the hosted public-address policy to transient model-list probes as well as saved model

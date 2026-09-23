@@ -5,6 +5,7 @@ services:
       - "127.0.0.1:8000:8000"
     environment:
       RE0_MODE: hosted
+      RE0_STORAGE_MODE: ${RE0_STORAGE_MODE:-persistent}
       RE0_SESSION_SECRET: ${RE0_SESSION_SECRET:-}
       RE0_PUBLIC_ENTRY: ${RE0_PUBLIC_ENTRY:-}
       RE0_ALLOWED_ORIGINS: ${RE0_ALLOWED_ORIGINS:-}

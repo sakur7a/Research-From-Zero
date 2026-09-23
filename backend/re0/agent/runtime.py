@@ -129,6 +129,7 @@ class AgentRuntime:
         `busy` is a fact about the process, and the lease says only whether the slot is theirs."""
         return {**self.vault.public(owner=owner), **self.busy_view(owner),
                 "runtime": "native-durable-tool-loop",
+                "deployment": self.deployment.describe(),
                 "quota": self.quota.describe(owner),
                 "web_search_enabled": self.tools.web_enabled,
                 "task_defaults": self.task_defaults(owner=owner).model_dump(),

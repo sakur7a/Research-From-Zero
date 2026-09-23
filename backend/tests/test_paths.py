@@ -242,18 +242,24 @@ def test_one_worker_is_a_fact_rather_than_a_default(monkeypatch):
     assert serve.server_kwargs({"RE0_HOST": "0.0.0.0", "RE0_PORT": "9000",
                                 "RE0_WORKERS": "4"})["workers"] == 1
     assert serve.server_kwargs({"RE0_HOST": "0.0.0.0"})["host"] == "0.0.0.0"
+    assert serve.server_kwargs({"PORT": "10000", "RE0_PORT": "8000"})["port"] == 10000
+    assert serve.server_kwargs({"RE0_PORT": "9000"})["port"] == 9000
 
 
 def test_a_nonsense_port_is_refused_before_uvicorn_is_called():
     from re0 import serve
 
-    for bad in ("http://8000", "8000-9000", "yes"):
-        with pytest.raises(SystemExit) as caught:
-            serve.server_kwargs({"RE0_PORT": bad})
-        assert "RE0_PORT" in str(caught.value)
+    for name in ("PORT", "RE0_PORT"):
+        for bad in ("http://8000", "8000-9000", "yes"):
+            with pytest.raises(SystemExit) as caught:
+                serve.server_kwargs({name: bad})
+            assert name in str(caught.value)
     with pytest.raises(SystemExit) as out_of_range:
         serve.server_kwargs({"RE0_PORT": "0"})
     assert "1–65535" in str(out_of_range.value)
+    with pytest.raises(SystemExit) as injected_out_of_range:
+        serve.server_kwargs({"PORT": "65536", "RE0_PORT": "8000"})
+    assert "PORT=65536" in str(injected_out_of_range.value)
 
 
 def test_startup_refuses_when_the_interface_files_are_missing(monkeypatch, tmp_path):
@@ -271,6 +277,7 @@ def test_startup_refuses_when_the_interface_files_are_missing(monkeypatch, tmp_p
         run=lambda *args, **kwargs: called.append(kwargs)))
     monkeypatch.setenv("RE0_HOST", "127.0.0.1")
     monkeypatch.delenv("RE0_PORT", raising=False)
+    monkeypatch.delenv("PORT", raising=False)
     monkeypatch.delenv("RE0_MODE", raising=False)
     monkeypatch.delenv("RE0_SESSION_SECRET", raising=False)
     monkeypatch.delenv("RE0_ENV_FILE", raising=False)

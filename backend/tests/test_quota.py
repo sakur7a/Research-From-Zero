@@ -21,7 +21,8 @@ from re0.quota import (BREAKER_FAILURE_THRESHOLD, CircuitBreaker, Quota,
 
 HOSTED = {"RE0_MODE": "hosted", "RE0_SESSION_SECRET": "a-hosted-secret-that-is-long-enough-to-use",
           "RE0_PUBLIC_ENTRY": "https://re0.example.org",
-          "RE0_ALLOWED_ORIGINS": "https://re0.example.org"}
+          "RE0_ALLOWED_ORIGINS": "https://re0.example.org",
+          "RE0_STORAGE_MODE": "ephemeral-demo"}
 WRITE = {"X-Re0-Client": "web", "Content-Type": "application/json"}
 CONFIG = {"base_url": "https://api.openai.com/v1", "model": "fixture-model",
           "api_key": "sk-test-do-not-persist", "trust_endpoint": True}
@@ -452,7 +453,7 @@ def test_doctor_prints_the_ceilings_and_a_bad_one_is_not_an_exit_zero(monkeypatc
     """`re0 doctor` is what an operator runs, and `create_app` raises on the same number."""
     from re0 import cli
 
-    for var in ("RE0_MODE", "RE0_SESSION_SECRET", "RE0_PUBLIC_ENTRY", "RE0_ALLOWED_ORIGINS",
+    for var in ("RE0_MODE", "RE0_SESSION_SECRET", "RE0_PUBLIC_ENTRY", "RE0_ALLOWED_ORIGINS", "RE0_STORAGE_MODE",
                 "RE0_REQUESTS_PER_MINUTE", "RE0_SITE_REQUESTS_PER_MINUTE", "RE0_TASKS_PER_HOUR"):
         monkeypatch.delenv(var, raising=False)
     assert cli.main(["doctor"]) == 0
@@ -479,6 +480,7 @@ def test_a_hosted_doctor_reports_the_defaults_it_will_enforce(monkeypatch, capsy
     monkeypatch.setenv("RE0_SESSION_SECRET", "a-hosted-secret-that-is-long-enough-to-use")
     monkeypatch.setenv("RE0_PUBLIC_ENTRY", "https://re0.example.org")
     monkeypatch.setenv("RE0_ALLOWED_ORIGINS", "https://re0.example.org")
+    monkeypatch.setenv("RE0_STORAGE_MODE", "persistent")
     assert cli.main(["doctor"]) == 0
     ceiling = _ceiling_line(capsys)
     assert "每账户请求/分钟 120" in ceiling and "每账户任务/小时 12" in ceiling

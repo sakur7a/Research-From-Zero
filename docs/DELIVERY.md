@@ -74,8 +74,8 @@ local test pass, or old CI run is not proof of this commit's remote CI outcome.
 
 Compose 将容器内服务绑定到 `0.0.0.0:8000`，但把宿主机端口只发布在
 `127.0.0.1:8000`。因为进程看不见 Docker 端口映射，模板明确使用
-`RE0_MODE=hosted`；`RE0_SESSION_SECRET`、`RE0_PUBLIC_ENTRY` 和
-`RE0_ALLOWED_ORIGINS` 留空时服务会拒绝启动，不会退回无登录的本地模式。
+`RE0_MODE=hosted`；`RE0_SESSION_SECRET`、`RE0_PUBLIC_ENTRY`、
+`RE0_ALLOWED_ORIGINS` 和 `RE0_STORAGE_MODE` 留空时服务会拒绝启动，不会退回无登录的本地模式。
 TLS 由同一台机器上受信任的反向代理终止，代理再连回环端口。不要把容器端口改成
 公网映射，也不要把本模板的存在当成公网安全验收。
 
@@ -96,7 +96,12 @@ docker compose run --rm --no-deps re0 python -m re0 auth secret
 RE0_SESSION_SECRET=<fresh-random-value>
 RE0_PUBLIC_ENTRY=https://research.example.org
 RE0_ALLOWED_ORIGINS=https://research.example.org
+RE0_STORAGE_MODE=persistent
 ```
+
+Compose 默认选择 `persistent`，并挂载名为 `re0_data` 的卷。这个变量是运营契约，不会探测
+卷是否真的挂载；备份和恢复步骤仍须按下文执行。临时演示环境应显式选择
+`RE0_STORAGE_MODE=ephemeral-demo`，并告知访问者重启或休眠会丢失 SQLite 与工作区文件。
 
 然后启动、创建首个账户：
 
@@ -135,3 +140,13 @@ docker compose run --rm --no-deps re0 python scripts/restore.py --source /app/.d
 
 Compose/镜像构建、真实 TLS 反代、第二用户和独立设备验收需要 Docker 引擎及受控部署环境；
 本仓库代码和离线测试不能替代这些发布门槛。
+
+### Render Free 演示模板
+
+仓库中的 [`render.yaml`](../render.yaml) 是唯一提议的免费演示路径，采用 Docker、单实例、
+`/api/health` 健康检查和手动部署。它显式声明 `ephemeral-demo`：Render Free 没有持久磁盘，
+休眠、重启或重新部署可能丢失数据库与工作区来源文件。页面会显示此限制。Blueprint 需要
+部署者填写 `RE0_SESSION_SECRET`；`RENDER=true` 时应用只从平台的
+`RENDER_EXTERNAL_URL` / `RENDER_EXTERNAL_HOSTNAME` 推导站点入口、来源与 Host allowlist，
+不会从访客请求猜测。部署前仍要由项目所有者确认数据丢失策略、托管账户和竞赛规则；本仓库
+当前没有创建 Render 服务，也没有公开 URL。

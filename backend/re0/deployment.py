@@ -7,7 +7,8 @@ Nothing about that is wrong for a local tool, and nothing about it survives bein
 
 So the mode is explicit, and the two modes fail differently. `local` is the default and needs no
 configuration, because there is nobody to configure it for. `hosted` refuses to start until the
-operator has supplied a session secret, a public HTTPS entry and the origins that may reach it —
+operator has supplied a session secret, a public HTTPS entry, allowed origins and an explicit storage
+contract —
 **every** missing piece is reported at once, rather than one per restart. The failure this exists to
 prevent is the silent kind: a service written for loopback becoming public because someone changed
 `RE0_HOST`, put a reverse proxy in front of it, or hid the settings button. None of those is a mode
@@ -20,6 +21,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 MODES = ("local", "hosted")
+STORAGE_MODES = ("ephemeral-demo", "persistent")
 LOCAL_OWNER = "local"
 MIN_SECRET_CHARS = 32
 SESSION_COOKIE = "re0_session"
@@ -59,6 +61,7 @@ class Deployment:
     session_secret: str = ""
     public_entry: str = ""
     allowed_origins: tuple[str, ...] = ()
+    storage_mode: str = "local"
     problems: tuple[str, ...] = ()
 
     @property
@@ -101,6 +104,7 @@ class Deployment:
         """Public description for `/api/health` and startup output. Contains no secret."""
         return {"mode": self.mode, "auth_required": self.auth_required,
                 "public_entry": self.public_entry, "allowed_origins": list(self.allowed_origins),
+                "storage_mode": self.storage_mode,
                 "session_secret_configured": bool(self.session_secret),
                 "problems": list(self.problems)}
 
@@ -127,9 +131,10 @@ def from_env(environ: dict | None = None) -> Deployment:
         # A local service still reads the origin allowlist, because an operator may run it behind a
         # loopback proxy on a non-default port. It never reads a session secret: nothing to sign.
         origins = _origins(env.get("RE0_ALLOWED_ORIGINS", ""))
-        return Deployment(mode="local", allowed_origins=origins)
+        return Deployment(mode="local", allowed_origins=origins, storage_mode="local")
 
     problems: list[str] = []
+    render = _render_enabled(env)
     secret = (env.get("RE0_SESSION_SECRET") or "").strip()
     if not secret:
         problems.append("RE0_SESSION_SECRET 未设置：托管模式需要一个至少 "
@@ -140,16 +145,28 @@ def from_env(environ: dict | None = None) -> Deployment:
         problems.append(f"RE0_SESSION_SECRET 太短（{len(secret)} < {MIN_SECRET_CHARS} 字符）")
 
     entry = (env.get("RE0_PUBLIC_ENTRY") or "").strip()
+    if not entry and render:
+        entry = _render_public_entry(env)
     if not entry:
-        problems.append("RE0_PUBLIC_ENTRY 未设置：托管模式需要声明对外的 https 入口（TLS 终止在哪一层）")
+        hint = "；Render 环境可使用平台提供的 RENDER_EXTERNAL_URL" if render else ""
+        problems.append("RE0_PUBLIC_ENTRY 未设置：托管模式需要声明对外的 https 入口（TLS 终止在哪一层）" + hint)
     else:
         parsed = urlsplit(entry)
         if parsed.scheme != "https" or not parsed.netloc:
             problems.append(f"RE0_PUBLIC_ENTRY 必须是 https 网址，收到 {entry!r}")
 
-    origins = _origins(env.get("RE0_ALLOWED_ORIGINS", ""))
+    origins_raw = (env.get("RE0_ALLOWED_ORIGINS") or "").strip()
+    if origins_raw:
+        origins = _origins(origins_raw)
+    elif render and entry:
+        # Render owns these values. This is a convenience for the selected template, not a general
+        # rule that guesses public origins from a request or an arbitrary Host header.
+        origins = (entry.rstrip("/"),)
+    else:
+        origins = ()
     if not origins:
-        problems.append("RE0_ALLOWED_ORIGINS 未设置：托管模式需要显式列出允许的来源（逗号分隔的 https 源）")
+        hint = "；Render 环境可使用平台入口作为唯一来源" if render else ""
+        problems.append("RE0_ALLOWED_ORIGINS 未设置：托管模式需要显式列出允许的来源（逗号分隔的 https 源）" + hint)
     elif entry:
         allowed = {item.rstrip("/") for item in origins}
         if entry.rstrip("/") not in allowed:
@@ -165,8 +182,76 @@ def from_env(environ: dict | None = None) -> Deployment:
     if env.get("RE0_ALLOW_INSECURE_COOKIES", "").strip().lower() in {"1", "true", "yes"}:
         problems.append("RE0_ALLOW_INSECURE_COOKIES 在托管模式下不被接受：会话 Cookie 必须是 Secure 的")
 
+    storage_mode = (env.get("RE0_STORAGE_MODE") or "").strip().lower()
+    if storage_mode not in STORAGE_MODES:
+        if not storage_mode:
+            problems.append("RE0_STORAGE_MODE 未设置：托管模式必须明确选择 ephemeral-demo（临时演示）或 persistent（持久卷）")
+        else:
+            problems.append(f"RE0_STORAGE_MODE 只能是 {' 或 '.join(STORAGE_MODES)}，收到 {storage_mode!r}")
+
     return Deployment(mode="hosted", session_secret=secret, public_entry=entry,
-                      allowed_origins=origins, problems=tuple(problems))
+                      allowed_origins=origins, storage_mode=storage_mode, problems=tuple(problems))
+
+
+def trusted_hosts_from_env(environ: dict | None = None) -> tuple[str, ...]:
+    """Host-header allowlist, with a Render hostname only in Render's declared environment.
+
+    An explicit RE0_ALLOWED_HOSTS replaces the defaults. Render's platform hostname is trusted only
+    when its documented RENDER flag is true; it is never learned from an inbound request.
+    """
+    env = os.environ if environ is None else environ
+    explicit = env.get("RE0_ALLOWED_HOSTS")
+    if explicit is not None:
+        return tuple(item.strip() for item in explicit.split(",") if item.strip())
+
+    allowed = ["localhost", "127.0.0.1", "[::1]", "testserver"]
+    if _render_enabled(env):
+        hostname = (env.get("RENDER_EXTERNAL_HOSTNAME") or "").strip()
+        if not _valid_hostname(hostname):
+            hostname = _hostname_from_url(env.get("RENDER_EXTERNAL_URL", ""))
+        if hostname and hostname not in allowed:
+            allowed.append(hostname)
+    return tuple(allowed)
+
+
+def _render_enabled(env: dict) -> bool:
+    return (env.get("RENDER") or "").strip().lower() == "true"
+
+
+def _render_public_entry(env: dict) -> str:
+    """Use only Render's platform URL; ignore malformed values and let startup refuse safely."""
+    raw_url = (env.get("RENDER_EXTERNAL_URL") or "").strip()
+    if raw_url:
+        try:
+            parsed = urlsplit(raw_url)
+            if (parsed.scheme == "https" and parsed.hostname and parsed.username is None
+                    and parsed.password is None and parsed.path in {"", "/"}
+                    and not parsed.query and not parsed.fragment):
+                port = parsed.port
+                return f"https://{parsed.hostname.lower()}" + (f":{port}" if port else "")
+        except ValueError:
+            pass
+    hostname = (env.get("RENDER_EXTERNAL_HOSTNAME") or "").strip()
+    return f"https://{hostname.lower()}" if _valid_hostname(hostname) else ""
+
+
+def _hostname_from_url(raw_url: str) -> str:
+    try:
+        parsed = urlsplit(raw_url)
+        if parsed.scheme == "https" and parsed.hostname and parsed.username is None and parsed.password is None:
+            return parsed.hostname.lower()
+    except ValueError:
+        pass
+    return ""
+
+
+def _valid_hostname(raw: str) -> bool:
+    try:
+        parsed = urlsplit("//" + raw)
+        return bool(parsed.hostname and parsed.port is None and not parsed.username and not parsed.password
+                    and not parsed.path and not parsed.query and not parsed.fragment)
+    except ValueError:
+        return False
 
 
 def _origins(raw: str) -> tuple[str, ...]:

@@ -10,13 +10,14 @@ from fastapi.testclient import TestClient
 
 from re0.auth import MAX_FAILED_ATTEMPTS, AccountStore, hash_password, new_secret, verify_password
 from re0.db import Database
-from re0.deployment import DeploymentError, from_env
+from re0.deployment import DeploymentError, from_env, trusted_hosts_from_env
 from re0.main import create_app
 from re0.models import PaperInput
 
 HOSTED = {"RE0_MODE": "hosted", "RE0_SESSION_SECRET": "a-hosted-secret-that-is-long-enough-to-use",
           "RE0_PUBLIC_ENTRY": "https://re0.example.org",
-          "RE0_ALLOWED_ORIGINS": "https://re0.example.org"}
+          "RE0_ALLOWED_ORIGINS": "https://re0.example.org",
+          "RE0_STORAGE_MODE": "ephemeral-demo"}
 WRITE = {"X-Re0-Client": "web", "Content-Type": "application/json"}
 PASSWORD = "a-password-nobody-guesses"
 
@@ -71,7 +72,7 @@ def test_hosted_mode_refuses_to_start_and_names_everything_missing_at_once():
     with pytest.raises(DeploymentError) as caught:
         from_env({"RE0_MODE": "hosted"}).require_startable()
     message = str(caught.value)
-    for required in ("RE0_SESSION_SECRET", "RE0_PUBLIC_ENTRY", "RE0_ALLOWED_ORIGINS"):
+    for required in ("RE0_SESSION_SECRET", "RE0_PUBLIC_ENTRY", "RE0_ALLOWED_ORIGINS", "RE0_STORAGE_MODE"):
         assert required in message, message
     assert "拒绝启动" in message
 
@@ -86,6 +87,70 @@ def test_a_documented_example_secret_is_not_a_secret():
         from_env({**HOSTED, "RE0_SESSION_SECRET": "short"}).require_startable()
     # A generated one is accepted, which is the only way this check is useful rather than ornamental.
     assert from_env({**HOSTED, "RE0_SESSION_SECRET": new_secret()}).require_startable().hosted
+
+
+def test_hosted_mode_requires_an_explicit_storage_contract():
+    with pytest.raises(DeploymentError, match="RE0_STORAGE_MODE"):
+        from_env({key: value for key, value in HOSTED.items() if key != "RE0_STORAGE_MODE"}).require_startable()
+    with pytest.raises(DeploymentError, match="ephemeral-demo.*persistent"):
+        from_env({**HOSTED, "RE0_STORAGE_MODE": "guess"}).require_startable()
+    assert from_env({**HOSTED, "RE0_STORAGE_MODE": "persistent"}).require_startable().storage_mode == "persistent"
+
+
+def test_render_environment_supplies_only_its_declared_public_entry():
+    deployment = from_env({
+        "RE0_MODE": "hosted", "RE0_SESSION_SECRET": HOSTED["RE0_SESSION_SECRET"],
+        "RE0_STORAGE_MODE": "ephemeral-demo", "RENDER": "true",
+        "RENDER_EXTERNAL_URL": "https://re0-render.onrender.com",
+        "RENDER_EXTERNAL_HOSTNAME": "re0-render.onrender.com"}).require_startable()
+    assert deployment.public_entry == "https://re0-render.onrender.com"
+    assert deployment.allowed_origins == ("https://re0-render.onrender.com",)
+    assert deployment.storage_mode == "ephemeral-demo"
+
+
+def test_explicit_render_entry_and_origin_override_platform_defaults():
+    configured = from_env({
+        "RE0_MODE": "hosted", "RE0_SESSION_SECRET": HOSTED["RE0_SESSION_SECRET"],
+        "RE0_STORAGE_MODE": "persistent", "RENDER": "true",
+        "RENDER_EXTERNAL_URL": "https://auto.onrender.com",
+        "RENDER_EXTERNAL_HOSTNAME": "auto.onrender.com",
+        "RE0_PUBLIC_ENTRY": "https://custom.example.org",
+        "RE0_ALLOWED_ORIGINS": "https://custom.example.org,https://admin.example.org",
+    }).require_startable()
+    assert configured.public_entry == "https://custom.example.org"
+    assert configured.allowed_origins == ("https://custom.example.org", "https://admin.example.org")
+    assert configured.storage_mode == "persistent"
+
+
+def test_render_platform_entry_is_not_guessed_outside_render_or_from_a_bad_url():
+    base = {"RE0_MODE": "hosted", "RE0_SESSION_SECRET": HOSTED["RE0_SESSION_SECRET"],
+            "RE0_STORAGE_MODE": "ephemeral-demo", "RENDER_EXTERNAL_URL": "https://auto.onrender.com"}
+    with pytest.raises(DeploymentError, match="RE0_PUBLIC_ENTRY"):
+        from_env(base).require_startable()
+    with pytest.raises(DeploymentError, match="RE0_PUBLIC_ENTRY"):
+        from_env({**base, "RENDER": "true", "RENDER_EXTERNAL_URL": "http://auto.onrender.com"}).require_startable()
+
+
+def test_render_host_allowlist_uses_only_platform_values_and_honors_override():
+    render = {"RENDER": "true", "RENDER_EXTERNAL_HOSTNAME": "re0-render.onrender.com"}
+    assert trusted_hosts_from_env(render) == (
+        "localhost", "127.0.0.1", "[::1]", "testserver", "re0-render.onrender.com")
+    assert trusted_hosts_from_env({"RENDER": "true", "RENDER_EXTERNAL_HOSTNAME": "re0-render.onrender.com",
+                                   "RE0_ALLOWED_HOSTS": "custom.example.org"}) == ("custom.example.org",)
+    assert "re0-render.onrender.com" not in trusted_hosts_from_env(
+        {"RENDER_EXTERNAL_HOSTNAME": "re0-render.onrender.com"})
+
+
+def test_render_host_is_accepted_but_an_unlisted_host_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("RENDER_EXTERNAL_HOSTNAME", "re0-render.onrender.com")
+    monkeypatch.delenv("RE0_ALLOWED_HOSTS", raising=False)
+    client = TestClient(hosted(tmp_path), base_url="https://re0-render.onrender.com")
+    health = client.get("/api/health")
+    assert health.status_code == 200, health.text
+    assert health.json()["storage_mode"] == "ephemeral-demo"
+    refused = client.get("/api/health", headers={"host": "attacker.invalid"})
+    assert refused.status_code == 400
 
 
 def test_an_http_entry_or_an_insecure_cookie_override_is_refused():
@@ -276,6 +341,7 @@ def test_login_logout_and_who_am_i(tmp_path):
     me = alice.get("/api/auth/session").json()
     assert me["identity"]["authenticated"] is True and me["identity"]["user_id"]
     assert me["deployment"]["mode"] == "hosted"
+    assert me["deployment"]["storage_mode"] == "ephemeral-demo"
     # The cookie is HttpOnly and SameSite=Strict, and Secure because the entry is https.
     cookie = [item for item in alice.cookies.jar][0]
     assert cookie.name == "re0_session"
@@ -621,7 +687,7 @@ def test_the_launcher_checks_the_deployment_before_anything_listens(monkeypatch)
     launcher = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(launcher)
 
-    for var in ("RE0_MODE", "RE0_SESSION_SECRET", "RE0_PUBLIC_ENTRY", "RE0_ALLOWED_ORIGINS"):
+    for var in ("RE0_MODE", "RE0_SESSION_SECRET", "RE0_PUBLIC_ENTRY", "RE0_ALLOWED_ORIGINS", "RE0_STORAGE_MODE"):
         monkeypatch.delenv(var, raising=False)
     launcher.check_deployment("127.0.0.1")
     with pytest.raises(SystemExit) as bound:
@@ -631,11 +697,12 @@ def test_the_launcher_checks_the_deployment_before_anything_listens(monkeypatch)
     monkeypatch.setenv("RE0_MODE", "hosted")
     with pytest.raises(SystemExit) as missing:
         launcher.check_deployment("0.0.0.0")
-    for required in ("RE0_SESSION_SECRET", "RE0_PUBLIC_ENTRY", "RE0_ALLOWED_ORIGINS"):
+    for required in ("RE0_SESSION_SECRET", "RE0_PUBLIC_ENTRY", "RE0_ALLOWED_ORIGINS", "RE0_STORAGE_MODE"):
         assert required in str(missing.value), missing.value
     monkeypatch.setenv("RE0_SESSION_SECRET", new_secret())
     monkeypatch.setenv("RE0_PUBLIC_ENTRY", "https://re0.example.org")
     monkeypatch.setenv("RE0_ALLOWED_ORIGINS", "https://re0.example.org")
+    monkeypatch.setenv("RE0_STORAGE_MODE", "persistent")
     launcher.check_deployment("0.0.0.0")
 
 
@@ -643,7 +710,7 @@ def test_doctor_says_which_mode_would_run_and_exits_non_zero_when_it_could_not(m
     """`doctor` is what an operator checks first, so "could not start" cannot be an exit-0 line."""
     from re0 import cli
 
-    for var in ("RE0_MODE", "RE0_SESSION_SECRET", "RE0_PUBLIC_ENTRY", "RE0_ALLOWED_ORIGINS"):
+    for var in ("RE0_MODE", "RE0_SESSION_SECRET", "RE0_PUBLIC_ENTRY", "RE0_ALLOWED_ORIGINS", "RE0_STORAGE_MODE"):
         monkeypatch.delenv(var, raising=False)
     assert cli.main(["doctor"]) == 0
     out = capsys.readouterr().out
@@ -653,12 +720,13 @@ def test_doctor_says_which_mode_would_run_and_exits_non_zero_when_it_could_not(m
     assert cli.main(["doctor"]) == 2
     out = capsys.readouterr().out
     assert "deployment: hosted" in out and "拒绝启动" in out
-    for required in ("RE0_SESSION_SECRET", "RE0_PUBLIC_ENTRY", "RE0_ALLOWED_ORIGINS"):
+    for required in ("RE0_SESSION_SECRET", "RE0_PUBLIC_ENTRY", "RE0_ALLOWED_ORIGINS", "RE0_STORAGE_MODE"):
         assert required in out, out
 
     monkeypatch.setenv("RE0_SESSION_SECRET", new_secret())
     monkeypatch.setenv("RE0_PUBLIC_ENTRY", "https://re0.example.org")
     monkeypatch.setenv("RE0_ALLOWED_ORIGINS", "https://re0.example.org")
+    monkeypatch.setenv("RE0_STORAGE_MODE", "persistent")
     assert cli.main(["doctor"]) == 0
     out = capsys.readouterr().out
     assert "re0.example.org" in out and "create-user" in out

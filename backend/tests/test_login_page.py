@@ -18,7 +18,8 @@ from re0.quota import Quota
 
 HOSTED = {"RE0_MODE": "hosted", "RE0_SESSION_SECRET": "a-hosted-secret-that-is-long-enough-to-use",
           "RE0_PUBLIC_ENTRY": "https://re0.example.org",
-          "RE0_ALLOWED_ORIGINS": "https://re0.example.org"}
+          "RE0_ALLOWED_ORIGINS": "https://re0.example.org",
+          "RE0_STORAGE_MODE": "ephemeral-demo"}
 WRITE = {"X-Re0-Client": "web", "Content-Type": "application/json"}
 PASSWORD = "a-password-nobody-guesses"
 # The two sentences `login-core.js` quotes back to the reader. They are one string in two languages on
@@ -76,6 +77,7 @@ def test_the_page_and_the_modules_it_imports_all_travel_with_the_service(tmp_pat
     # The import graph the page depends on, resolved from the served source.
     assert "./login-core.js" in client.get("/static/login.js").text
     assert "./theme.js" in client.get("/static/login.js").text
+    assert "storage-warning" in client.get("/static/login.html").text
     # `api.js` is what bounces a signed-out page to the door; if that wiring is lost, the pages go
     # quiet instead of sending the reader to the login they need.
     helper = client.get("/static/api.js").text
@@ -132,6 +134,8 @@ def test_the_session_endpoint_answers_what_sessionview_reads(tmp_path):
     payload = browser(hosted(tmp_path)).get("/api/auth/session").json()
     assert payload["deployment"]["auth_required"] is True
     assert payload["deployment"]["mode"] == "hosted"
+    assert payload["deployment"]["storage_mode"] == "ephemeral-demo"
+    assert payload["deployment"]["session_secret_configured"] is True
     assert payload["identity"]["authenticated"] is False
     assert payload["identity"]["user_id"] == "" and payload["identity"]["workspace"] == ""
     assert isinstance(payload["accounts_provisioned"], int)

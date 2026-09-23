@@ -53,12 +53,14 @@ def server_kwargs(environ=None) -> dict:
     """
     env = os.environ if environ is None else environ
     host = (env.get("RE0_HOST") or "127.0.0.1").strip()
+    port_name = "PORT" if (env.get("PORT") or "").strip() else "RE0_PORT"
+    port_value = (env.get("PORT") or env.get("RE0_PORT") or "8000").strip()
     try:
-        port = int((env.get("RE0_PORT") or "8000").strip())
+        port = int(port_value)
     except ValueError as exc:
-        raise SystemExit(f"RE0_PORT 必须是整数端口，收到 {env.get('RE0_PORT')!r}") from exc
+        raise SystemExit(f"{port_name} 必须是整数端口，收到 {port_value!r}") from exc
     if not 1 <= port <= 65535:
-        raise SystemExit(f"RE0_PORT={port} 不在可监听范围内（1–65535）")
+        raise SystemExit(f"{port_name}={port} 不在可监听范围内（1–65535）")
     return {"host": host, "port": port, "workers": 1}
 
 

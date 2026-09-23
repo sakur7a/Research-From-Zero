@@ -76,6 +76,8 @@ export function sessionView(payload, next) {
     required,
     authenticated,
     mode: deployment.mode === 'hosted' ? 'hosted' : 'local',
+    storageMode: deployment.storage_mode === 'ephemeral-demo' ? 'ephemeral-demo'
+      : (deployment.storage_mode === 'persistent' ? 'persistent' : 'local'),
     who: authenticated ? String(identity.user_id || '') : '',
     workspace: authenticated ? String(identity.workspace || '') : '',
     expiresAt: authenticated ? String(identity.expires_at || '') : '',

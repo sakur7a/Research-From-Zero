@@ -48,6 +48,7 @@ export RE0_MODE=hosted
 export RE0_SESSION_SECRET=...        # 至少 32 字符；文档里出现过的示例值（含重复拼凑到够长的）会被拒绝
 export RE0_PUBLIC_ENTRY=https://re0.example.org      # 对外的 https 入口，TLS 在哪一层终止
 export RE0_ALLOWED_ORIGINS=https://re0.example.org   # 逗号分隔的 https 源
+export RE0_STORAGE_MODE=persistent                  # persistent 要求平台实际挂载持久卷；临时演示选 ephemeral-demo
 python -m re0 auth create-user       # 开户：密码从终端提示读，不是命令行参数
 python run.py
 ```
@@ -58,7 +59,9 @@ python run.py
 
 ### Docker Compose（托管模式模板）
 
-`compose.yaml` 只提供托管模式模板：端口仅发布到宿主机回环地址；必须配置会话密钥、HTTPS 入口和允许来源，缺失时应用拒绝启动。它不含 TLS 终端，也没有经过真实反向代理或第二账户验收，**不能据此把服务开放到公网**。构建、开户、备份与恢复步骤见[交付说明](docs/DELIVERY.md)。
+`compose.yaml` 只提供托管模式模板：端口仅发布到宿主机回环地址；必须配置会话密钥、HTTPS 入口、允许来源和存储策略，缺失时应用拒绝启动。它不含 TLS 终端，也没有经过真实反向代理或第二账户验收，**不能据此把服务开放到公网**。构建、开户、备份与恢复步骤见[交付说明](docs/DELIVERY.md)。
+
+参赛 Web Demo 当前只准备了一条线上候选路径：Render Free Docker Blueprint（[`render.yaml`](render.yaml)）。它采用临时文件系统，页面会提示重启、休眠或重新部署可能丢失数据；配置和本地容器 CI 不等于已部署。宿主、存储策略、预算及竞赛规则仍须由项目所有者确认，完整边界见[部署决策记录](docs/DEPLOYMENT_ADR.md)。
 
 ## v0.2 已实现的架构
 
@@ -129,11 +132,13 @@ python run.py
 | `OPENREVIEW_TOKEN` | 可选：OpenReview 的公开检索不需要账号，token 用于更宽的读取范围 |
 | `GITHUB_TOKEN` | 可选 GitHub API 凭证，仅发往 GitHub API |
 | `RE0_DB` | SQLite 路径，默认仓库下 `.data/re0.sqlite3` |
-| `RE0_HOST` / `RE0_PORT` | 默认 `127.0.0.1:8000`。**`local` 模式下 `RE0_HOST` 只能填回环地址**，否则 `run.py` 拒绝启动：无认证的服务绑到 `0.0.0.0` 不是配置，是开门 |
+| `RE0_HOST` / `RE0_PORT` / `PORT` | 默认 `127.0.0.1:8000`；平台设置的 `PORT` 优先。**`local` 模式下 `RE0_HOST` 只能填回环地址**，否则 `run.py` 拒绝启动：无认证的服务绑到 `0.0.0.0` 不是配置，是开门 |
 | `RE0_MODE` | `local`（默认）或 `hosted`。不声明就是 `local`；服务不会根据绑定地址去猜 |
 | `RE0_SESSION_SECRET` | `hosted` 必需，至少 32 字符随机值（`python -m re0 auth secret` 生成）。文档里出现过的示例值会被拒绝，**包括重复拼凑到够长的那种** |
-| `RE0_PUBLIC_ENTRY` | `hosted` 必需：对外的 https 入口，也就是 TLS 在哪一层终止。http 会被拒绝 |
-| `RE0_ALLOWED_ORIGINS` | `hosted` 必需：逗号分隔的 https 源，且必须包含 `RE0_PUBLIC_ENTRY` 自己。`localhost` 源在托管模式下不被接受 |
+| `RE0_PUBLIC_ENTRY` | `hosted` 必需：对外的 https 入口，也就是 TLS 在哪一层终止。http 会被拒绝；Render 上 `RENDER=true` 时可从平台 `RENDER_EXTERNAL_URL` 读取 |
+| `RE0_ALLOWED_ORIGINS` | `hosted` 必需：逗号分隔的 https 源，且必须包含 `RE0_PUBLIC_ENTRY` 自己。`localhost` 源在托管模式下不被接受；Render 自动入口可作为唯一来源 |
+| `RE0_ALLOWED_HOSTS` | 可选：逗号分隔的 Host 白名单；显式设置会替换默认列表。未设置时，Render 环境仅在 `RENDER=true` 下加入平台 hostname |
+| `RE0_STORAGE_MODE` | `hosted` 必需：`persistent` 表示部署方承诺提供持久卷；`ephemeral-demo` 表示重启/休眠可能丢失数据库和工作区文件。该声明不会检测或创建持久卷 |
 | `RE0_ALLOW_INSECURE_COOKIES` | **只用于被拒绝**：托管模式下设了它就是启动失败，因为会话 Cookie 必须带 `Secure`。它存在的意义是让一个从别处抄来的开关不会静默生效 |
 | `RE0_REQUESTS_PER_MINUTE` | 每个账户每秒级窗口内可打多少次 `/api/*`，托管模式默认 **120**，本地模式默认 **0（不限）**。窗口是**滑动**的，不是整分钟重置的桶：按固定桶计数时，攻击者可以在 59.9 秒和 60.1 秒各花掉一整桶。计数键是已验证身份，`X-Forwarded-For` 之类的头部伪造不出新桶 |
 | `RE0_TASKS_PER_HOUR` | 每个账户每小时可启动多少轮**会花钱**的工作（提交/追问/重试/恢复共用同一个桶），托管模式默认 **12**，本地默认不限。被忙、被熔断挡下的请求**不扣这个数**——只有真正启动的一轮才算 |

@@ -76,7 +76,7 @@ def print_deployment() -> bool:
         return False
     if deployment.hosted:
         print(f"            对外入口 {deployment.public_entry}；"
-              f"允许的来源 {len(deployment.allowed_origins)} 个")
+              f"允许的来源 {len(deployment.allowed_origins)} 个；存储契约 {deployment.storage_mode}")
         print("            每个 /api/* 接口都需要登录会话；账户用 `python -m re0 auth create-user` 开")
     else:
         print("            单人本地模式：没有账户也没有登录这一步，只应绑回环地址；")

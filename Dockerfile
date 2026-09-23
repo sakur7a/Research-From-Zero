@@ -11,5 +11,5 @@ COPY --chown=re0:re0 scripts/restore.py /app/scripts/restore.py
 COPY --chown=re0:re0 run.py /app/run.py
 USER re0
 EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=3s CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)" || exit 1
+HEALTHCHECK --interval=30s --timeout=3s CMD python -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/api/health' % os.getenv('PORT', '8000'), timeout=2)" || exit 1
 CMD ["python", "run.py"]

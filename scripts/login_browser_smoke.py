@@ -40,7 +40,8 @@ from re0.main import create_app
 
 ORIGIN = "https://re0.test"
 HOSTED = {"RE0_MODE": "hosted", "RE0_SESSION_SECRET": "a-long-enough-secret-for-this-smoke-run",
-          "RE0_PUBLIC_ENTRY": ORIGIN, "RE0_ALLOWED_ORIGINS": ORIGIN}
+          "RE0_PUBLIC_ENTRY": ORIGIN, "RE0_ALLOWED_ORIGINS": ORIGIN,
+          "RE0_STORAGE_MODE": "ephemeral-demo"}
 PASSWORD = "a-password-nobody-guesses"
 # Headers that describe the bytes httpx already decoded. Forwarding them over a fulfilled response
 # would tell the browser to decode a body that is not encoded. `set-cookie` is deliberately *not* in
@@ -114,6 +115,7 @@ def run(output_dir: Path):
         assert "这台服务不需要登录" in text, text
         assert page.is_hidden("#login-form"), "local mode offered a form that cannot work"
         assert page.is_hidden("#signed-in"), "the local page claimed a session it cannot have"
+        assert page.is_hidden("#storage-warning"), "the local page showed a hosted storage warning"
         page.screenshot(path=str(output_dir / "01-local-mode.png"), full_page=True)
         assert not errors, errors
         completed.append("local_mode_refuses_to_pretend_there_is_a_login")
@@ -125,6 +127,9 @@ def run(output_dir: Path):
         app, client, context, page = session(first, deployment=from_env(HOSTED).require_startable())
         page.goto(f"{ORIGIN}/login")
         page.wait_for_selector("#login-form:not([hidden])")
+        assert page.is_visible("#storage-warning"), "temporary hosted storage was not disclosed before login"
+        warning = page.inner_text("#storage-warning")
+        assert "重启" in warning and "工作区文件" in warning, warning
         assert page.inner_text("#door-alt").strip(), "the empty-account hint did not render"
         assert "auth create-user" in page.inner_text("#door-alt")
         assert page.is_visible("#username") and page.is_visible("#password")

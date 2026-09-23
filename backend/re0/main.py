@@ -34,7 +34,7 @@ from .agent.model import ModelError
 from . import __version__
 from .auth import SESSION_TTL, AccountStore, Identity, anonymous_identity, local_identity
 from .db import Database
-from .deployment import SESSION_COOKIE, Deployment, DeploymentError, from_env
+from .deployment import SESSION_COOKIE, Deployment, DeploymentError, from_env, trusted_hosts_from_env
 from .models import (MetadataRequest, PaperInput, ResearchRelationInput,
                      ResearchTemplateDefinition, ResourceAudit, ResourceInput,
                      TopicAssignmentInput, TopicInput)
@@ -198,7 +198,7 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
     demo_guard = threading.Lock()
     metadata_guard = threading.Lock()
     metadata_last: dict[str, tuple[float, dict]] = {}
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=os.getenv("RE0_ALLOWED_HOSTS", "localhost,127.0.0.1,[::1],testserver").split(","))
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts_from_env())
 
     def session_token(request: Request) -> str:
         return request.cookies.get(SESSION_COOKIE, "")
@@ -400,7 +400,8 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
         if not deployment.auth_required:
             configured = agent.vault.public(owner=request.state.identity.owner)["configured"]
         return {"status": "ok", "version": __version__, "mode": deployment.mode,
-                "auth_required": deployment.auth_required, "llm_enabled": configured,
+                "auth_required": deployment.auth_required, "storage_mode": deployment.storage_mode,
+                "llm_enabled": configured,
                 "agent_runtime": "native-durable-tool-loop",
                 # Site facts only, and published on purpose: an operator deciding whether to back off,
                 # and a reader who just got a 429, both need the same numbers. Nobody's own usage,

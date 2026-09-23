@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: re0-research-demo
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    numInstances: 1
+    healthCheckPath: /api/health
+    autoDeployTrigger: "off"
+    envVars:
+      - key: RE0_MODE
+        value: hosted
+      - key: RE0_STORAGE_MODE
+        value: ephemeral-demo
+      - key: RE0_SESSION_SECRET
+        sync: false

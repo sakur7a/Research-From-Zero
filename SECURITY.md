@@ -17,9 +17,13 @@ process/worker per SQLite file.
 
 **`RE0_MODE=hosted` requires an identity and refuses to start without one:**
 `RE0_SESSION_SECRET` (at least 32 characters; `python -m re0 auth secret` prints
-one, once), `RE0_PUBLIC_ENTRY` (the https URL TLS terminates at) and
-`RE0_ALLOWED_ORIGINS`. Start-up names every missing item at once and never falls
-back to local mode silently. An http entry, `RE0_ALLOW_INSECURE_COOKIES` and a
+one, once), `RE0_PUBLIC_ENTRY` (the https URL TLS terminates at),
+`RE0_ALLOWED_ORIGINS`, and an explicit `RE0_STORAGE_MODE` (`persistent` or
+`ephemeral-demo`). Start-up names every missing item at once and never falls
+back to local mode silently. On Render only, `RENDER=true` permits the service
+to read the platform's `RENDER_EXTERNAL_URL` and `RENDER_EXTERNAL_HOSTNAME` as
+defaults; explicitly configured `RE0_*` values take precedence. An http entry,
+`RE0_ALLOW_INSECURE_COOKIES` and a
 documented example secret — including one padded until it is long enough — are
 each a start-up refusal. Accounts are provisioned by an operator from the console
 (`python -m re0 auth create-user`); **there is no registration endpoint**, and a
@@ -31,6 +35,13 @@ into an enumeration oracle. Loopback model destinations are refused, and a model
 host whose resolution is not entirely public is refused with no opt-out:
 `RE0_ALLOW_LOCAL_RESOLVER` is a single-user setting and hosted mode says so
 instead of pointing at it.
+
+`RE0_STORAGE_MODE` records the operator's storage contract; it does not prove a
+volume is mounted or perform a backup. `persistent` is valid only when the host
+really retains both SQLite and `/app/.data/workspaces` across restarts. The
+Render Free template uses `ephemeral-demo`; its login page warns visitors that
+service sleep, restart or redeploy can lose database and workspace files. Do not
+put the only copy of research data there.
 
 **Hosted mode is not yet a deliverable.** The door exists — `/login`, with every
 page bouncing a 401 to it — and so do quotas, rate limiting and the site-wide

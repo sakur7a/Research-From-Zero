@@ -18,6 +18,7 @@ const els = {
   cont: document.getElementById('continue-link'),
   logout: document.getElementById('logout'),
   noLogin: document.getElementById('no-login'),
+  storageWarning: document.getElementById('storage-warning'),
   notice: document.getElementById('door-notice'),
   foot: document.getElementById('door-foot'),
 };
@@ -46,6 +47,7 @@ function notice(kind, text, hint) {
 }
 
 function render() {
+  els.storageWarning.hidden = view.storageMode !== 'ephemeral-demo';
   els.form.hidden = view.action !== 'sign-in';
   els.signed.hidden = view.action !== 'signed-in';
   els.noLogin.hidden = view.action !== 'no-login';
