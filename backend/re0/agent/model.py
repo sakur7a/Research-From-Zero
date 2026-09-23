@@ -47,7 +47,27 @@ MODEL_LIST_BYTES = 512 * 1024
 
 
 class ModelError(Exception):
-    """Only application-authored, credential-free messages may be exposed."""
+    """Only application-authored, credential-free messages may be exposed.
+
+    `destination` marks the failures that say something about the *service* rather than about this
+    one caller's credential: unreachable, timed out, or answering with a server error. It is the only
+    kind the site-wide circuit breaker counts, because one account's wrong key or empty balance must
+    not be able to stop everybody else's work.
+    """
+
+    def __init__(self, message: str, *, destination: bool = False):
+        super().__init__(message)
+        self.destination = destination
+
+
+# 408 and 429 are "the service could not take this right now" and 5xx is the service's own failure, so
+# a run of them describes an outage. 401/402/403/404 describe a credential, a balance or a model name
+# this caller got wrong: retrying them will not help anybody, and stopping them is not the site's job.
+DESTINATION_STATUSES = frozenset({408, 429})
+
+
+def _is_destination_status(status: int) -> bool:
+    return status in DESTINATION_STATUSES or status >= 500
 
 
 def validate_endpoint(config: "ModelConfig | ModelListRequest", *, hosted: bool = False):
@@ -241,12 +261,14 @@ class ChatModel:
                 with client.stream("POST", self.config.base_url + "/chat/completions", json=payload, headers=headers) as response:
                     if response.status_code != 200:
                         # Do not leak provider error bodies, request headers, URLs or keys.
-                        raise ModelError(f"模型接口返回 HTTP {response.status_code}；请检查权限、余额、模型名、工具调用支持和 token 参数")
+                        raise ModelError(
+                            f"模型接口返回 HTTP {response.status_code}；请检查权限、余额、模型名、工具调用支持和 token 参数",
+                            destination=_is_destination_status(response.status_code))
                     body = bytearray()
                     for chunk in response.iter_bytes():
                         body.extend(chunk)
                         if len(body) > 2 * 1024 * 1024 or time.monotonic() > end:
-                            raise ModelError("模型响应超过大小或时间上限；本次结果未采纳")
+                            raise ModelError("模型响应超过大小或时间上限；本次结果未采纳", destination=True)
             obj = json.loads(body)
             choice = obj["choices"][0]
             msg = choice["message"]
@@ -275,7 +297,8 @@ class ChatModel:
             counts = {name: min(10**8, max(0, int(usage.get(name, 0)))) for name in ("prompt_tokens", "completion_tokens", "total_tokens")}
             return {"message": assistant, "usage": counts, "usage_reported": bool(usage)}
         except httpx.HTTPError as exc:
-            raise ModelError("模型连接或读取失败；检查网络和模型服务地址。没有自动切换服务，也没有自动重试付费请求") from exc
+            raise ModelError("模型连接或读取失败；检查网络和模型服务地址。没有自动切换服务，也没有自动重试付费请求",
+                             destination=True) from exc
         except (KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
             raise ModelError("模型响应不符合 Chat Completions tool_calls 协议") from exc
 

@@ -37,6 +37,7 @@ from .db import Database
 from .deployment import SESSION_COOKIE, Deployment, DeploymentError, from_env
 from .models import MetadataRequest, PaperInput, ResourceAudit, ResourceInput, TopicInput
 from .providers import ProviderError, check_resource, resolve_metadata
+from .quota import Quota
 from .resource_audit import audit_from_observation
 from .service import Store, bibtex_export, validation_message
 from .zotero import Connection, ZoteroClient, ZoteroError, ZoteroStore
@@ -112,15 +113,17 @@ class ZoteroConnect(ZoteroLibrary):
 
 
 def create_app(db_path: str | None = None, transport=None, model_factory=None,
-               deployment: Deployment | None = None) -> FastAPI:
+               deployment: Deployment | None = None, quota: Quota | None = None) -> FastAPI:
     # Refusing here instead of degrading is the point. A hosted deployment with no session secret has
     # no correct fallback, and choosing one silently is how an unauthenticated service ends up
     # listening on a public address.
     deployment = (deployment if deployment is not None else from_env()).require_startable()
     store = Store(Database(db_path or os.getenv("RE0_DB", str(ROOT / ".data/re0.sqlite3"))))
     accounts = AccountStore(store.db)
+    # The ceilings are read once, here, so the middleware and the runtime cannot disagree about them.
+    quota = quota if quota is not None else Quota.from_env(os.environ, hosted=deployment.hosted)
     agent = AgentRuntime(store, transport=transport, model_factory=model_factory,
-                         deployment=deployment)
+                         deployment=deployment, quota=quota)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -132,6 +135,7 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
     app.state.agent = agent
     app.state.deployment = deployment
     app.state.accounts = accounts
+    app.state.quota = quota
     app.include_router(agent_router(agent))
 
     @app.exception_handler(ModelError)
@@ -188,6 +192,15 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
     @app.middleware("http")
     async def request_guard(request: Request, call_next):
         path = request.url.path
+        identity = identity_for(request) if path.startswith("/api") else None
+        if identity is not None:
+            # Counted before anything else is decided, so a request that is refused for another reason
+            # still occupies the window it arrived in. Otherwise a flood of malformed writes would be
+            # free to send, and the ceiling would only ever apply to well-formed traffic.
+            gate = quota.check_request(identity.owner)
+            if not gate["allowed"]:
+                return JSONResponse({"detail": gate["message"]}, status_code=429,
+                                    headers={"Retry-After": str(int(gate["retry_after"]) + 1)})
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             client = request.headers.get("x-re0-client")
             origin = request.headers.get("origin")
@@ -214,7 +227,6 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
                     return JSONResponse({"detail": "请求体不能超过 4 MiB"}, 413)
             request._body = bytes(body)
 
-        identity = identity_for(request) if path.startswith("/api") else None
         if deployment.auth_required and path.startswith("/api") and path not in OPEN_API_PATHS:
             if not identity.authenticated:
                 # 401, not 403: nothing about this caller has been established, and the answer must
@@ -289,7 +301,12 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
             configured = agent.vault.public(owner=request.state.identity.owner)["configured"]
         return {"status": "ok", "version": __version__, "mode": deployment.mode,
                 "auth_required": deployment.auth_required, "llm_enabled": configured,
-                "agent_runtime": "native-durable-tool-loop"}
+                "agent_runtime": "native-durable-tool-loop",
+                # Site facts only, and published on purpose: an operator deciding whether to back off,
+                # and a reader who just got a 429, both need the same numbers. Nobody's own usage,
+                # which is what `describe()` reports to that caller through the settings payload.
+                "quota": {"mode": quota.mode, "limits": quota.limits,
+                          "breaker": agent.quota.breaker.state()}}
 
     @app.get("/api/papers")
     def papers(request: Request):

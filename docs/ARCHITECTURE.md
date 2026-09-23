@@ -36,6 +36,7 @@ web/agent.html + agent.js        web/index.html + app.js
 |---|---|
 | `deployment.py` | Which kind of service this is (`RE0_MODE`), and everything that kind must prove before it starts. Accumulates every missing piece into one refusal instead of one per restart |
 | `auth.py` | Accounts, password hashing, revocable session tokens and the `Identity` whose `owner` is the workspace. The identity that stands for "nobody" owns nothing |
+| `quota.py` | How much may be spent: sliding-window request and task ceilings per account plus one site-wide request ceiling, and a circuit breaker that opens on consecutive *destination* failures only. Keyed on what a caller cannot forge, persisted so a restart is not a bypass, and a refusal never spends a call budget |
 | `auth_cli.py` | `re0 auth`: the only way an account comes to exist. Prints a session secret once, provisions, lists, disables, ends sessions; a password is never a flag |
 | `agent/schemas.py` | Config, task, approval, tool and report input contracts |
 | `agent/model.py` | In-memory BYOK config, destination validation, bounded HTTP, common tool-call protocol |
@@ -104,10 +105,11 @@ workers or two application processes against the same task database. There is no
 distributed scheduler and no cross-process lease in this release: the execution
 lease is per process, which is why `run.py` passes `workers=1` explicitly rather
 than leaving it to a default. Multi-user **isolation** does exist in hosted mode —
-one owner per account, enforced in the store, answered with 404 across accounts —
-but it is not a concurrency story: quotas, rate limiting and a site-wide circuit
-breaker are not implemented, so two accounts can still spend against one process
-one after the other.
+one owner per account, enforced in the store, answered with 404 across accounts — and so do the
+ceilings in front of it: `quota.py` counts requests and task starts per account and site-wide, and its
+circuit breaker stops new work while the model service is down. What is still not here is throughput.
+One worker executes one turn at a time, so two accounts whose windows are both open still spend
+against one process one after the other, and the second is refused rather than queued.
 Application startup marks unfinished work `interrupted`; it does not silently
 resume paid requests. User-requested resume uses the same model/base URL/token
 parameter/output limit, at most three times. Calls stay cumulative; elapsed time
@@ -242,6 +244,20 @@ can afford to fail silently.
   configuration it launched with, so rotating a key afterwards cannot redirect that turn. The execution
   lease is still one task per process, and `busy` reports that the slot is held and whether it is
   yours — never whose.
+- **Ceilings are a separate question from isolation, and are asked in `quota.py`.** Three scopes, one
+  implementation each: per account (a sliding request window and an hourly window over turns of paid
+  work), per conversation (the cumulative model/tool caps in `agent/runtime.py`, recomputed from the
+  runs and enforced inside every turn), and site-wide (one request window counted for the whole
+  service, plus the serial execution slot and the circuit breaker). `create_app` builds the limits
+  once and hands the same object to the middleware and the runtime, because two copies would mean two
+  answers to "may this run start". `quota.check_request()` runs at the top of `request_guard`, before
+  the origin and content-type checks, so a cheap rejection is not a free one; `runtime._admit()` runs
+  in the order busy → breaker → task window, and the window is consumed last so a turn that never
+  started does not cost one of the caller's remaining starts. The breaker counts only
+  `ModelError.destination` failures — unreachable, timed out, 408/429/5xx — because one account's
+  mistyped key must be able to fail forever without taking the service from anybody else, and it is
+  written to `agent_settings` under the reserved `local:site` owner so restarting is not a way around
+  it. Half-open admits the connection test and re-arms on a failed probe.
 - **Hosted mode tightens the model destination as well.** A loopback endpoint is refused outright, and
   every address the model host resolves to must be public, with no opt-out: a public service that
   accepts a private resolution is an SSRF probe with a model bill attached. `RE0_ALLOW_LOCAL_RESOLVER`
@@ -253,10 +269,10 @@ can afford to fail silently.
   than this build is refused rather than downgraded. `local` is a reserved account name, so nobody can
   later claim the rows a migration just assigned.
 
-**What is not here yet:** quotas and rate limiting, a site-wide circuit breaker, a login page in the
-UI, lease behaviour under concurrent load, retention and audit-redaction rules, and any real hosted
-deployment. Two accounts in one process are tested; nothing has run behind a real TLS terminator with
-a real second user. Hosted mode is not a deliverable.
+**What is not here yet:** a login page in the UI, lease behaviour under concurrent load, retention and
+audit-redaction rules, and any real hosted deployment. Two accounts in one process are tested, and so
+are the ceilings that stop one of them spending for everybody; nothing has run behind a real TLS
+terminator with a real second user. Hosted mode is not a deliverable.
 
 ## HTTP interface
 
@@ -411,7 +427,7 @@ These should be added only against real evaluated workflows, not described as
 hidden existing capabilities. See ROADMAP.md for the staged direction.
 
 Multi-user authentication has come off that list, which is not the same as saying
-it is finished: accounts, revocable sessions and per-account isolation exist and
-are tested, while quotas, rate limiting, a site-wide circuit breaker, a login page
-in the UI and a real hosted deployment do not. See "Deployment modes, identity and
+it is finished: accounts, revocable sessions, per-account isolation, and the request and task
+ceilings with their site-wide breaker exist and are tested, while a login page in the UI and a real
+hosted deployment do not. See "Deployment modes, identity and
 ownership" above for exactly which is which.

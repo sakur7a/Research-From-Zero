@@ -118,6 +118,32 @@ Timeouts apply at request/action boundaries; the task timer is not a hard global
 kill switch. Provider-reported usage is informational, not a guaranteed invoice.
 No automatic repeated paid retries, restart-resume or cross-provider failover.
 
+Ceilings sit in front of that, at three scopes: per account (`RE0_REQUESTS_PER_MINUTE`
+API calls and `RE0_TASKS_PER_HOUR` turns of paid work), site-wide
+(`RE0_SITE_REQUESTS_PER_MINUTE` and the serial execution slot), and per conversation
+(the cumulative model/tool caps, enforced inside every turn). In `hosted` mode the
+numbers are on by default; in `local` mode an unset knob means *no limit*, because a
+ceiling that only ever throttles the one person at the keyboard is noise — setting it
+explicitly works either way. A bucket is keyed on the verified identity, never on
+`X-Forwarded-For` or any other value a caller controls, so a forged source address
+cannot mint a fresh allowance; logged-out traffic shares one bucket rather than one
+per invented address. Every refusal states the limit and when it resets, and spends
+nothing: a request turned away at the door creates no task and no model call, and
+counting the arrival is not the same as counting the spend.
+
+The circuit breaker opens after `RE0` sees eight consecutive *destination* failures
+(connection, timeout, 408/429/5xx) and refuses new work with 503 until a connection
+test succeeds. It counts only failures of the model service, because one account's
+wrong key or empty balance must not take the service away from everybody else — a
+mistyped credential can be retried forever without opening anything. The breaker
+protects the process and not the truth: it never interrupts a turn already running,
+since killing one could discard a provider call that will still be billed, and an
+unknown in-flight cost stays reported as unknown rather than as zero. Its state is
+written to the database, so restarting is not a way around an outage; a hand-edited
+state row is ignored rather than trusted. The limits and the breaker's current state
+are published in `/api/health` and in `re0 doctor`, and each caller sees only their
+own remaining budget.
+
 Zotero sync holds an API key for the length of one call and stores it nowhere:
 not in the database, not in the sync log, not in a response, not even masked. It
 is sent only to `api.zotero.org`, which is on the same host allowlist as every

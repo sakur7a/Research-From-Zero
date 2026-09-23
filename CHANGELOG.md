@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+### How much may be spent, and when to stop answering: quotas, windows, a breaker (#13)
+
+Isolation answers *who may see what*. This answers the question a reachable service cannot leave
+open — *how much may be spent* — because one careless loop is otherwise an unbounded bill and an
+unbounded load on the scholarly APIs this tool shares with everybody else.
+
+- Add `backend/re0/quota.py`. Three scopes, and each one says what it is for: **per account** a
+  sliding request window (`RE0_REQUESTS_PER_MINUTE`, 120) and an hourly window over turns of paid work
+  (`RE0_TASKS_PER_HOUR`, 12, shared by submit/follow-up/retry/resume); **per conversation** the
+  cumulative model/tool caps that already existed in `agent/runtime.py`; **site-wide** one request
+  window for the whole service (`RE0_SITE_REQUESTS_PER_MINUTE`, 600) plus the serial execution slot
+  and the circuit breaker. Sliding rather than fixed-interval, because a fixed bucket refills all at
+  once and lets a caller spend two of them either side of the boundary.
+- A bucket is keyed on the verified identity. `X-Forwarded-For`, `X-Real-IP`, a cookie a visitor
+  picks: none of them can mint a fresh allowance, and logged-out traffic shares one anonymous bucket
+  rather than getting one per invented address.
+- The window is consulted **before** the origin, client-header and content-type checks, so being
+  cheaply refused is not a free thing to do a million times. Every refusal states the limit and when
+  it resets (`Retry-After`, and a message naming whether the account or the site is at its ceiling),
+  and spends nothing: a request turned away at the door creates no task and no model call.
+- In `local` mode an unset knob means **no limit**, and setting one works the same as in hosted mode.
+  A ceiling that only ever throttles the one person at the keyboard is noise; `re0 paper search` on a
+  laptop should not fail because of a number nobody chose. `re0 doctor` prints the effective numbers
+  and exits 2 on a nonsense one, because `create_app` raises on that same value.
+- The circuit breaker opens after eight consecutive **destination** failures (connection, timeout,
+  408/429/5xx — marked at the source via `ModelError.destination`, which is why a wrong key is not one)
+  and answers new work with 503 until a connection test succeeds. Counting only the destination is the
+  point: otherwise a visitor who mistypes a key eight times takes the service away from everybody,
+  which is a denial of service that costs the attacker nothing.
+- Opening it never interrupts a turn already running — killing one could discard a provider call that
+  will still be billed, and an unknown in-flight cost stays reported as unknown rather than as zero —
+  and its state is written to `agent_settings` under the reserved `local:site` owner, so restarting is
+  not a way around an outage. A failed half-open probe re-arms the cooldown instead of leaving the
+  gate open forever, and a hand-edited state row is ignored rather than trusted.
+- `create_app` builds the limits once and hands the same object to the middleware and the runtime: two
+  copies would mean two answers to "may this run start". `_admit()` gates all four paid entry points in
+  the order busy → breaker → task window, so a turn that never started does not cost one of the
+  caller's remaining starts. `/api/health` publishes the ceilings and the breaker state;
+  `/api/agent/config` publishes each caller's own usage and never another account's.
+- Defects fixed on the way: the breaker's non-reentrant lock would have self-deadlocked the first
+  request that asked whether it may proceed; a failed half-open probe did not re-arm the cooldown; and
+  the local-mode "slot is busy" answer did not say that the refused request spent nothing.
+- Tests: `backend/tests/test_quota.py`, 26 new (backend 491). Includes the bypass attempts — four
+  forged source addresses, an anonymous flood, a fixed-bucket boundary crossing, a restart during an
+  outage, sixteen wrong keys — none of which gets anything through. Nothing here has been re-measured
+  on a real deployment; the numbers are design values, and hosted mode is still not a deliverable
+  (there is still no login page in the UI).
+
 ### Two modes, one binary: hosted needs an identity, local needs nothing (#13)
 
 - Add `backend/re0/deployment.py`. `RE0_MODE` is `local` (the default) or `hosted`, **declared and

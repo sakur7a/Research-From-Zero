@@ -50,8 +50,12 @@ def print_deployment() -> bool:
     Everything else doctor reports is about capability; this is about exposure, so it comes first.
     The session secret is named as present or absent and never read out. Returns False when the
     declared mode could not start, so a script checking the exit status is not told "all clear".
+
+    The quotas are printed here because a ceiling nobody can see is a mystery to the person it just
+    refused, and an operator reading `re0 doctor` is the first one they will ask.
     """
     from re0.deployment import DeploymentError, from_env
+    from re0.quota import quota_limits_from_env
 
     deployment = from_env()
     declared = bool(os.getenv("RE0_MODE", "").strip())
@@ -63,6 +67,12 @@ def print_deployment() -> bool:
         for line in str(exc).splitlines():
             print(f"            {line}")
         return False
+    try:
+        limits = quota_limits_from_env(os.environ, hosted=deployment.hosted)
+    except ValueError as exc:
+        # `create_app` raises the same thing, so the service really would not start on this number.
+        print(f"            配额配置无效：{exc}")
+        return False
     if deployment.hosted:
         print(f"            对外入口 {deployment.public_entry}；"
               f"允许的来源 {len(deployment.allowed_origins)} 个")
@@ -70,6 +80,15 @@ def print_deployment() -> bool:
     else:
         print("            单人本地模式：没有账户也没有登录这一步，只应绑回环地址；")
         print("            run.py 会拒绝非回环的 RE0_HOST，远程访问请用 SSH 隧道")
+    print("            配额：" + "、".join(
+        f"{label} {limits[name] if limits[name] else '不限'}"
+        for name, label in (("RE0_REQUESTS_PER_MINUTE", "每账户请求/分钟"),
+                            ("RE0_TASKS_PER_HOUR", "每账户任务/小时"),
+                            ("RE0_SITE_REQUESTS_PER_MINUTE", "全站请求/分钟")))
+        + ("（已显式设置；未设置的项仍不限。全站熔断始终生效）" if not deployment.hosted and any(
+               os.getenv(name, "").strip() for name in limits) else
+           "（本地模式默认不限，显式设置即生效；全站熔断始终生效）" if not deployment.hosted else
+           "（未显式设置即为默认值；全站熔断始终生效，模型服务连续不可用时暂停新任务）"))
     return True
 
 

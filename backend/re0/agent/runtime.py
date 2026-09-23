@@ -7,6 +7,7 @@ public assistant messages/tool calls, never model-provider hidden reasoning.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -18,6 +19,7 @@ from pydantic import ValidationError
 from ..deployment import Deployment
 from ..models import now
 from ..providers import ProviderError
+from ..quota import BREAKER_SETTINGS_KEY, SITE_SETTINGS_OWNER, Quota
 from .model import ENDPOINT_PRESETS, ChatModel, ModelError, ModelVault, list_models as fetch_model_list
 from .schemas import (EvidenceReadArgs, FollowUpInput, ModelConfig, ModelListRequest, PlanArgs, Report,
                       RetryInput, SessionCaps, TaskDefaults, TaskInput)
@@ -65,12 +67,19 @@ class Cancelled(Exception):
 
 
 class AgentRuntime:
-    def __init__(self, library, *, transport=None, model_factory=None, deployment=None):
+    def __init__(self, library, *, transport=None, model_factory=None, deployment=None,
+                 quota: Quota | None = None):
         self.deployment = deployment or Deployment()
         self.tasks = TaskStore(library.db)
         # One configuration per owner: a global vault would let whoever configured last decide where
         # everybody else's prompts and evidence are sent.
         self.vault = ModelVault(hosted=self.deployment.hosted)
+        # The same ceilings the HTTP middleware consults, so there is one answer to "may this run
+        # start". Falling back to the environment rather than to no limits: a runtime constructed
+        # somewhere that forgot to pass the service's ceilings should still honour what the deployment
+        # declared, instead of quietly becoming an unlimited second policy.
+        self.quota = quota if quota is not None else Quota.from_env(
+            os.environ, hosted=self.deployment.hosted)
         self.tools = ResearchTools(library, transport)
         self.model_factory = model_factory or (
             lambda config: ChatModel(config, transport, hosted=self.deployment.hosted))
@@ -81,11 +90,32 @@ class AgentRuntime:
         self._future = None
         self._busy = False
         # Who holds the single execution slot. A lease rather than a boolean, so a refused submit can
-        # say whether the slot is the caller's own without saying whose it is.
+        # say whether the slot is the caller's own without saying whose it is. It needs no expiry and
+        # no reclaim path: the worker clears it in a `finally`, and every turn inside it is bounded by
+        # its own `attempt_seconds` deadline and per-request timeouts, so a held slot is a running
+        # task rather than a lock that leaked.
         self._lease: dict = {}
 
     def start(self):
         self.tasks.recover()
+        # Restored before anything can be admitted: an outage the previous process was in the middle
+        # of must not get eight free attempts because somebody restarted the service.
+        saved = self.tasks.setting(BREAKER_SETTINGS_KEY, owner=SITE_SETTINGS_OWNER)
+        if saved:
+            self.quota.breaker.load(saved)
+
+    def _record_breaker(self, *, failure: str = "") -> None:
+        """Feed the site-wide breaker the outcome of one model call, and keep it across restarts.
+
+        Written only when it says something new — opening, or closing something that was open. The
+        success path runs on every model call of every turn, and a breaker that was already closed has
+        nothing to report.
+        """
+        was_open = self.quota.breaker.state() != "closed"
+        state = (self.quota.breaker.record_failure(failure) if failure
+                 else self.quota.breaker.record_success())
+        if was_open or state["state"] != "closed":
+            self.tasks.save_setting(BREAKER_SETTINGS_KEY, state, owner=SITE_SETTINGS_OWNER)
 
     def close(self):
         self._stop.set()
@@ -97,6 +127,7 @@ class AgentRuntime:
         `busy` is a fact about the process, and the lease says only whether the slot is theirs."""
         return {**self.vault.public(owner=owner), **self.busy_view(owner),
                 "runtime": "native-durable-tool-loop",
+                "quota": self.quota.describe(owner),
                 "web_search_enabled": self.tools.web_enabled,
                 "task_defaults": self.task_defaults(owner=owner).model_dump(),
                 "session_caps": self.session_caps(owner=owner).model_dump(),
@@ -231,10 +262,12 @@ class AgentRuntime:
                          if held else "执行槽空闲")}
 
     def _busy_message(self) -> str:
+        # The fact a reader needs first in either mode: a refusal at the door bought nothing.
+        spent = "本次请求没有创建任务，也没有产生任何花费"
         if self.deployment.hosted:
-            return ("服务当前正在执行一个研究任务（串行执行，一次一个）；本次请求没有创建任务，"
-                    "也没有产生任何花费")
-        return "本地单用户版一次执行一个研究任务；请先停止当前任务"
+            return (f"服务当前正在执行一个研究任务（串行执行，一次一个）；{spent}。"
+                    "占用中的任务有单次执行时间预算，取消会在它的下一步边界生效")
+        return f"本地单用户版一次执行一个研究任务；请先停止当前任务。{spent}"
 
     def _owner_busy(self, owner: str) -> bool:
         """Whether this owner has a turn queued or running.
@@ -245,6 +278,25 @@ class AgentRuntime:
         """
         return any(row["status"] in ("queued", "running")
                    for row in self.tasks.list(owner=owner))
+
+    def _admit(self, owner: str) -> None:
+        """Decide whether a turn may start at all, before any row is written or any budget spent.
+
+        The order is the order of what the caller can act on: a held slot resolves by waiting, an open
+        breaker by running a connection test, a spent window by waiting for it to reset. The task
+        window is consumed last and only here, so a turn refused for a reason the service already knew
+        about does not also cost the caller one of their remaining starts.
+        """
+        if self._busy or self._stop.is_set():
+            raise HTTPException(409, self._busy_message())
+        refusal = self.quota.breaker.refusal()
+        if refusal:
+            raise HTTPException(503, refusal,
+                                headers={"Retry-After": str(int(self.quota.breaker.wait_seconds()) + 1)})
+        gate = self.quota.check_task(owner)
+        if not gate["allowed"]:
+            raise HTTPException(429, gate["message"],
+                                headers={"Retry-After": str(int(gate["retry_after"]) + 1)})
 
     def configure(self, config: ModelConfig | None, *, owner: str):
         if self._owner_busy(owner):
@@ -260,13 +312,23 @@ class AgentRuntime:
 
         It does not take the execution slot: the test runs in the request thread, and reserving the
         slot for it would let a settings page block everybody's research.
+
+        It is deliberately not gated by the breaker either — that test is the way out of an open
+        breaker, and the refusal text tells the reader to run exactly this. What it reaches the network
+        for, it reports back to.
         """
-        return self.model_factory(self.vault.snapshot(owner=owner)).test()
+        try:
+            result = self.model_factory(self.vault.snapshot(owner=owner)).test()
+        except ModelError as exc:
+            if exc.destination:
+                self._record_breaker(failure=str(exc))
+            raise
+        self._record_breaker()
+        return result
 
     def submit(self, params: TaskInput, *, owner: str):
         with self._lock:
-            if self._busy or self._stop.is_set():
-                raise HTTPException(409, self._busy_message())
+            self._admit(owner)
             config = self.vault.snapshot(owner=owner)
             defaults = self.task_defaults(owner=owner)
             budgets = defaults.merged(params)
@@ -320,8 +382,7 @@ class AgentRuntime:
         if replayed:
             return replayed
         with self._lock:
-            if self._busy or self._stop.is_set():
-                raise HTTPException(409, self._busy_message())
+            self._admit(owner)
             config = self.vault.snapshot(owner=owner)
             budgets = self.task_defaults(owner=owner).merged(params)
             scope, seeds = validate_followup(self.tasks, params, owner=owner,
@@ -347,8 +408,7 @@ class AgentRuntime:
         if replayed:
             return replayed
         with self._lock:
-            if self._busy or self._stop.is_set():
-                raise HTTPException(409, self._busy_message())
+            self._admit(owner)
             config = self.vault.snapshot(owner=owner)
             budgets = self.task_defaults(owner=owner).merged(params)
             scope, seeds = validate_retry(self.tasks, params, owner=owner,
@@ -444,8 +504,7 @@ class AgentRuntime:
 
     def resume(self, rid, *, owner: str):
         with self._lock:
-            if self._busy or self._stop.is_set():
-                raise HTTPException(409, "已有任务运行")
+            self._admit(owner)
             run = self.tasks.get(rid, owner=owner, internal=True)
             if run["status"] not in {"interrupted", "failed"}:
                 raise HTTPException(409, "仅中断或失败的任务可恢复；已完成、已取消或预算耗尽的任务请新建")
@@ -599,6 +658,9 @@ class AgentRuntime:
                 if len(json.dumps(state["messages"], ensure_ascii=False)) > CONTEXT_COMPACT_CHARS:
                     self.compact_context(rid, state)
                 reply = model.complete(state["messages"], tools, timeout=min(60, max(1, deadline-time.monotonic())))
+                # A model call that returned is proof the destination answers, from anywhere in the
+                # process's life: it closes a breaker a restart carried over as well as a live outage.
+                self._record_breaker()
                 # Check after I/O as cancellation may have arrived during a request.
                 for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
                     state["usage"][k] += reply["usage"][k]
@@ -622,6 +684,10 @@ class AgentRuntime:
             self.tasks.checkpoint(rid, state, "budget_exhausted", str(exc))
             self.tasks.event(rid, "budget_exhausted", {"message": str(exc)})
         except ModelError as exc:
+            if exc.destination:
+                # Only a destination failure reaches a site-wide breaker: an unconfigured or refused
+                # key is this account's to fix, and must not stop unrelated work.
+                self._record_breaker(failure=str(exc))
             self.tasks.checkpoint(rid, state, "failed", str(exc))
             self.tasks.event(rid, "failed", {"message": str(exc)})
         except Exception:

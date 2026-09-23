@@ -9,7 +9,8 @@ that the current unauthenticated local Alpha is safe to deploy publicly.
 
 Prioritize a real-model resource-audit workflow, evidence-linked comparisons,
 controlled online access, visitor/session isolation, server-side credentials,
-quotas and independent-device testing before expanding graph/agent features.
+independent-device testing and a login page before expanding graph/agent features.
+Quotas, rate limiting and the site-wide breaker have landed; throughput has not.
 Preserve actual LearnBuddy development records in parallel; do not relabel other
 assistants' conversations or fabricate historical use.
 
