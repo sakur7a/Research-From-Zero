@@ -6,7 +6,7 @@
   "description": "Dependency-free browser UI and native Node tests",
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "check": "node --check web/app.js && node --check web/core.js && node --check web/api.js && node --check web/agent.js && node --check web/agent-core.js && node --check web/search.js && node --check web/search-core.js"
+    "check": "node --check web/app.js && node --check web/core.js && node --check web/api.js && node --check web/agent.js && node --check web/agent-core.js && node --check web/search.js && node --check web/search-core.js && node --check web/login.js && node --check web/login-core.js && node --check web/theme-bootstrap.js"
   },
   "engines": {
     "node": ">=20"

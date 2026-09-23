@@ -1,4 +1,6 @@
 /** Same-origin API. No API keys or external provider requests in the browser. */
+import { loginRedirect } from './login-core.js';
+
 export async function api(path, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 65000);
@@ -11,6 +13,15 @@ export async function api(path, options = {}) {
     });
     if (response.status === 204) return null;
     const data = await response.json();
+    if (response.status === 401) {
+      // A missing, expired and revoked session all answer the same way and none of them is something
+      // the page can fix, so send the reader to the door instead of rendering an empty library and
+      // calling it "no results" — that is the failure mode a signed-out visitor would otherwise see
+      // as a working service with nothing in it.
+      const target = loginRedirect(window.location.pathname + window.location.search);
+      if (target) window.location.replace(target);
+      throw new Error(data.detail || '需要登录');
+    }
     if (!response.ok) {
       const message = Array.isArray(data.detail) ? data.detail.map(x => `${x.loc?.slice(1).join('.') || ''}: ${x.msg}`).join('；') : data.detail;
       throw new Error(message || `请求失败 (${response.status})`);

@@ -269,22 +269,28 @@ can afford to fail silently.
   than this build is refused rather than downgraded. `local` is a reserved account name, so nobody can
   later claim the rows a migration just assigned.
 
-**What is not here yet:** a login page in the UI, lease behaviour under concurrent load, retention and
-audit-redaction rules, and any real hosted deployment. Two accounts in one process are tested, and so
-are the ceilings that stop one of them spending for everybody; nothing has run behind a real TLS
-terminator with a real second user. Hosted mode is not a deliverable.
+**What is not here yet:** lease behaviour under concurrent load, retention and audit-redaction rules,
+and any real hosted deployment. Two accounts in one process are tested, the ceilings that stop one of
+them spending for everybody are tested, and the login page has been driven by a real browser over an
+intercepted HTTPS origin; nothing has run behind a *real* TLS terminator with a *real* second user.
+Hosted mode is not a deliverable.
 
 ## HTTP interface
 
 All write endpoints preserve the original JSON, same-origin and
 `X-Re0-Client: web` requirements. In local mode these guards are **not
 authentication**. In hosted mode every `/api/*` route additionally requires a
-session cookie and is scoped to that identity's owner, while `/`, `/library` and
-`/api/health` stay reachable — otherwise nobody could reach a login form, and an
-orchestrator could not ask whether the process is up.
+session cookie and is scoped to that identity's owner, while the page shells
+(`/`, `/library`, `/login`), `/static/*` and `/api/health` stay reachable — otherwise
+nobody could reach the login form, and an orchestrator could not ask whether the
+process is up. A `/api/*` route that needs a session answers 401, and `web/api.js`
+turns that into a redirect to `/login?next=` the page the reader was on: a signed-out
+visitor should be told to sign in, not shown an empty library that looks like a
+working service with nothing in it.
 
 | Route | Purpose |
 |---|---|
+| `GET /login` | The door itself: a shell that asks `/api/auth/session` which mode it is in before it renders anything, so local mode is told there is nothing to log into |
 | `POST /api/auth/login` | Exchange a username and password for a session cookie; 409 in local mode, where there are no accounts |
 | `POST /api/auth/logout` | Revoke this session server-side; the token stops working immediately |
 | `GET /api/auth/session` | Who this request is, plus the declared mode; never a token or a secret |
@@ -427,7 +433,7 @@ These should be added only against real evaluated workflows, not described as
 hidden existing capabilities. See ROADMAP.md for the staged direction.
 
 Multi-user authentication has come off that list, which is not the same as saying
-it is finished: accounts, revocable sessions, per-account isolation, and the request and task
-ceilings with their site-wide breaker exist and are tested, while a login page in the UI and a real
-hosted deployment do not. See "Deployment modes, identity and
+it is finished: accounts, revocable sessions, per-account isolation, the request and task ceilings
+with their site-wide breaker, and a login page the browser actually reaches exist and are tested
+offline; what does not exist is a real hosted deployment. See "Deployment modes, identity and
 ownership" above for exactly which is which.

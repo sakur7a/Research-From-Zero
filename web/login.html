@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f7f5fa">
+  <meta name="description" content="Re0 — 托管模式的登录页。本地模式没有登录这一步。">
+  <script src="/static/theme-bootstrap.js"></script>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/theme.css">
+  <link rel="stylesheet" href="/static/agent.css">
+  <link rel="stylesheet" href="/static/login.css">
+  <title>Re0 · 登录</title>
+</head>
+<body>
+  <main class="door" id="door" tabindex="-1">
+    <p class="mark">re<span>0</span></p>
+    <h1 class="door-title" id="door-title">正在确认这个服务的运行模式…</h1>
+    <p class="door-lede" id="door-lede">页面只问了服务器“我是谁”，在这之前不显示任何内容——一个假装能登录的表单比一句话更坏。</p>
+
+    <form id="login-form" class="door-form" hidden>
+      <div class="field">
+        <label for="username">用户名</label>
+        <input id="username" name="username" type="text" autocomplete="username"
+               autocapitalize="none" spellcheck="false" required>
+      </div>
+      <div class="field">
+        <label for="password">口令</label>
+        <input id="password" name="password" type="password" autocomplete="current-password"
+               required>
+        <p class="field-note">口令只发给这台服务器（HTTPS 之后才是它自己的模型服务），不进浏览器存储、不进日志、也不会回显。</p>
+      </div>
+      <button class="primary" type="submit" id="login-submit">登录</button>
+      <p class="door-alt" id="door-alt"></p>
+    </form>
+
+    <section id="signed-in" class="door-card" hidden>
+      <p class="eyebrow">已登录</p>
+      <p class="who">这个会话属于 <b id="who-name">—</b></p>
+      <dl class="facts">
+        <div><dt>会话到期</dt><dd id="when-expires">—</dd></div>
+        <div><dt>数据分区</dt><dd id="which-workspace">—</dd></div>
+      </dl>
+      <p class="door-lede">退出会立刻让这张会话票失效——不是“等到过期”，也不是清一下浏览器就完事。</p>
+      <div class="row">
+        <a class="primary buttonish" id="continue-link" href="/">继续</a>
+        <button class="quiet" type="button" id="logout">退出登录</button>
+      </div>
+    </section>
+
+    <section id="no-login" class="door-card" hidden>
+      <p class="eyebrow">本地模式</p>
+      <p class="who">这台服务没有账户，也没有登录这一步。</p>
+      <p class="door-lede">所有记录属于本机唯一的所有者 <code>local</code>，只应绑回环地址；要远程使用请走 SSH 隧道，而不是把这个页面暴露出去。
+        需要账户与隔离时由部署者声明 <code>RE0_MODE=hosted</code>。</p>
+      <div class="row"><a class="primary buttonish" href="/">去研究工作台</a><a class="quiet buttonish" href="/library">文献库</a></div>
+    </section>
+
+    <div id="door-notice" class="door-notice" role="status" aria-live="polite"></div>
+    <p class="door-foot" id="door-foot"></p>
+  </main>
+  <script type="module" src="/static/login.js"></script>
+</body>
+</html>

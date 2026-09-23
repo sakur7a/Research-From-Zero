@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+### The door: a login page, and a real browser that read the headers (#13)
+
+- Add `/login` (`web/login.html`, `web/login.js`, pure decisions in `web/login-core.js`). It asks
+  `/api/auth/session` which mode it is in *before* it renders anything, so local mode is told there is
+  nothing to log into rather than being handed a form that cannot work, and hosted mode never asks for
+  a secret while it does not know who would receive it.
+- `web/api.js` turns a 401 into a redirect to `/login?next=` the page the reader was on. The old
+  behaviour was worse than an error page: a signed-out visitor in hosted mode saw an empty library,
+  which reads exactly like a working service with nothing in it.
+- The page is as uninformative as the endpoints behind it on purpose. A wrong password, an unknown
+  account, a disabled account and a locked one are one sentence with one timing profile in `auth.py`,
+  and the page quotes that sentence rather than interpreting it — a UI that guessed would rebuild the
+  enumeration oracle the API refuses to be. A 429 says *wait*, not *you typed it wrong*; a 422 says the
+  attempt never reached the password check, so it did not bring the account closer to a lock.
+- The typed password is cleared from the field after every attempt and reaches no storage area the page
+  can read; the session token is HttpOnly, so page script cannot see it; logout revokes it server-side
+  rather than deleting a cookie. A `?next=` is honoured only for a path on this origin — `//host`,
+  `/\host`, schemes, control characters and markup all fold back to the workbench, because a redirect
+  parameter is the oldest way for a login page to hand a session to somebody else.
+- Add `scripts/login_browser_smoke.py`: the first smoke that lets the browser be a browser. It routes
+  `https://re0.test/**` into the in-process TestClient, so `page.goto` carries a real query string, the
+  cookie jar is Chromium's, and the success path performs a real navigation. Nine steps, 72 requests,
+  zero page errors. Deliberate 401s are expected by name; a 401 that arrives uninvited is a failure.
+- **Fix: the theme bootstrap on all four pages was an inline `<script>`, which the app's own
+  `script-src 'self'` CSP blocks.** Every page logged a policy violation on load and dark-mode readers
+  saw the light theme first. Moved to `/static/theme-bootstrap.js` — an external file the same rule
+  allows — rather than weakening the policy to make a symptom go away, with a test that forbids any
+  inline `<script>` in the shells and re-reads the header that would catch it. Invisible to the three
+  bridged smokes, which build a page from a string and never see a response header.
+- **Fix: `hidden` did not hide anything on the new page.** Each panel's class sets an explicit
+  `display`, which outranks the UA's `[hidden]{display:none}`, so all three panels rendered at once and
+  the failure text landed inside `agent.css`'s off-screen `#notice` toast. Guarded with
+  `[hidden]{display:none!important}` and a page-local notice box.
+- `quota.py` now names an anonymous ceiling as 未登录 rather than 该账户: telling a visitor about an
+  account they do not have is a wrong sentence, and the wrong sentence on a login page is where users
+  start doubting their password.
+- Tests: 13 new in `backend/tests/test_login_page.py` (backend 504), 17 new in
+  `tests/login-core.test.js` (frontend 83). The Python side pins the *shape* the JavaScript reads —
+  every key `sessionView()` looks for, and the two sentences the page quotes verbatim — so the page
+  cannot drift into confidently rendering a response that no longer exists.
+- Still not verified: a real TLS terminator, a reverse proxy rewriting `Host`/`Origin`, `SameSite`
+  behaviour in a genuine cross-site encounter, and a second human on a second device. `https://re0.test`
+  is intercepted, not served. Hosted mode remains not a deliverable.
+
 ### How much may be spent, and when to stop answering: quotas, windows, a breaker (#13)
 
 Isolation answers *who may see what*. This answers the question a reachable service cannot leave

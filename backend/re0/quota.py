@@ -295,10 +295,12 @@ class Quota:
         """One API request arriving from *owner*: their own window, then the site's.
 
         The account window is consulted first so a flooded service can say *who* is being unfair,
-        which is the fact an operator needs and which a single site-wide counter would hide.
+        which is the fact an operator needs and which a single site-wide counter would hide. Logged-out
+        traffic shares one bucket — it has no owner to key on — and the refusal says so rather than
+        telling somebody about an account they do not have yet.
         """
         for limiter, scope, key, subject in (
-                (self.owner_requests, "请求", owner, "该账户"),
+                (self.owner_requests, "请求", owner, "该账户" if owner else "未登录"),
                 (self.site_requests, "请求", SITE_KEY, "全站")):
             verdict = self._gate(limiter, key, scope, subject)
             if not verdict["allowed"]:

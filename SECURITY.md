@@ -32,13 +32,26 @@ host whose resolution is not entirely public is refused with no opt-out:
 `RE0_ALLOW_LOCAL_RESOLVER` is a single-user setting and hosted mode says so
 instead of pointing at it.
 
-**Hosted mode is not yet a deliverable.** There is no login page in the UI (the
-session endpoints exist; the browser pages do not use them yet), no quotas or rate
-limiting, no site-wide circuit breaker, no retention or audit-redaction rules, and
-none of it has run behind a real TLS terminator with a real second user. What is
-in place — identity, per-account isolation, per-account key scope and the start-up
-refusals above — is tested; what is missing is written here so it cannot be
-mistaken for finished.
+**Hosted mode is not yet a deliverable.** The door exists — `/login`, with every
+page bouncing a 401 to it — and so do quotas, rate limiting and the site-wide
+circuit breaker. What is missing is verification outside this process: no real TLS
+terminator, no real second user, no independent device, and no retention or
+audit-redaction rules yet. What is in place — identity, per-account isolation,
+per-account key scope, the start-up refusals above and the ceilings — is tested
+offline; what is missing is written here so it cannot be mistaken for finished.
+
+The login page is deliberately as uninformative as the endpoints behind it. A wrong
+password, an unknown account, a disabled account and a locked one are one sentence
+with one timing profile, and the page quotes that sentence rather than interpreting
+it — a UI that guessed would rebuild the enumeration oracle the API refuses to be.
+The typed password is cleared from the field after every attempt and reaches no
+storage area the page can read; the session token is HttpOnly, so page script cannot
+see it, and logout revokes it server-side rather than deleting a cookie. A `?next=`
+parameter is only honoured when it is a path on this origin: `//host`, `/\host`,
+schemes, control characters and markup are all folded back to the workbench, because
+a redirect parameter is the oldest way for a login page to hand a session to somebody
+else. In local mode the page offers no form at all, since there is nothing to log
+into and a field that cannot work invites a secret to be typed into it.
 
 `X-Re0-Client` accepts `web` (the browser pages) and `cli` (the console entry
 points that drive the same service, `re0 session follow-up`/`retry`). A request

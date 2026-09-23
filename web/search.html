@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#f7f5fa">
   <meta name="description" content="Re0 — 本地检索工作台：读 re0 paper search 的结果，看候选论文、资源审计矩阵，复制 BibTeX。">
-  <script>(function(){var t=null;try{t=localStorage.getItem('re0-theme');}catch(e){}if(t!=='light'&&t!=='dark')t='light';document.documentElement.dataset.theme=t;})();</script>
+  <script src="/static/theme-bootstrap.js"></script>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/theme.css">
   <link rel="stylesheet" href="/static/agent.css">
@@ -15,7 +15,7 @@
   <a class="skip" href="#workbench">跳到检索工作台</a>
   <aside class="side"><a class="logo" href="/">re<span>0</span><small>RESEARCH FROM ZERO</small></a>
     <button class="mobile-history" data-action="menu">导航</button>
-    <nav aria-label="主要导航"><a href="/">研究工作台 <span>Agent</span></a><a href="/library">文献与证据库 <span>↗</span></a><a class="selected" href="/static/search.html">检索工作台 <span>结果</span></a></nav>
+    <nav aria-label="主要导航"><a href="/">研究工作台 <span>Agent</span></a><a href="/library">文献与证据库 <span>↗</span></a><a class="selected" href="/static/search.html">检索工作台 <span>结果</span></a><a href="/login">身份与会话 <span>登录</span></a></nav>
     <div class="section-label">这一页做什么</div>
     <p class="subtle">读 <code>re0 paper search --json</code> 写出的那一份结果：检索覆盖、候选论文、资源审计矩阵、可复制的 BibTeX。检索本身在命令行或 skill 里跑，这一页不发检索请求。</p>
     <div class="side-bottom"><button class="theme-toggle" data-theme-toggle aria-label="切换主题"></button><div class="local-label">LOCAL WORKSPACE <span>v0.2</span></div></div>

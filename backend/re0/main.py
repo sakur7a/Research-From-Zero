@@ -521,6 +521,16 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
     def index():
         return FileResponse(WEB / "agent.html")
 
+    @app.get("/login")
+    def login_page():
+        """The door itself: a shell that asks the open endpoint who it is talking to.
+
+        Served in both modes, because the page's first job is to find out which mode this is — and in
+        local mode the honest answer is that there is nothing to log into, which is worth saying out
+        loud rather than 404ing on a link every page carries.
+        """
+        return FileResponse(WEB / "login.html")
+
     @app.get("/library")
     def library_index():
         return FileResponse(WEB / "index.html")

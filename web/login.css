@@ -1,0 +1,50 @@
+/* re0 · 登录页 — 只用于 /login。
+   颜色一律取自 theme.css 的变量；骨架（.eyebrow / .primary / .quiet / .notice / .loading）沿用 agent.css。 */
+
+/* This page switches panels with the `hidden` attribute, and every panel below sets an explicit
+   `display`. A class rule beats the UA's `[hidden]{display:none}`, so without this guard all three
+   panels would be visible at once — which a real browser caught and a hand-built test page could not. */
+[hidden]{display:none!important}
+
+.door{max-width:520px;margin:0 auto;padding:clamp(40px,12vh,110px) 22px 60px;display:flex;flex-direction:column;gap:18px}
+.door:focus{outline:none}
+.mark{font-size:15px;letter-spacing:.4px;color:var(--ink-2);margin:0}
+.mark span{color:var(--accent);font-weight:700}
+.door-title{font-size:21px;font-weight:650;line-height:1.5;margin:0;overflow-wrap:anywhere}
+.door-lede{font-size:12.5px;line-height:1.95;color:var(--ink-2);margin:0;max-width:46em}
+.door-lede code{font-size:11.5px}
+
+.door-form{display:flex;flex-direction:column;gap:16px;border:1px solid var(--line);border-radius:14px;
+  padding:20px;background:var(--paper)}
+.field{display:flex;flex-direction:column;gap:6px}
+.field label{font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--ink-3)}
+/* agent.css 给了 input{width:100%}，这里只需要保证不被 flex 撑破 */
+.field input{font-size:14px;padding:11px 12px;border-radius:9px;border:1px solid var(--line-2);
+  background:var(--paper-2);color:var(--ink)}
+.field input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.field-note{font-size:11px;line-height:1.8;color:var(--ink-3);margin:0}
+.door-alt{font-size:11.5px;line-height:1.85;color:var(--ink-3);margin:0}
+.door-alt a{color:var(--accent-strong)}
+
+.door-card{border:1px solid var(--line);border-radius:14px;padding:20px;background:var(--paper);
+  display:flex;flex-direction:column;gap:14px}
+.who{font-size:13.5px;margin:0;line-height:1.7;overflow-wrap:anywhere}
+.who b{font-weight:650}
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:0}
+.facts>div{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--paper-2)}
+.facts dt{font-size:10.5px;letter-spacing:.6px;text-transform:uppercase;color:var(--ink-3)}
+.facts dd{margin:5px 0 0;font-size:12.5px;overflow-wrap:anywhere}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.buttonish{text-decoration:none;display:inline-flex;align-items:center;justify-content:center;
+  padding:10px 16px;border-radius:9px;font-size:12.5px}
+a.primary{background:var(--accent);color:var(--accent-ink,#fff)}
+a.quiet{border:1px solid var(--line-2);color:var(--ink-2);background:var(--paper)}
+/* The door's own notice box: agent.css reserves `#notice` for a fixed, off-screen toast that needs a
+   `.show` class, and this page reveals a message by putting it in the flow where the form was. */
+.door-notice:empty{display:none}
+.door-notice .notice{border-radius:10px;padding:13px 15px;font-size:12.5px;line-height:1.85;border:1px solid var(--line)}
+.door-notice .notice.error{background:var(--danger-soft);color:var(--danger);border-color:var(--danger-line)}
+.door-notice .notice.warn{background:var(--warn-soft);color:var(--warn-text)}
+.door-notice .notice.ok{background:var(--accent-soft);color:var(--accent-strong)}
+.door-notice .notice small{display:block;margin-top:6px;color:var(--ink-2);font-size:11.5px;line-height:1.8}
+.door-foot{font-size:11px;line-height:1.85;color:var(--ink-3);margin:6px 0 0;border-top:1px solid var(--line);padding-top:12px}
