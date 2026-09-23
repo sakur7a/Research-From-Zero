@@ -27,7 +27,7 @@ call or public service has been started.
 | #22 | Offline #16 regression work is recorded; previous evaluation snapshot remains 1 complete, 1 partial, 3 pending human review and 1 unknown. | Human review and authorized BYOK/real HTTP acceptance still need owners and access. |
 | #23 | No deployment was created. | Depends on #16–#22 evidence plus an approved owner account/storage decision and a real public URL. |
 
-Current #16 verification: 558 Python tests, 83 JS tests, syntax check, Chromium
+Current #16 verification: 561 Python tests, 83 JS tests, syntax check, Chromium
 workbench/agent/login/loopback HTTP smoke pass. These are local/fixture checks; they
 do not close the hosted release gates.
 

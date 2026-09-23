@@ -282,11 +282,11 @@ def test_login_logout_and_who_am_i(tmp_path):
     headers = alice.post("/api/auth/logout").json()
     assert headers["revoked"] is True
     assert alice.get("/api/papers").status_code == 401
+    assert alice.post("/api/auth/logout").status_code == 401
 
 
-@pytest.mark.parametrize("revoke_via", ["logout", "operator"])
-def test_session_revoke_clears_the_owner_key_and_stops_the_next_model_call(tmp_path, public_dns,
-                                                                         revoke_via):
+@pytest.mark.parametrize("revoke_via", ["logout", "operator", "disable", "expiry"])
+def test_session_revoke_or_key_expiry_stops_the_next_model_call(tmp_path, public_dns, revoke_via):
     import json
     import threading
     import time
@@ -332,9 +332,16 @@ def test_session_revoke_clears_the_owner_key_and_stops_the_next_model_call(tmp_p
             assert logged_out.json()["credentials_cleared"] is True
             assert app.state.agent.vault.public(owner=owner)["configured"] is False
         else:
-            # The operator CLI revokes rows from a separate process; the worker checks the DB before
-            # the next call and lazily discards the now-unusable memory copy.
-            assert app.state.accounts.revoke_user(user_id) == 1
+            if revoke_via == "operator":
+                # The operator CLI revokes rows from a separate process; the worker checks the DB
+                # before the next call and lazily discards the now-unusable memory copy.
+                assert app.state.accounts.revoke_user(user_id) == 1
+            elif revoke_via == "disable":
+                app.state.accounts.set_disabled(user_id, True)
+                assert not app.state.accounts.owner_has_live_session(owner)
+            else:
+                # Expire the vault's monotonic lease while the first request is already in flight.
+                app.state.agent.vault._deadlines[owner] = time.monotonic() - 1
         release.set()
 
         deadline = time.monotonic() + 5
@@ -362,6 +369,30 @@ def test_logout_clears_only_the_authenticated_owners_model_key(tmp_path, public_
     assert alice.post("/api/auth/logout").json()["credentials_cleared"] is True
     assert app.state.agent.vault.public(owner=alice_owner)["configured"] is False
     assert app.state.agent.vault.public(owner=bob_owner)["configured"] is True
+
+
+def test_one_authenticated_tab_logout_clears_key_for_the_owners_other_tab(tmp_path, public_dns):
+    def unexpected(request):
+        raise AssertionError(f"no model request expected: {request.url}")
+
+    app = hosted(tmp_path, httpx.MockTransport(unexpected))
+    app.state.accounts.create_account("alice", PASSWORD)
+    first = TestClient(app, headers=WRITE, base_url="https://testserver")
+    second = TestClient(app, headers=WRITE, base_url="https://testserver")
+    for client in (first, second):
+        response = client.post("/api/auth/login", json={"username": "alice", "password": PASSWORD})
+        assert response.status_code == 200, response.text
+    owner = first.get("/api/auth/session").json()["identity"]["workspace"]
+    assert owner == second.get("/api/auth/session").json()["identity"]["workspace"]
+    assert first.put("/api/agent/config", json={
+        "base_url": "https://api.openai.com/v1", "model": "fixture-model",
+        "api_key": "same-owner-tab-key", "trust_endpoint": True}).status_code == 200
+
+    logged_out = first.post("/api/auth/logout")
+    assert logged_out.status_code == 200 and logged_out.json()["credentials_cleared"] is True
+    assert second.get("/api/auth/session").json()["identity"]["authenticated"] is True
+    assert second.get("/api/agent/config").json()["configured"] is False
+    assert app.state.agent.vault.public(owner=owner)["configured"] is False
 
 
 def test_login_after_operator_revocation_does_not_reuse_the_previous_memory_key(tmp_path, public_dns):
