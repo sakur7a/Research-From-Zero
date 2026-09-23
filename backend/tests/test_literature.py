@@ -1101,7 +1101,8 @@ def test_a_rate_limit_is_waited_out_using_the_providers_own_retry_after(slept):
         return router(request)
 
     result = run(flaky, payload={"query": "layout", "limit": 5, "sources": ["openalex"]})
-    assert slept == [3.0], "the provider's own instruction sets the wait"
+    assert len(slept) == 1, "the provider's own instruction causes one wait"
+    assert abs(slept[0] - 3.0) < 0.001, "the wait follows Retry-After within clock precision"
     assert result["coverage"]["scheduling"]["deferred_seconds"] == {"api.openalex.org": 3.0}
     assert result["coverage"]["scheduling"]["retries"] == {}, "a success clears the retry count"
     assert len(result["documents"]) == 1, "the retry recovered the page rather than losing it"
