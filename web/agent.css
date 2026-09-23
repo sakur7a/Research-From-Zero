@@ -6,12 +6,17 @@
 #notice.show{visibility:visible;pointer-events:auto}
 /* Task budgets and library permission moved into settings; the composer keeps a one-line summary. */
 .composer-actions{display:flex;align-items:center;gap:16px}
+.search-scope{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:4px 12px;padding:0 18px 14px;font-size:11px;color:var(--ink-2)}
+.search-scope select{width:100%;min-width:0;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--paper)}
+.search-scope small{grid-column:2;font-size:10px;color:var(--ink-3);line-height:1.6}
+.defaults-block .search-scope,.followup .search-scope{grid-template-columns:1fr;gap:4px;padding:0;margin:8px 0;max-width:520px}
+.defaults-block .search-scope small,.followup .search-scope small{grid-column:1}
 .budget-link{color:var(--ink-2);font-size:11px;text-align:right;text-decoration:underline;text-underline-offset:3px;text-decoration-color:var(--line)}
 .budget-link:hover{color:var(--primary);text-decoration-color:currentColor}
 .defaults-block{margin-top:24px;padding-top:18px;border-top:1px solid var(--line)}
 .defaults-block h3{font-size:13px;font-weight:600;margin-bottom:6px}
 .defaults-block .budget-fields{margin:16px 0 4px}
-@media(max-width:800px){.composer-actions{gap:10px}.budget-link{text-align:left}}
+@media(max-width:800px){.composer-actions{gap:10px}.budget-link{text-align:left}.composer .search-scope{grid-template-columns:1fr;gap:4px}.composer .search-scope small{grid-column:1}}
 
 /* Public first-use page. The history sample is read-only; a guest session is created only on demand. */
 body.guest-door .shell{margin-left:0}

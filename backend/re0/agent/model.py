@@ -57,15 +57,32 @@ class ModelError(Exception):
     not be able to stop everybody else's work.
     """
 
-    def __init__(self, message: str, *, destination: bool = False):
+    def __init__(self, message: str, *, destination: bool = False,
+                 status: int | None = None, retry_after: float = 0):
         super().__init__(message)
         self.destination = destination
+        self.status = status
+        self.retry_after = max(0.0, min(3600.0, float(retry_after or 0)))
 
 
-# 408 and 429 are "the service could not take this right now" and 5xx is the service's own failure, so
-# a run of them describes an outage. 401/402/403/404 describe a credential, a balance or a model name
-# this caller got wrong: retrying them will not help anybody, and stopping them is not the site's job.
-DESTINATION_STATUSES = frozenset({408, 429})
+def retry_after_seconds(headers) -> float:
+    raw = str(headers.get("retry-after", "")).strip()
+    if not raw:
+        return 0.0
+    try:
+        return max(0.0, min(3600.0, float(raw)))
+    except ValueError:
+        try:
+            from email.utils import parsedate_to_datetime
+            return max(0.0, min(3600.0, parsedate_to_datetime(raw).timestamp() - time.time()))
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+
+# 408 and 5xx describe a destination outage. 429 is scoped to this owner's credentials/request and
+# carries Retry-After; it never opens a shared destination breaker. 401/402/403/404 describe a
+# credential, balance, permission or model name that this caller can fix.
+DESTINATION_STATUSES = frozenset({408})
 
 
 def _is_destination_status(status: int) -> bool:
@@ -151,14 +168,18 @@ def list_models(credential: "ModelConfig | ModelListRequest", *, transport=None,
             with client.stream("GET", config.base_url + "/models", headers=headers) as response:
                 if response.status_code != 200:
                     # Provider bodies can echo request headers; keep our own wording.
-                    raise ModelError(f"模型列表接口返回 HTTP {response.status_code}；请改用手动填写 Model ID")
+                    status = response.status_code
+                    raise ModelError(f"模型列表接口返回 HTTP {status}；请改用手动填写 Model ID",
+                                     destination=_is_destination_status(status), status=status,
+                                     retry_after=retry_after_seconds(response.headers))
                 body = bytearray()
                 for chunk in response.iter_bytes():
                     body.extend(chunk)
                     if len(body) > MODEL_LIST_BYTES:
                         raise ModelError("模型列表响应超过大小上限；请改用手动填写 Model ID")
     except httpx.HTTPError as exc:
-        raise ModelError("无法读取模型列表；检查网络、Key 权限与该服务是否实现 GET /models，或手动填写 Model ID") from exc
+        raise ModelError("无法读取模型列表；检查网络、Key 权限与该服务是否实现 GET /models，或手动填写 Model ID",
+                         destination=True) from exc
     try:
         payload = json.loads(body)
     except ValueError as exc:
@@ -289,10 +310,15 @@ class ChatModel:
         self.hosted = hosted
         self.transport = transport
         self._call_authorizer = None
+        self._request_authorizer = None
 
     def set_call_authorizer(self, callback):
         """Install a last-moment check used by hosted tasks before each outbound model call."""
         self._call_authorizer = callback
+
+    def set_request_authorizer(self, callback):
+        """Install a task-owned request/deadline budget, separate from model-call count."""
+        self._request_authorizer = callback
 
     def complete(self, messages: list[dict], tools: list[dict], *, timeout=60, force_tool=None) -> dict:
         if self._call_authorizer is not None:
@@ -302,21 +328,29 @@ class ChatModel:
                    self.config.token_parameter: self.config.max_output_tokens,
                    "tool_choice": {"type": "function", "function": {"name": force_tool}} if force_tool else "auto",
                    "stream": False}
-        if len(json.dumps(payload, ensure_ascii=False)) > 150000:
+        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        request_chars, request_body = len(serialized), serialized.encode("utf-8")
+        if request_chars > 150000:
             raise ModelError("任务上下文达到 150,000 字符上限；请缩小研究范围并新建任务")
         headers = {"Content-Type": "application/json"}
         key = self.config.api_key.get_secret_value()
         if key:
             headers["Authorization"] = f"Bearer {key}"
+        if self._request_authorizer is not None:
+            timeout = self._request_authorizer("model", timeout, request_chars=request_chars,
+                                               request_bytes=len(request_body))
         end = time.monotonic() + timeout
         try:
             with httpx.Client(transport=self.transport, timeout=timeout, follow_redirects=False, trust_env=False) as client:
-                with client.stream("POST", self.config.base_url + "/chat/completions", json=payload, headers=headers) as response:
+                with client.stream("POST", self.config.base_url + "/chat/completions",
+                                   content=request_body, headers=headers) as response:
                     if response.status_code != 200:
                         # Do not leak provider error bodies, request headers, URLs or keys.
+                        status = response.status_code
                         raise ModelError(
-                            f"模型接口返回 HTTP {response.status_code}；请检查权限、余额、模型名、工具调用支持和 token 参数",
-                            destination=_is_destination_status(response.status_code))
+                            f"模型接口返回 HTTP {status}；请检查权限、余额、模型名、工具调用支持和 token 参数",
+                            destination=_is_destination_status(status), status=status,
+                            retry_after=retry_after_seconds(response.headers))
                     body = bytearray()
                     for chunk in response.iter_bytes():
                         body.extend(chunk)
@@ -348,7 +382,8 @@ class ChatModel:
                 assistant["tool_calls"] = cleaned
             usage = obj.get("usage") or {}
             counts = {name: min(10**8, max(0, int(usage.get(name, 0)))) for name in ("prompt_tokens", "completion_tokens", "total_tokens")}
-            return {"message": assistant, "usage": counts, "usage_reported": bool(usage)}
+            return {"message": assistant, "usage": counts, "usage_reported": bool(usage),
+                    "request_chars": request_chars, "request_bytes": len(request_body)}
         except httpx.HTTPError as exc:
             raise ModelError("模型连接或读取失败；检查网络和模型服务地址。没有自动切换服务，也没有自动重试付费请求",
                              destination=True) from exc

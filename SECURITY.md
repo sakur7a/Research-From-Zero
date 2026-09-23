@@ -43,13 +43,7 @@ Render Free template uses `ephemeral-demo`; its login page warns visitors that
 service sleep, restart or redeploy can lose database and workspace files. Do not
 put the only copy of research data there.
 
-**Hosted mode is not yet a deliverable.** The door exists — `/login`, with every
-page bouncing a 401 to it — and so do quotas, rate limiting and the site-wide
-circuit breaker. What is missing is verification outside this process: no real TLS
-terminator, no real second user, no independent device, and no retention or
-audit-redaction rules yet. What is in place — identity, per-account isolation,
-per-account key scope, the start-up refusals above and the ceilings — is tested
-offline; what is missing is written here so it cannot be mistaken for finished.
+**Hosted mode is not yet a deliverable.** Login and account isolation exist, and offline checks cover request/task limits, destination-scoped model breakers, per-owner probe limits, and the explicit site emergency stop. Real TLS, an independent second user/device, and deployment retention remain unverified.
 
 The login page is deliberately as uninformative as the endpoints behind it. A wrong
 password, an unknown account, a disabled account and a locked one are one sentence
@@ -168,18 +162,11 @@ per invented address. Every refusal states the limit and when it resets, and spe
 nothing: a request turned away at the door creates no task and no model call, and
 counting the arrival is not the same as counting the spend.
 
-The circuit breaker opens after `RE0` sees eight consecutive *destination* failures
-(connection, timeout, 408/429/5xx) and refuses new work with 503 until a connection
-test succeeds. It counts only failures of the model service, because one account's
-wrong key or empty balance must not take the service away from everybody else — a
-mistyped credential can be retried forever without opening anything. The breaker
-protects the process and not the truth: it never interrupts a turn already running,
-since killing one could discard a provider call that will still be billed, and an
-unknown in-flight cost stays reported as unknown rather than as zero. Its state is
-written to the database, so restarting is not a way around an outage; a hand-edited
-state row is ignored rather than trusted. The limits and the breaker's current state
-are published in `/api/health` and in `re0 doctor`, and each caller sees only their
-own remaining budget.
+Model health is isolated by scope. A destination breaker is keyed by the normalized allowed Base URL, without an API key; only network failures, timeouts, 408 and 5xx count toward its threshold of eight consecutive failures. It blocks new work for that endpoint only, persists across restarts and admits one half-open probe. HTTP 429 is not a shared destination failure: its Retry-After creates a persisted cooldown for the current owner and endpoint. 401, 402, 403 and 404 do not open breakers.
+
+Model-list and connection-test probes use a separate persisted ledger: at most six model-list requests per owner per minute and three connection tests per owner per five minutes, one probe in flight per owner, and four across the service. A refusal happens before provider HTTP. The probes do not occupy the single research slot.
+
+Taking the whole model service offline is a deployment action: RE0_SITE_EMERGENCY_STOP=1 blocks new model requests. A provider outage or one account error cannot set this site-wide stop. Destination state, probe attempts and owner cooldowns survive restart; secrets are not stored in their records.
 
 Zotero sync holds an API key for the length of one call and stores it nowhere:
 not in the database, not in the sync log, not in a response, not even masked. It

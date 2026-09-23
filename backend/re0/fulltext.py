@@ -408,7 +408,8 @@ def slice_by_locator(chunks: list[dict], locator: str) -> dict | None:
 
 
 def read_fulltext(identifier: str, *, transport=None, workspace=None, locator: str = "",
-                  slice_chars: int = DEFAULT_SLICE_CHARS, resolver=None) -> dict:
+                  slice_chars: int = DEFAULT_SLICE_CHARS, resolver=None,
+                  request_authorizer=None) -> dict:
     """Read one paper's full text from a public open-access archive.
 
     Every attempt is recorded, so "the HTML was not available and the PDF was scanned" is a
@@ -423,7 +424,8 @@ def read_fulltext(identifier: str, *, transport=None, workspace=None, locator: s
     attempts, chosen, kind = [], None, ""
     for url, candidate_kind in candidate_urls(source, normalized):
         result = fetch(url, accept=("text/html",) if candidate_kind == "html" else ("application/pdf",),
-                       transport=transport, **({"resolver": resolver} if resolver else {}))
+                       transport=transport, request_authorizer=request_authorizer,
+                       **({"resolver": resolver} if resolver else {}))
         attempts.append({"url": url, "kind": candidate_kind, "state": result["state"],
                          "detail": result.get("detail", ""), "bytes_read": result.get("bytes_read", 0),
                          "hops": result.get("hops", [])})

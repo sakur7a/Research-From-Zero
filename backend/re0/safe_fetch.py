@@ -140,7 +140,7 @@ def validate_resolution(host: str, *, local_opt_out: bool = True) -> tuple[list[
 
 def fetch(url: str, *, accept: tuple[str, ...] = ("text/html", "application/pdf"),
           transport: httpx.BaseTransport | None = None, resolver=None,
-          max_bytes: int = MAX_RESPONSE_BYTES) -> dict:
+          max_bytes: int = MAX_RESPONSE_BYTES, request_authorizer=None) -> dict:
     """Fetch one allowlisted address, following redirects only where each hop re-validates.
 
     Returns a dict rather than raising where it can: a caller that has already retrieved metadata
@@ -177,9 +177,11 @@ def fetch(url: str, *, accept: tuple[str, ...] = ("text/html", "application/pdf"
                 return {"state": exc.state, "detail": f"{exc}；本次没有取得全文", "url": url,
                         "final_url": current, "fetched_at": started, "hops": seen, "bytes_read": 0}
             try:
+                timeout = (request_authorizer("provider", READ_TIMEOUT)
+                           if request_authorizer is not None else READ_TIMEOUT)
                 with client.stream("GET", current,
                                    headers={"User-Agent": USER_AGENT,
-                                            "Accept": ", ".join(accept)}) as response:
+                                            "Accept": ", ".join(accept)}, timeout=timeout) as response:
                     status = response.status_code
                     if 300 <= status < 400:
                         location = response.headers.get("location", "")

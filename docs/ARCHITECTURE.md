@@ -36,7 +36,7 @@ web/agent.html + agent.js        web/index.html + app.js
 |---|---|
 | `deployment.py` | Which kind of service this is (`RE0_MODE`), and everything that kind must prove before it starts. Accumulates every missing piece into one refusal instead of one per restart |
 | `auth.py` | Accounts, password hashing, revocable session tokens and the `Identity` whose `owner` is the workspace. The identity that stands for "nobody" owns nothing |
-| `quota.py` | How much may be spent: sliding-window request and task ceilings per account plus one site-wide request ceiling, and a circuit breaker that opens on consecutive *destination* failures only. Keyed on what a caller cannot forge, persisted so a restart is not a bypass, and a refusal never spends a call budget |
+| `quota.py` | Sliding-window request/task ceilings, a deployer-only site emergency stop, destination-keyed model breakers, and a persisted per-owner probe ledger/cooldown. A credential error cannot trip another destination; refusals happen before provider HTTP |
 | `auth_cli.py` | `re0 auth`: the only way an account comes to exist. Prints a session secret once, provisions, lists, disables, ends sessions; a password is never a flag |
 | `agent/schemas.py` | Config, task, approval, tool and report input contracts |
 | `agent/model.py` | In-memory BYOK config, destination validation, bounded HTTP, common tool-call protocol |
@@ -104,7 +104,7 @@ The original `schema_version=1` tables are unchanged. Independent
 - `agent_evidence`: provider-derived documents with source locator, time and tool;
 - `agent_tool_results`: idempotent replay by `(run_id, call_id)`;
 - `agent_imports`: idempotent mapping from approved evidence to a library item;
-- `agent_settings`: workspace-level defaults (task budgets, library permission).
+- `agent_settings`: workspace-level defaults (task budgets, initial research scope, library permission), destination breaker state and the owner-scoped probe ledger.
   Contains no credentials and is deliberately independent of the in-memory model
   config, so clearing the model does not reset workspace policy.
 
@@ -114,8 +114,9 @@ distributed scheduler and no cross-process lease in this release: the execution
 lease is per process, which is why `run.py` passes `workers=1` explicitly rather
 than leaving it to a default. Multi-user **isolation** does exist in hosted mode —
 one owner per account, enforced in the store, answered with 404 across accounts — and so do the
-ceilings in front of it: `quota.py` counts requests and task starts per account and site-wide, and its
-circuit breaker stops new work while the model service is down. What is still not here is throughput.
+ceilings in front of it: `quota.py` counts requests and task starts per account and site-wide, isolates
+model failures by normalized destination, and limits model probes per owner. Only the deployer can set
+the site-wide emergency stop. What is still not here is throughput.
 One worker executes one turn at a time, so two accounts whose windows are both open still spend
 against one process one after the other, and the second is refused rather than queued.
 Application startup marks unfinished work `interrupted`; it does not silently
@@ -136,10 +137,16 @@ implemented yet. Create a new scoped task instead.
 
 ## Budgets and network controls
 
-Task defaults are 12 model calls, 20 tool calls and 360 seconds per explicit
-attempt; schema upper bounds are 24, 40 and 900. In-flight calls can finish or time
-out after a cancellation/time boundary. This is not a hard wall-clock or monetary
-cap. Prompt/context text is capped at 150,000 serialized characters.
+Task defaults are 12 model calls, 20 tool calls, 60 total upstream HTTP requests,
+360 seconds per explicit attempt, and a focused initial search scope; schema upper
+bounds are 24, 40, 300 and 900. The focused/expanded preference only changes the
+starting scope; tools can continue when the evidence gap warrants it. Request count
+is reserved before every model/provider HTTP call and persists across manual resume.
+One upstream request remains reserved for a final model report when the model has a
+usable result to submit. Cancellation and deadlines stop at the next request/tool
+boundary; an in-flight call may finish. This is not a monetary cap. The complete
+serialized model request is measured in UTF-8 bytes and characters and capped at
+150,000 characters.
 
 Context cost is managed in three steps, because a tool result is re-sent on every
 later model call and its size therefore multiplies by the remaining turns:
@@ -258,20 +265,19 @@ can afford to fail silently.
   configuration it launched with, so rotating a key afterwards cannot redirect that turn. The execution
   lease is still one task per process, and `busy` reports that the slot is held and whether it is
   yours — never whose.
-- **Ceilings are a separate question from isolation, and are asked in `quota.py`.** Three scopes, one
-  implementation each: per account (a sliding request window and an hourly window over turns of paid
-  work), per conversation (the cumulative model/tool caps in `agent/runtime.py`, recomputed from the
-  runs and enforced inside every turn), and site-wide (one request window counted for the whole
-  service, plus the serial execution slot and the circuit breaker). `create_app` builds the limits
-  once and hands the same object to the middleware and the runtime, because two copies would mean two
-  answers to "may this run start". `quota.check_request()` runs at the top of `request_guard`, before
-  the origin and content-type checks, so a cheap rejection is not a free one; `runtime._admit()` runs
-  in the order busy → breaker → task window, and the window is consumed last so a turn that never
-  started does not cost one of the caller's remaining starts. The breaker counts only
-  `ModelError.destination` failures — unreachable, timed out, 408/429/5xx — because one account's
-  mistyped key must be able to fail forever without taking the service from anybody else, and it is
-  written to `agent_settings` under the reserved `local:site` owner so restarting is not a way around
-  it. Half-open admits the connection test and re-arms on a failed probe.
+- **Ceilings are separate from isolation, and live in quota.py.** Per-account HTTP and task
+  windows, per-conversation cumulative model/tool caps, a site-wide HTTP window, fixed model-probe
+  budgets, and one serial research slot use separate counters. create_app builds the request quota
+  once and hands it to middleware and runtime. runtime._admit refuses before writing a task or
+  consuming the task window. Model-list and connection-test probes have a persistent per-owner
+  ledger, one in-flight probe per owner and a four-probe site ceiling; they do not hold the paid
+  research slot.
+- **Provider health is destination-scoped.** DestinationBreakers is keyed by normalized approved
+  Base URL, with no API key in the key or stored state. Only connection/timeout, 408 and 5xx count;
+  429 is a persisted owner-plus-destination Retry-After cooldown, while 401/402/403/404 stay local
+  to the caller. A destination breaker admits one half-open probe and successful health checks
+  update only that endpoint. The site emergency stop is controlled by
+  RE0_SITE_EMERGENCY_STOP; provider/account failures never open it.
 - **Hosted mode tightens the model destination as well.** A loopback endpoint is refused outright, and
   every address the model host resolves to must be public, with no opt-out: a public service that
   accepts a private resolution is an SSRF probe with a model bill attached. `RE0_ALLOW_LOCAL_RESOLVER`
@@ -318,6 +324,7 @@ working service with nothing in it.
 | `GET, POST /api/agent/runs` | Last 100 tasks / start a task |
 | `GET /api/agent/runs/{id}` | Status, plan, report, source evidence and usage |
 | `GET /api/agent/runs/{id}/events?after=...` | Incremental public event records |
+| `GET /api/agent/runs/{id}/progress?after=...&evidence_after=...` | One owner-scoped poll for run summary, new events and bounded new evidence |
 | `POST /api/agent/runs/{id}/cancel` | Stop at the next safe boundary |
 | `POST /api/agent/runs/{id}/resume` | Explicit recovery of interrupted/failed work |
 | `POST /api/agent/runs/{id}/evidence/{eid}/import` | User-approved metadata import |

@@ -76,7 +76,8 @@ class ProviderClient:
 
     def __init__(self, transport: httpx.BaseTransport | None = None, *,
                  max_calls: int = 8, seconds: float = 35, read_timeout: float = 8,
-                 governor=None, cache_scope: str = "", refresh: bool = False):
+                 governor=None, cache_scope: str = "", refresh: bool = False,
+                 request_authorizer=None):
         """`governor` is optional so that a single bounded check keeps working on its own.
 
         When one is supplied it becomes the authority on how many requests this session may
@@ -89,6 +90,7 @@ class ProviderClient:
         self.max_calls, self.deadline = max_calls, time.monotonic() + seconds
         self.read_timeout = read_timeout
         self.governor, self.cache_scope, self.refresh = governor, cache_scope, refresh
+        self.request_authorizer = request_authorizer
         self.calls = 0
         self.cache_hits = 0
         self.digests: list[str] = []
@@ -151,10 +153,18 @@ class ProviderClient:
                 raise ProviderError(str(exc), "indeterminate", kind="budget") from exc
             except Cancelled as exc:
                 raise ProviderError(str(exc), "indeterminate", kind="cancelled") from exc
+        timeout = min(self.read_timeout, max(0.1, self.deadline - time.monotonic()))
+        if self.request_authorizer is not None:
+            try:
+                timeout = self.request_authorizer("provider", timeout)
+            except Exception:
+                if self.governor is not None:
+                    self.governor._release(provider)
+                raise
         self.calls += 1
         try:
             with self.client.stream("GET", url, params=params, headers=request_headers,
-                                    timeout=min(self.read_timeout, max(0.1, self.deadline - time.monotonic()))) as response:
+                                    timeout=timeout) as response:
                 status = response.status_code
                 content_type = response.headers.get("content-type", "")
                 # Kept for callers whose protocol lives in the headers rather than the body: Zotero
@@ -385,9 +395,10 @@ def huggingface_check(client: ProviderClient, category: str, identity: str) -> O
                        limitations=limitations)
 
 
-def check_resource(url: str, transport: httpx.BaseTransport | None = None) -> Observation:
+def check_resource(url: str, transport: httpx.BaseTransport | None = None, *,
+                   request_authorizer=None) -> Observation:
     provider = "unsupported"
-    client = ProviderClient(transport)
+    client = ProviderClient(transport, request_authorizer=request_authorizer)
     try:
         provider, category, identity = repository_identity(url)
         result = github_check(client, identity) if provider == "github" else huggingface_check(client, category, identity)
@@ -404,9 +415,10 @@ def check_resource(url: str, transport: httpx.BaseTransport | None = None) -> Ob
         client.close()
 
 
-def resolve_metadata(identifier: str, transport: httpx.BaseTransport | None = None) -> PaperInput:
+def resolve_metadata(identifier: str, transport: httpx.BaseTransport | None = None, *,
+                     request_authorizer=None) -> PaperInput:
     """Resolve one DOI/arXiv ID. Never fetch the supplied URL directly."""
-    client = ProviderClient(transport)
+    client = ProviderClient(transport, request_authorizer=request_authorizer)
     try:
         try:
             arxiv_id = normalize_arxiv(identifier)

@@ -10,6 +10,7 @@ test('task lifecycle and resumability are explicit',()=>{
 test('tool failures are not displayed as successful checks',()=>{
  assert.match(eventText({kind:'tool_finished',data:{tool:'search_papers',ok:false,error:'限流'}}),/限流/);
  assert.match(eventText({kind:'tool_finished',data:{tool:'search_papers',ok:true,evidence_ids:['ev_1']}}),/1 条证据/);
+ assert.match(eventText({kind:'tool_repeat_warning',data:{message:'本任务已经完成相同参数；仍会执行'}}),/仍会执行/);
 });
 test('model text and evidence locators cannot inject HTML or script URLs',()=>{
  assert.equal(e('<script>alert(1)</script>'),'&lt;script&gt;alert(1)&lt;/script&gt;');
@@ -32,7 +33,7 @@ test('task defaults are clamped to the server schema bounds',()=>{
  assert.equal(normalizeDefaults({attempt_seconds:120.9}).attempt_seconds,120);
 });
 test('the composer summary states the library permission explicitly',()=>{
- assert.equal(budgetSummary({max_model_calls:8,max_tool_calls:10,attempt_seconds:120}),'模型 8 次 · 工具 10 次 · 单次 120 秒 · 文献库未授权');
+ assert.equal(budgetSummary({max_model_calls:8,max_tool_calls:10,max_upstream_requests:15,attempt_seconds:120}),'模型 8 次 · 工具 10 次 · 请求 15 次 · 小范围起步 · 单次 120 秒 · 文献库未授权');
  assert.match(budgetSummary({use_library:true}),/文献库已授权$/);
 });
 test('the per-task consent names library material only when it will be sent',()=>{
@@ -135,9 +136,9 @@ test('the reuse picker is bounded and says how much it withheld',()=>{
  assert.deepEqual(reuseChoices(undefined),{choices:[],hidden:0});
 });
 test('a follow-up payload carries every authorization and no invented one',()=>{
- const payload=followupPayload({goal:' 只保留有训练代码的两篇 ',reuse:['ev_1','',null],useLibrary:true,
+ const payload=followupPayload({goal:' 只保留有训练代码的两篇 ',reuse:['ev_1','',null],useLibrary:true,researchScope:'expanded',
    workspaceId:'ws_0123456789abcdef',workspaceReuse:['src_0123456789abcdef','']},
-   {id:'run-1'},{max_model_calls:8,max_tool_calls:12,attempt_seconds:300,use_library:false});
+   {id:'run-1'},{max_model_calls:8,max_tool_calls:12,max_upstream_requests:32,attempt_seconds:300,use_library:false});
  assert.equal(payload.parent_run,'run-1');
  assert.equal(payload.goal,'只保留有训练代码的两篇');
  assert.deepEqual(payload.reuse_evidence,['ev_1']);
@@ -148,6 +149,8 @@ test('a follow-up payload carries every authorization and no invented one',()=>{
  // Not inherited from the run's own defaults: the checkbox is the only source.
  assert.equal(payload.trust_new_destination,false);
  assert.equal(payload.max_model_calls,8);
+ assert.equal(payload.max_upstream_requests,32);
+ assert.equal(payload.research_scope,'expanded');
  assert.equal(followupProblem(payload),'');
  assert.match(followupProblem(followupPayload({goal:'短'},{id:'r'},undefined)),/至少 5 字/);
  assert.match(followupProblem(followupPayload({goal:'x'.repeat(6001)},{id:'r'},undefined)),/过长/);

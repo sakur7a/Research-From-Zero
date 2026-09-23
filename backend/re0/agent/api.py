@@ -59,10 +59,10 @@ def agent_router(runtime, library_store=None):
         return runtime.test_connection(owner=owner(request))
 
     @router.post("/models")
-    def models(data: ModelListRequest):
+    def models(data: ModelListRequest, request: Request):
         # Read-only probe used by the settings picker. The key is not persisted, and the probe is
         # scoped to the credentials in this request rather than to any stored configuration.
-        return runtime.list_models(data)
+        return runtime.list_models(data, owner=owner(request))
 
     @router.put("/defaults")
     def defaults(data: TaskDefaults, request: Request):
@@ -89,6 +89,11 @@ def agent_router(runtime, library_store=None):
     @router.get("/runs/{run_id}/events")
     def events(run_id: str, request: Request, after: int = Query(0, ge=0)):
         return runtime.tasks.events(run_id, after, owner=owner(request))
+
+    @router.get("/runs/{run_id}/progress")
+    def progress(run_id: str, request: Request,
+                 after: int = Query(0, ge=0), evidence_after: int = Query(0, ge=0)):
+        return runtime.tasks.progress(run_id, after, evidence_after, owner=owner(request))
 
     @router.post("/runs/{run_id}/cancel")
     def cancel(run_id: str, request: Request):

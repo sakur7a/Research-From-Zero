@@ -336,9 +336,48 @@ class TaskStore:
         if not internal:
             state = result.pop("state")
             result.update({k: state.get(k) for k in ("plan", "report", "model_calls", "tool_calls",
+                                                     "upstream_requests", "model_request_chars", "model_request_bytes",
+                                                     "largest_model_request_chars", "largest_model_request_bytes",
                                                      "usage", "resumes", "report_delta")})
             result["evidence"] = self.evidence(rid)
         return result
+
+    def progress(self, rid: str, after: int, evidence_after: int, *, owner: str) -> dict:
+        """One bounded poll: owner-scoped counters, new events and only newly stored evidence."""
+        with self.db.connect() as con:
+            row = con.execute("SELECT id,created_at,updated_at,status,goal,error,config,params,state,"
+                              "conversation_id,turn,kind FROM agent_runs WHERE id=? AND owner=?",
+                              (rid, owner)).fetchone()
+            if row is None:
+                raise HTTPException(404, "研究任务不存在")
+            state = json.loads(row["state"])
+            params = json.loads(row["params"])
+            config = json.loads(row["config"])
+            events = [{**dict(item), "data": json.loads(item["data"])} for item in con.execute(
+                "SELECT id,at,kind,data FROM agent_events WHERE run_id=? AND id>? ORDER BY id LIMIT 200",
+                (rid, max(0, after)))]
+            evidence_count = con.execute("SELECT COUNT(*) FROM agent_evidence WHERE run_id=?",
+                                         (rid,)).fetchone()[0]
+            new_evidence = [{"id": item["id"], **json.loads(item["data"])} for item in con.execute(
+                "SELECT id,data FROM agent_evidence WHERE run_id=? ORDER BY rowid LIMIT 50 OFFSET ?",
+                (rid, max(0, evidence_after)))]
+        run = {key: row[key] for key in ("id", "created_at", "updated_at", "status", "goal", "error",
+                                         "conversation_id", "turn", "kind")}
+        run.update({"model": config.get("model", ""), "params": params,
+                    "plan": state.get("plan", []), "report": state.get("report"),
+                    "model_calls": state.get("model_calls", 0), "tool_calls": state.get("tool_calls", 0),
+                    "upstream_requests": state.get("upstream_requests", 0),
+                    "model_request_chars": state.get("model_request_chars", 0),
+                    "model_request_bytes": state.get("model_request_bytes", 0),
+                    "largest_model_request_chars": state.get("largest_model_request_chars", 0),
+                    "largest_model_request_bytes": state.get("largest_model_request_bytes", 0),
+                    "usage": state.get("usage", {}), "resumes": state.get("resumes", 0),
+                    "report_delta": state.get("report_delta"), "evidence_count": evidence_count})
+        return {"run": run, "events": events, "evidence": new_evidence,
+                "next_event_id": events[-1]["id"] if events else max(0, after),
+                "evidence_cursor": max(0, evidence_after) + len(new_evidence),
+                "has_more_events": len(events) == 200,
+                "has_more_evidence": max(0, evidence_after) + len(new_evidence) < evidence_count}
 
     def list(self, *, owner: str) -> list:
         with self.db.connect() as con:

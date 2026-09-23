@@ -532,7 +532,7 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
                 # and a reader who just got a 429, both need the same numbers. Nobody's own usage,
                 # which is what `describe()` reports to that caller through the settings payload.
                 "quota": {"mode": quota.mode, "limits": quota.limits,
-                          "breaker": agent.quota.breaker.state()}}
+                          "breaker": "open" if quota.emergency_stop else "closed"}}
 
     @app.get("/api/papers")
     def papers(request: Request):

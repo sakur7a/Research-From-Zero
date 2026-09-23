@@ -15,6 +15,7 @@ from re0.db import Database
 from re0.deployment import DeploymentError, from_env, trusted_hosts_from_env
 from re0.main import create_app
 from re0.models import PaperInput
+from re0.quota import destination_key
 
 HOSTED = {"RE0_MODE": "hosted", "RE0_SESSION_SECRET": "a-hosted-secret-that-is-long-enough-to-use",
           "RE0_PUBLIC_ENTRY": "https://re0.example.org",
@@ -292,6 +293,33 @@ def test_model_list_probe_uses_hosted_destination_policy(tmp_path, monkeypatch):
             "base_url": base_url, "api_key": "sentinel-model-list-key", "trust_endpoint": True})
         assert response.status_code == 422, response.text
     assert requests == [], "the hosted probe must refuse before opening any connection"
+
+
+def test_model_list_429_cooldown_is_scoped_to_owner_and_honours_retry_after(tmp_path, public_dns):
+    calls = []
+
+    def network(request):
+        calls.append(request.headers.get("authorization", ""))
+        if request.headers.get("authorization") == "Bearer sk-alice-only":
+            return httpx.Response(429, headers={"Retry-After": "11"}, json={"error": "rate limited"})
+        return httpx.Response(200, json={"data": [{"id": "bob-model"}]})
+
+    app = hosted(tmp_path, httpx.MockTransport(network))
+    alice, bob = session(app, "alice"), session(app, "bob")
+    body = {"base_url": "https://api.openai.com/v1", "trust_endpoint": True}
+    refused = alice.post("/api/agent/models", json={**body, "api_key": "sk-alice-only"})
+    assert refused.status_code == 429 and refused.headers["retry-after"] == "11"
+    assert "sk-alice-only" not in refused.text
+    succeeded = bob.post("/api/agent/models", json={**body, "api_key": "sk-bob-only"})
+    assert succeeded.status_code == 200 and succeeded.json()["models"] == ["bob-model"]
+    repeated = alice.post("/api/agent/models", json={**body, "api_key": "sk-alice-only"})
+    assert repeated.status_code == 429
+    assert len(calls) == 2, "Alice's cooldown must refuse before another provider request"
+    assert app.state.agent.quota.destination_breakers.state(
+        destination_key(body["base_url"])) == "closed"
+    alice_cooldowns = alice.get("/api/agent/config").json()["quota"]["probes"]["cooldowns"]
+    assert alice_cooldowns and alice_cooldowns[0]["retry_after"] > 0
+    assert bob.get("/api/agent/config").json()["quota"]["probes"]["cooldowns"] == []
 
 
 @pytest.mark.parametrize("path", ["models", "config", "test", "run"])

@@ -4,8 +4,9 @@ export const activeRun = run => Boolean(run && ['queued','running'].includes(run
 export const canResume = run => Boolean(run && ['failed','interrupted'].includes(run.status));
 // Mirrors the server schema bounds. The server stays authoritative; this only keeps
 // the settings panel and the composer summary from showing an impossible value.
-export const BUDGET_LIMITS = {max_model_calls:[2,24], max_tool_calls:[1,40], attempt_seconds:[30,900]};
-export const SHIPPED_DEFAULTS = Object.freeze({max_model_calls:12, max_tool_calls:20, attempt_seconds:360, use_library:false});
+export const BUDGET_LIMITS = {max_model_calls:[2,24], max_tool_calls:[1,40], max_upstream_requests:[2,300], attempt_seconds:[30,900]};
+export const RESEARCH_SCOPE_LABELS = Object.freeze({focused:'小范围起步',expanded:'较宽起步'});
+export const SHIPPED_DEFAULTS = Object.freeze({max_model_calls:12, max_tool_calls:20, max_upstream_requests:60, attempt_seconds:360, use_library:false, research_scope:'focused'});
 export function normalizeDefaults(raw) {
   const source = raw && typeof raw === 'object' ? raw : {};
   const pick = name => {
@@ -14,11 +15,11 @@ export function normalizeDefaults(raw) {
     const [min, max] = BUDGET_LIMITS[name];
     return Math.min(max, Math.max(min, Math.trunc(value)));
   };
-  return {max_model_calls:pick('max_model_calls'), max_tool_calls:pick('max_tool_calls'), attempt_seconds:pick('attempt_seconds'), use_library:Boolean(source.use_library)};
+  return {max_model_calls:pick('max_model_calls'), max_tool_calls:pick('max_tool_calls'), max_upstream_requests:pick('max_upstream_requests'), attempt_seconds:pick('attempt_seconds'), use_library:Boolean(source.use_library), research_scope:source.research_scope==='expanded'?'expanded':'focused'};
 }
 export function budgetSummary(raw) {
   const d = normalizeDefaults(raw);
-  return `模型 ${d.max_model_calls} 次 · 工具 ${d.max_tool_calls} 次 · 单次 ${d.attempt_seconds} 秒 · 文献库${d.use_library ? '已授权' : '未授权'}`;
+  return `模型 ${d.max_model_calls} 次 · 工具 ${d.max_tool_calls} 次 · 请求 ${d.max_upstream_requests} 次 · ${RESEARCH_SCOPE_LABELS[d.research_scope]} · 单次 ${d.attempt_seconds} 秒 · 文献库${d.use_library ? '已授权' : '未授权'}`;
 }
 // The library flag now lives in settings, so the per-task consent must name the
 // material that will actually leave this machine.
@@ -166,7 +167,9 @@ export function followupPayload(input, run, defaults) {
     idempotency_key: String(source.idempotencyKey || ''),
     max_model_calls: normalized.max_model_calls,
     max_tool_calls: normalized.max_tool_calls,
-    attempt_seconds: normalized.attempt_seconds
+    max_upstream_requests: normalized.max_upstream_requests,
+    attempt_seconds: normalized.attempt_seconds,
+    research_scope: source.researchScope==='expanded'?'expanded':source.researchScope==='focused'?'focused':normalized.research_scope
   };
   return payload;
 }

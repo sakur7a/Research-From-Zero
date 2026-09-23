@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+from contextvars import ContextVar
 import json
 import os
 import re
@@ -24,13 +25,15 @@ from ..scheduling import (PAGINATED_SOURCES, PAGINATION_UNSUPPORTED, VENUE_MODE_
                           VENUE_STRICT_SOURCES, Governor, ResponseCache)
 from .schemas import (PAPER_SOURCES, SearchArgs, PaperSearchArgs, FullTextArgs, ResolveArgs,
                       ResourceArgs, HubSearchArgs, FileArgs, EvidenceReadArgs, PlanArgs, Report)
+from .execution import RequestBoundaryStop, UpstreamRequestBudgetExceeded
 
 # Transient statuses worth one retry when one call queries several services.
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 RETRY_DELAY_SECONDS = 1.5
 # A stop this run caused is not a stop the provider caused, and the coverage block keeps them
 # apart: "we did not ask" must never be readable as "the service failed to answer".
-STOP_FROM_KIND = {"budget": "request_budget", "cancelled": "cancelled"}
+STOP_FROM_KIND = {"budget": "request_budget", "cancelled": "cancelled",
+                  "upstream_budget": "request_budget"}
 
 TOOL_TYPES = {
     "update_plan": (PlanArgs, "Publish or revise a short user-visible research plan. Do not include private chain-of-thought."),
@@ -123,6 +126,11 @@ class ResearchTools:
     def __init__(self, library, transport=None, workspace=None):
         self.library, self.transport, self.workspace = library, transport, workspace
         self._caches: dict = {}
+        self._request_authorizer = ContextVar("re0_agent_request_authorizer", default=None)
+
+    @property
+    def request_authorizer(self):
+        return self._request_authorizer.get()
 
     def cache_for(self, owner: str) -> ResponseCache:
         """This owner's retrieval cache. Long enough that repeating a question does not re-spend
@@ -138,7 +146,15 @@ class ResearchTools:
     def web_enabled(self):
         return bool(os.getenv("TAVILY_API_KEY"))
 
-    def execute(self, name, raw_args, *, use_library=False, workspace=None, owner: str = ""):
+    def execute(self, name, raw_args, *, use_library=False, workspace=None, owner: str = "",
+                request_authorizer=None):
+        token = self._request_authorizer.set(request_authorizer)
+        try:
+            return self._execute(name, raw_args, use_library=use_library, workspace=workspace, owner=owner)
+        finally:
+            self._request_authorizer.reset(token)
+
+    def _execute(self, name, raw_args, *, use_library=False, workspace=None, owner: str = ""):
         if name not in TOOL_TYPES or name in {"update_plan", "finish_report", "read_evidence"}:
             raise ValueError("未知或非检索工具")
         args = TOOL_TYPES[name][0].model_validate(raw_args)
@@ -174,6 +190,8 @@ class ResearchTools:
         sources = args.sources_effective()
         records, failures, counts = [], [], {}
         attempts, succeeded = [], set()
+        upstream_budget_exhausted = False
+        execution_stop = None
         page_rows, venue_rows = [], []
         venue_name = args.venue.strip()
         # One scheduler for the whole call. A rate limit met by the third request has to be
@@ -187,7 +205,7 @@ class ResearchTools:
         client = ProviderClient(self.transport, max_calls=max(12, 4 * len(queries) * len(sources)),
                                 seconds=60 * max(1, len(queries)), read_timeout=20,
                                 governor=governor, cache_scope=credential_scope(),
-                                refresh=args.refresh)
+                                refresh=args.refresh, request_authorizer=self.request_authorizer)
         try:
             for query in queries:
                 for name in sources:
@@ -200,18 +218,43 @@ class ResearchTools:
                     query_args = args.model_copy(update={"query": effective})
                     before = governor.requests_used
                     found, error, kind = None, "", ""
+                    failure_stop_reason = ""
                     try:
                         found = self._records_with_retry(client, name, query_args, plan)
+                    except UpstreamRequestBudgetExceeded as exc:
+                        error, kind = str(exc), "upstream_budget"
+                        failure_stop_reason = "request_budget"
+                        upstream_budget_exhausted = True
+                    except RequestBoundaryStop as exc:
+                        error, kind = str(exc), exc.kind
+                        failure_stop_reason = {"cancelled": "cancelled", "paused": "interrupted",
+                                               "deadline": "time_budget", "budget": "request_budget"}.get(
+                                                   kind, "interrupted")
+                        execution_stop = exc
                     except ProviderError as exc:
                         error, kind = str(exc), exc.kind
+                        failure_stop_reason = ("rate_limited" if exc.http_status == 429 else
+                                               STOP_FROM_KIND.get(kind, "provider_failed"))
                     except (ValueError, KeyError, TypeError, ET.ParseError, UnicodeError):
                         error = "该来源返回了无法解析的数据"
+                        failure_stop_reason = "provider_failed"
                     spent = governor.requests_used - before
                     if found is None:
                         failures.append({"source": name, "error": error})
                         attempts.append({"query": query, "source": name, "ok": False,
                                          "effective_query": effective, "error": error})
                         counts.setdefault(name, 0)
+                        if plan.outcomes:
+                            page_rows.extend({**row, "query": query, "effective_query": effective}
+                                             for row in plan.outcomes)
+                        else:
+                            page_rows.append(self._page_row(
+                                name, query, effective, spent,
+                                failure_stop_reason or STOP_FROM_KIND.get(kind, "provider_failed"),
+                                error, pages=0, records=0))
+                        if upstream_budget_exhausted or execution_stop:
+                            break
+                        continue
                     # Every attempt gets a pagination row, including the ones that failed. A
                     # source that was asked and refused is a different fact from one that was
                     # never asked, and dropping the row would make them look the same.
@@ -227,8 +270,6 @@ class ResearchTools:
                             PAGINATION_UNSUPPORTED.format(name) if found is not None else error,
                             pages=1 if found is not None else 0,
                             records=len(found or [])))
-                    if found is None:
-                        continue
                     venue_rows.extend(plan.venues)
                     if venue_name and name not in VENUE_STRICT_SOURCES and \
                             not any(row["source"] == name for row in plan.venues):
@@ -246,7 +287,11 @@ class ResearchTools:
                     attempts.append({"query": query, "source": name, "ok": True,
                                      "effective_query": effective, "records": len(found)})
                     records.extend(found)
-            if failures and not records:
+                    if upstream_budget_exhausted or execution_stop:
+                        break
+                if upstream_budget_exhausted or execution_stop:
+                    break
+            if failures and not records and not upstream_budget_exhausted and not execution_stop:
                 # Nothing was actually searched. Returning an empty list here would be
                 # read as "no such work", so fail loudly instead and name every source.
                 detail = "；".join(f"{item['source']}：{item['error']}" for item in failures)
@@ -273,7 +318,13 @@ class ResearchTools:
         kept = [record for record in merged if in_year_range(record["paper"].year, args.start_year, args.end_year)]
         # Zero hits, a partial run and a wholly failed one are different states, and a caller
         # cannot tell them apart from a list length alone.
-        if not records and not failures:
+        if upstream_budget_exhausted:
+            state = "request_budget"
+        elif execution_stop:
+            state = {"cancelled": "cancelled", "paused": "interrupted",
+                     "deadline": "time_budget", "budget": "request_budget"}.get(
+                         execution_stop.kind, "interrupted")
+        elif not records and not failures:
             state = "zero_hits"
         elif failures and not succeeded:
             state = "all_failed"
@@ -304,10 +355,11 @@ class ResearchTools:
                 "pagination": page_rows,
                 "venue_filter": venue_filter,
                 "scheduling": scheduling,
+                "upstream_request_budget_exhausted": upstream_budget_exhausted,
                 "note": "每次 (query, source) 尝试都列在 attempts 里；state=partial 表示有来源未完成，"
                         "不等于论文不存在；未命中的查询与失败的查询是两件事。pagination 逐条说明每个"
                         "(query, source) 读了几页、为什么停；stop_reason=complete 才是来源读完了，"
-                        "page_budget/request_budget/cancelled/not_supported 都表示本次先停了。",
+                        "page_budget/request_budget/time_budget/cancelled/interrupted/not_supported 都表示本次先停了。",
             },
         }
         if failures:
@@ -343,7 +395,8 @@ class ResearchTools:
         prose is a model that will quote from the part it happened to see.
         """
         return read_fulltext(args.identifier, transport=self.transport, workspace=workspace,
-                             locator=args.locator, slice_chars=args.slice_chars)
+                             locator=args.locator, slice_chars=args.slice_chars,
+                             request_authorizer=self.request_authorizer)
 
     def _source_records(self, client, name, args, plan=None) -> list:
         if name == "arxiv":
@@ -447,11 +500,12 @@ class ResearchTools:
         return records
 
     def resolve_paper(self, args):
-        paper = resolve_metadata(args.identifier, self.transport)
+        paper = resolve_metadata(args.identifier, self.transport,
+                                 request_authorizer=self.request_authorizer)
         return {"documents": [doc(paper.paper_url, json.dumps(paper.model_dump(mode="json"), ensure_ascii=False), kind="paper", locator="DOI/arXiv metadata resolution", paper=paper)], "scope": "元数据，不是论文全文"}
 
     def search_repositories(self, args):
-        client = ProviderClient(self.transport)
+        client = ProviderClient(self.transport, request_authorizer=self.request_authorizer)
         try:
             obj = client.json("https://api.github.com/search/repositories", {"q": args.query, "per_page": args.limit})
             docs = [doc("https://github.com/" + x["full_name"], json.dumps({
@@ -463,7 +517,7 @@ class ResearchTools:
             client.close()
 
     def search_hub(self, args):
-        client = ProviderClient(self.transport)
+        client = ProviderClient(self.transport, request_authorizer=self.request_authorizer)
         try:
             rows = client.json("https://huggingface.co/api/" + args.kind, {"search": args.query, "limit": args.limit})
             if not isinstance(rows, list):
@@ -482,7 +536,8 @@ class ResearchTools:
             client.close()
 
     def inspect_resource(self, args):
-        observation = check_resource(args.url, self.transport)
+        observation = check_resource(args.url, self.transport,
+                                     request_authorizer=self.request_authorizer)
         # One check, two shapes. The observation is what the provider returned; the audit is the
         # field-level reading of it, in the same vocabulary every other exit uses, so a caller
         # comparing resources does not have to re-derive the states from a prose summary.
@@ -509,7 +564,7 @@ class ResearchTools:
             raise ValueError("版本标识无效")
         if not re.search(r"\.(md|txt|py|sh|json|toml|yml|yaml|r|rst|cfg|ini)$", args.path, re.I) and args.path.lower() not in {"dockerfile", "license", "readme"}:
             raise ValueError("只允许读取文档、配置或源码文本；不下载权重或执行文件")
-        client = ProviderClient(self.transport)
+        client = ProviderClient(self.transport, request_authorizer=self.request_authorizer)
         try:
             api = "https://api.github.com/repos/" + identity
             commit = client.json(api + "/commits/" + quote(args.ref, safe=""))
@@ -534,7 +589,7 @@ class ResearchTools:
     def search_release_discussions(self, args):
         if not re.search(r"\brepo:[\w.-]+/[\w.-]+", args.query):
             raise ValueError("讨论检索必须用 repo:owner/name 限定仓库")
-        client = ProviderClient(self.transport)
+        client = ProviderClient(self.transport, request_authorizer=self.request_authorizer)
         try:
             obj = client.json("https://api.github.com/search/issues", {"q": args.query, "per_page": args.limit})
             return {"documents": [doc(x.get("html_url", ""), str(x.get("title", "")) + "\n" + str(x.get("body", ""))[:2500],
@@ -561,7 +616,9 @@ class ResearchTools:
         # Tavily is an optional independent search provider, not an LLM capability.
         payload = {"query": args.query, "max_results": args.limit, "search_depth": "basic", "include_answer": False, "include_raw_content": False}
         try:
-            with httpx.Client(transport=self.transport, timeout=15, follow_redirects=False, trust_env=False) as client:
+            timeout = (self.request_authorizer("provider", 15, request_chars=0, request_bytes=0)
+                       if self.request_authorizer else 15)
+            with httpx.Client(transport=self.transport, timeout=timeout, follow_redirects=False, trust_env=False) as client:
                 with client.stream("POST", "https://api.tavily.com/search", headers={"Authorization": "Bearer " + os.environ["TAVILY_API_KEY"]}, json=payload) as response:
                     if response.status_code != 200:
                         raise ProviderError(f"网页搜索服务返回 HTTP {response.status_code}")

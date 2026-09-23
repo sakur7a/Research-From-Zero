@@ -11,6 +11,7 @@ import os
 import threading
 import time
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import HTTPException
@@ -19,15 +20,18 @@ from pydantic import ValidationError
 from ..deployment import Deployment
 from ..models import now
 from ..providers import ProviderError
-from ..quota import BREAKER_SETTINGS_KEY, SITE_SETTINGS_OWNER, Quota
-from .model import ENDPOINT_PRESETS, ChatModel, ModelError, ModelVault, list_models as fetch_model_list
+from ..quota import (DESTINATION_BREAKERS_KEY, PROBE_LEDGER_KEY, SITE_SETTINGS_OWNER,
+                     Quota, destination_key)
+from .execution import RequestBoundaryStop, UpstreamRequestBudgetExceeded
+from .model import (ENDPOINT_PRESETS, ChatModel, ModelError, ModelVault,
+                    list_models as fetch_model_list, validate_endpoint)
 from .schemas import (EvidenceReadArgs, FollowUpInput, ModelConfig, ModelListRequest, PlanArgs, Report,
                       RetryInput, SessionCaps, TaskDefaults, TaskInput)
 from .session import Scope, handover_message, report_delta, turn_snapshot, validate_followup, validate_retry
 from .storage import TaskStore
 from .tools import ResearchTools, specifications
 
-PROMPT_VERSION = "research-agent-v0.2-1"
+PROMPT_VERSION = "research-agent-v0.2-2"
 DEFAULTS_KEY = "task_defaults"
 SESSION_KEY = "session_defaults"
 # The conversation carries bounded excerpts, never whole evidence bodies: a tool
@@ -36,6 +40,12 @@ EVIDENCE_EXCERPT_CHARS = 6000   # one evidence item may claim the whole per-call
 TOOL_EXCERPT_BUDGET = 6000      # excerpt characters one tool result may add to the conversation
 CONTEXT_COMPACT_CHARS = 110000  # elide older excerpts before the 150k serialized hard cap
 KEEP_RECENT_TOOL_MESSAGES = 2   # recent tool results whose excerpts survive compaction
+RESEARCH_SCOPE_INSTRUCTIONS = {
+    "focused": ("先用一条聚焦查询、约 3 篇候选、少量相关来源和 1 页建立证据；根据问题和实际缺口再补查。"
+                "用户要求更广覆盖时按要求扩大。报告说明实际查询、未查来源和停止原因。"),
+    "expanded": ("先用少量互补查询和多个相关来源建立较宽覆盖，每个来源先读 1 页，再根据候选和缺口决定是否翻页或补查。"
+                 "报告说明实际查询、未查来源和停止原因；有限检索不能表述为完整综述。"),
+}
 SYSTEM = """你是 Re0 科研 agent。你要完成用户的科研任务，而不是只写行动建议。
 你可以自主、多轮使用工具检索、读仓库文本、追查资源、修订计划。先调用 update_plan 给出 2–6 步公开行动计划；随后根据真实工具结果决定下一步。
 不要输出私有思维过程，只在 update_plan 中写简短任务步骤。不要假装你已调用工具。
@@ -50,7 +60,7 @@ search_papers 和 resolve_paper 只提供元数据和摘要，不能冒充读过
 工具结果在对话里只保留有界摘录，完整正文保存在本任务证据库；需要更多内容时调用 read_evidence 按证据 id 取回，不要凭摘录推断全文。
 对相对时间以用户提供/工具返回时间为准，不凭记忆编造新论文。明确搜索范围和剩余缺口。
 不要输出无证据的理论、因果或矛盾关系。若证据不够，outcome=insufficient_evidence，说明未完成部分。
-保留一次模型调用和一次工具调用用于 finish_report，不要无休止检索。通常 5–10 次检索足以给首轮结果。
+保留一次模型调用和一次工具调用用于 finish_report，不要无休止检索。
 若本轮是追问或重试，用户消息会给出上一轮目标、上一轮报告和已授权复用的证据 id。复用它们，不要重复抓取同样的来源；也不要断言上一轮没有给出的内容。上一轮报告没有被覆盖，本轮报告是新版本，完成后会与上一轮对比。
 """
 
@@ -103,24 +113,32 @@ class AgentRuntime:
 
     def start(self):
         self.tasks.recover()
-        # Restored before anything can be admitted: an outage the previous process was in the middle
-        # of must not get eight free attempts because somebody restarted the service.
-        saved = self.tasks.setting(BREAKER_SETTINGS_KEY, owner=SITE_SETTINGS_OWNER)
+        saved = self.tasks.setting(DESTINATION_BREAKERS_KEY, owner=SITE_SETTINGS_OWNER)
         if saved:
-            self.quota.breaker.load(saved)
+            self.quota.destination_breakers.load(saved)
+        saved = self.tasks.setting(PROBE_LEDGER_KEY, owner=SITE_SETTINGS_OWNER)
+        if saved:
+            self.quota.probes.load(saved)
 
-    def _record_breaker(self, *, failure: str = "") -> None:
-        """Feed the site-wide breaker the outcome of one model call, and keep it across restarts.
+    def _save_destination_breakers(self) -> None:
+        self.tasks.save_setting(DESTINATION_BREAKERS_KEY,
+                                self.quota.destination_breakers.snapshot(),
+                                owner=SITE_SETTINGS_OWNER)
 
-        Written only when it says something new — opening, or closing something that was open. The
-        success path runs on every model call of every turn, and a breaker that was already closed has
-        nothing to report.
-        """
-        was_open = self.quota.breaker.state() != "closed"
-        state = (self.quota.breaker.record_failure(failure) if failure
-                 else self.quota.breaker.record_success())
-        if was_open or state["state"] != "closed":
-            self.tasks.save_setting(BREAKER_SETTINGS_KEY, state, owner=SITE_SETTINGS_OWNER)
+    def _save_probe_ledger(self) -> None:
+        self.tasks.save_setting(PROBE_LEDGER_KEY, self.quota.probes.snapshot(),
+                                owner=SITE_SETTINGS_OWNER)
+
+    def _record_destination_failure(self, endpoint: str, error: ModelError) -> None:
+        if error.status == 429:
+            return
+        if error.destination:
+            self.quota.destination_breakers.record_failure(destination_key(endpoint), str(error))
+            self._save_destination_breakers()
+
+    def _record_destination_success(self, endpoint: str) -> None:
+        self.quota.destination_breakers.record_success(destination_key(endpoint))
+        self._save_destination_breakers()
 
     def close(self):
         self._stop.set()
@@ -132,10 +150,19 @@ class AgentRuntime:
         `busy` is a fact about the process, and the lease says only whether the slot is theirs."""
         tool_names = [x["function"]["name"] for x in specifications(True, self.tools.web_enabled)]
         has_full_text = "fetch_paper_text" in tool_names
-        return {**self.vault.public(owner=owner), **self.busy_view(owner),
+        connection = self.vault.public(owner=owner)
+        endpoint = destination_key(connection["base_url"]) if connection.get("configured") else ""
+        destination_status = None
+        if endpoint:
+            destination_status = {"endpoint": endpoint,
+                                  "state": self.quota.destination_breakers.state(endpoint),
+                                  "retry_after": int(self.quota.destination_breakers.wait_seconds(endpoint) + 0.999),
+                                  "owner_cooldown": self.quota.probes.refusal(owner, endpoint)}
+        return {**connection, **self.busy_view(owner),
                 "runtime": "native-durable-tool-loop",
                 "deployment": self.deployment.describe(),
                 "quota": self.quota.describe(owner),
+                "destination_status": destination_status,
                 "web_search_enabled": self.tools.web_enabled,
                 "capabilities": {"tools": tool_names,
                                  "full_text": {"enabled": has_full_text,
@@ -147,9 +174,67 @@ class AgentRuntime:
                 "endpoint_presets": ENDPOINT_PRESETS,
                 "tool_names": tool_names}
 
-    def list_models(self, credential: ModelListRequest):
-        """Ask one allowlisted endpoint what it serves. Nothing is stored or logged."""
-        return fetch_model_list(credential, transport=self._transport, hosted=self.deployment.hosted)
+    def _raise_destination_refusal(self, endpoint: str) -> None:
+        if self.quota.emergency_stop:
+            raise HTTPException(503, "部署者已启用全站急停；本次请求没有访问模型服务")
+        refusal = self.quota.destination_breakers.refusal(destination_key(endpoint))
+        if refusal:
+            raise HTTPException(503, refusal["message"],
+                                headers={"Retry-After": str(refusal["retry_after"])})
+
+    @contextmanager
+    def _probe_scope(self, owner: str, kind: str, endpoint: str):
+        """Reserve one bounded owner probe and one half-open destination permit."""
+        if self.quota.emergency_stop:
+            raise HTTPException(503, "部署者已启用全站急停；本次探测没有发出请求")
+        key = destination_key(endpoint)
+        owner_refusal = self.quota.probes.refusal(owner, key)
+        if owner_refusal:
+            raise HTTPException(429, owner_refusal["message"],
+                                headers={"Retry-After": str(owner_refusal["retry_after"])})
+        reservation = self.quota.probes.reserve(owner, kind, key)
+        if not reservation["allowed"]:
+            raise HTTPException(reservation["status"], reservation["message"],
+                                headers={"Retry-After": str(reservation["retry_after"])})
+        self._save_probe_ledger()
+        destination_permit = self.quota.destination_breakers.acquire(key)
+        if not destination_permit["allowed"]:
+            self.quota.probes.finish(owner, status="refused_destination")
+            self._save_probe_ledger()
+            raise HTTPException(503, destination_permit["message"],
+                                headers={"Retry-After": str(destination_permit["retry_after"])})
+        outcome, retry_after, reason = "failed", 0.0, ""
+        try:
+            yield
+        except ModelError as exc:
+            if exc.status == 429:
+                retry_after = exc.retry_after or 1
+                reason, outcome = "HTTP 429", "rate_limited"
+                self.quota.probes.cooldown(owner, key, retry_after, reason)
+                raise HTTPException(429, str(exc), headers={
+                    "Retry-After": str(max(1, int(retry_after + 0.999)))}) from exc
+            elif exc.destination:
+                outcome = "destination_failed"
+                self._record_destination_failure(key, exc)
+                raise HTTPException(502, str(exc)) from exc
+            raise
+        except BaseException:
+            outcome = "interrupted"
+            raise
+        else:
+            outcome = "success"
+            self._record_destination_success(key)
+        finally:
+            self.quota.destination_breakers.release(key)
+            self.quota.probes.finish(owner, status=outcome, retry_after=retry_after,
+                                     reason=reason)
+            self._save_probe_ledger()
+
+    def list_models(self, credential: ModelListRequest, *, owner: str):
+        """Ask one allowlisted endpoint what it serves under a bounded owner probe."""
+        config = validate_endpoint(credential, hosted=self.deployment.hosted)
+        with self._probe_scope(owner, "models", config.base_url):
+            return fetch_model_list(config, transport=self._transport, hosted=self.deployment.hosted)
 
     def _authorize_model_lease(self, owner: str, generation: int):
         if not self.vault.is_current(owner, generation):
@@ -184,19 +269,86 @@ class AgentRuntime:
         later model call, so pasting whole bodies here multiplies their cost by the
         number of remaining turns.
         """
-        view = {key: value for key, value in cached.items() if key != "evidence"}
+        view = json.loads(json.dumps({key: value for key, value in cached.items() if key != "evidence"},
+                                     ensure_ascii=False))
+        if isinstance(view.get("paper"), dict):
+            self._compact_paper(view["paper"])
+        if isinstance(view.get("resource_audits"), list):
+            all_audits = view["resource_audits"]
+            view["resource_audits"] = [self._compact_audit(item) for item in all_audits[:12]]
+            if len(all_audits) > 12:
+                view["resource_audits_omitted"] = len(all_audits) - 12
+        coverage = view.get("coverage")
+        if isinstance(coverage, dict) and isinstance(coverage.get("attempts"), list):
+            attempts = coverage["attempts"]
+            coverage["attempts"] = attempts[:20]
+            if len(attempts) > 20:
+                coverage["attempts_omitted"] = len(attempts) - 20
         budget, evidence = TOOL_EXCERPT_BUDGET, []
         for item in cached.get("evidence", []):
             body = item.get("content") or ""
+            # Paper metadata carries the abstract separately. Do not send the same long abstract a
+            # second time in its prose card.
+            if item.get("kind") == "paper" and isinstance(item.get("paper"), dict):
+                abstract = str(item["paper"].get("abstract") or "")
+                duplicate = "\nabstract: " + abstract if abstract else ""
+                if duplicate and body.endswith(duplicate):
+                    body = body[:-len(duplicate)]
             keep = min(EVIDENCE_EXCERPT_CHARS, max(0, budget), len(body))
             budget -= keep
             entry = {key: value for key, value in item.items() if key != "content"}
+            if isinstance(entry.get("paper"), dict):
+                self._compact_paper(entry["paper"])
+            if isinstance(entry.get("resource_audits"), list):
+                all_audits = entry["resource_audits"]
+                entry["resource_audits"] = [self._compact_audit(audit) for audit in all_audits[:8]]
+                if len(all_audits) > 8:
+                    entry["resource_audits_omitted"] = len(all_audits) - 8
             entry.update({"content_chars": len(body), "excerpt": body[:keep], "elided": keep < len(body)})
             evidence.append(entry)
         if evidence:
             view["evidence"] = evidence
             view["evidence_note"] = "这里只给有界摘录；完整正文保存在本任务证据库，需要时用 read_evidence 按 id 取回。"
         return view
+
+    @staticmethod
+    def _compact_paper(paper: dict, *, abstract_limit: int = 1200) -> None:
+        abstract = str(paper.get("abstract") or "")
+        if len(abstract) > abstract_limit:
+            paper["abstract"] = abstract[:abstract_limit]
+            paper["abstract_chars"] = len(abstract)
+            paper["abstract_truncated"] = True
+
+    @staticmethod
+    def _compact_audit(audit: dict, *, detail: bool = True) -> dict:
+        """Compact only the model view; the full ResourceAudit stays in agent_evidence."""
+        fields = ("paper_title", "work_identifier", "work_version", "resource_url", "resource_type",
+                  "candidate_origin", "attribution", "author_declaration", "status", "provider_status",
+                  "provider", "summary", "access", "scope", "revision", "checked_at",
+                  "verification_depth", "licences", "version_match", "version_evidence", "limitations")
+        result = {key: audit[key] for key in fields if key in audit}
+        result["coverage"] = {}
+        for name, finding in (audit.get("coverage") or {}).items():
+            finding = finding if isinstance(finding, dict) else {}
+            row = {"state": finding.get("state", "unknown")}
+            paths, sources = list(finding.get("paths") or []), list(finding.get("sources") or [])
+            if detail:
+                row["paths"], row["sources"] = paths[:3], sources[:2]
+                if len(paths) > 3:
+                    row["paths_omitted"] = len(paths) - 3
+                if len(sources) > 2:
+                    row["sources_omitted"] = len(sources) - 2
+            elif paths or sources:
+                row["details_note"] = "完整文件路径和来源保存在证据记录，可用 read_evidence 按 ID 取回"
+            result["coverage"][name] = row
+        for key in ("attribution_evidence", "author_declaration_evidence", "evidence"):
+            items = list(audit.get(key) or [])
+            result[key] = ([{name: item.get(name) for name in ("source_url", "locator", "category")
+                             if item.get(name)} | {"excerpt": str(item.get("excerpt") or "")[:350]}
+                            for item in items[:4]] if detail else [])
+            if len(items) > 4:
+                result[key + "_omitted"] = len(items) - 4
+        return result
 
     def read_evidence(self, rid, args) -> dict:
         """Serve a bounded slice of a body already stored for this task."""
@@ -210,6 +362,7 @@ class AgentRuntime:
         return {"ok": True, "evidence_id": request.evidence_id, "kind": stored.get("kind", ""),
                 "locator": stored.get("locator", ""), "source_url": stored.get("source_url", ""),
                 "offset": start, "total_chars": len(body), "content": body[start:end],
+                "paper": stored.get("paper"), "resource_audits": stored.get("resource_audits", []),
                 "truncated": end < len(body),
                 "note": "这是证据库保存的来源摘录切片，不是原始文献全文；需要后续内容时用 offset 继续。"}
 
@@ -232,6 +385,11 @@ class AgentRuntime:
             for item in dropped:
                 item["excerpt"] = ""
                 item["elided"] = True
+                if isinstance(item.get("paper"), dict):
+                    self._compact_paper(item["paper"], abstract_limit=0)
+                if isinstance(item.get("resource_audits"), list):
+                    item["resource_audits"] = [self._compact_audit(audit, detail=False)
+                                                for audit in item["resource_audits"]]
             if dropped:
                 body["evidence_note"] = "较早的摘录已从上下文移除以控制体积；证据未删除，用 read_evidence 按 id 取回。"
                 state["messages"][index]["content"] = json.dumps(body, ensure_ascii=False)
@@ -332,10 +490,18 @@ class AgentRuntime:
                 raise HTTPException(409, "正在测试模型连接；测试结束后再开始任务")
         if self._busy or self._stop.is_set():
             raise HTTPException(409, self._busy_message())
-        refusal = self.quota.breaker.refusal()
+        if self.quota.emergency_stop:
+            raise HTTPException(503, "部署者已启用全站急停；本次没有创建任务或访问模型服务")
+        config, _ = self.vault.snapshot_with_generation(owner=owner)
+        endpoint = destination_key(config.base_url)
+        owner_refusal = self.quota.probes.refusal(owner, endpoint)
+        if owner_refusal:
+            raise HTTPException(429, owner_refusal["message"],
+                                headers={"Retry-After": str(owner_refusal["retry_after"])})
+        refusal = self.quota.destination_breakers.refusal(endpoint)
         if refusal:
-            raise HTTPException(503, refusal,
-                                headers={"Retry-After": str(int(self.quota.breaker.wait_seconds()) + 1)})
+            raise HTTPException(503, refusal["message"],
+                                headers={"Retry-After": str(refusal["retry_after"])})
         gate = self.quota.check_task(owner)
         if not gate["allowed"]:
             raise HTTPException(429, gate["message"],
@@ -356,7 +522,7 @@ class AgentRuntime:
     def connect(self, config: ModelConfig, *, owner: str):
         """Test a submitted BYOK credential once, and keep it only after tool calling succeeds."""
         with self._lock:
-            if self._owner_busy(owner) or self._busy or self._stop.is_set():
+            if self._owner_busy(owner) or self._stop.is_set():
                 raise HTTPException(409, self._busy_message())
             with self._connect_guard:
                 if owner in self._connecting_owners:
@@ -369,23 +535,19 @@ class AgentRuntime:
 
             model = ChatModel(config, self._transport, hosted=self.deployment.hosted)
             model.set_call_authorizer(authorize)
-            authorize()
-            result = model.test()
-            authorize()
-            self.vault.set(config, owner=owner)
-            try:
+            with self._probe_scope(owner, "connect", model.config.base_url):
                 authorize()
-            except Cancelled:
-                self.vault.clear(owner=owner)
-                raise
-            self._record_breaker()
+                result = model.test()
+                authorize()
+                self.vault.set(config, owner=owner)
+                try:
+                    authorize()
+                except Cancelled:
+                    self.vault.clear(owner=owner)
+                    raise
             return {**self.public(owner=owner), "connection_test": result}
         except Cancelled as exc:
             raise HTTPException(401, str(exc)) from exc
-        except ModelError as exc:
-            if exc.destination:
-                self._record_breaker(failure=str(exc))
-            raise
         finally:
             with self._connect_guard:
                 self._connecting_owners.discard(owner)
@@ -393,25 +555,19 @@ class AgentRuntime:
     def test_connection(self, *, owner: str):
         """One possibly billed capability test against this owner's own destination.
 
-        It does not take the execution slot: the test runs in the request thread, and reserving the
-        slot for it would let a settings page block everybody's research.
-
-        It is deliberately not gated by the breaker either — that test is the way out of an open
-        breaker, and the refusal text tells the reader to run exactly this. What it reaches the network
-        for, it reports back to.
+        It has a separate owner/global probe budget and a bounded half-open permit; it does not
+        occupy the single research slot. A successful test can close only this endpoint's breaker.
         """
+        if self._owner_busy(owner):
+            raise HTTPException(409, "你的研究任务正在运行；完成或停止后再做连接探测")
         config, generation = self.vault.snapshot_with_generation(owner=owner)
         try:
             model = self._model_for_lease(config, owner, generation)
-            self._authorize_model_lease(owner, generation)
-            result = model.test()
+            with self._probe_scope(owner, "connect", config.base_url):
+                self._authorize_model_lease(owner, generation)
+                result = model.test()
         except Cancelled as exc:
             raise HTTPException(401, str(exc)) from exc
-        except ModelError as exc:
-            if exc.destination:
-                self._record_breaker(failure=str(exc))
-            raise
-        self._record_breaker()
         return result
 
     def submit(self, params: TaskInput, *, owner: str):
@@ -555,9 +711,12 @@ class AgentRuntime:
         stored = {"goal": scope.goal, "consent_to_send": True, **budgets.model_dump()}
         state = {
             "messages": [{"role": "system",
-                          "content": SYSTEM + f"\n任务创建时间（UTC）：{now()}。"
+                          "content": SYSTEM + f"\n本轮检索起步预设：{RESEARCH_SCOPE_INSTRUCTIONS[budgets.research_scope]}\n"
+                                              f"任务创建时间（UTC）：{now()}。"
                                               f"文献库元数据授权：{bool(budgets.use_library)}。"}],
             "pending": [], "plan": [], "report": None, "model_calls": 0, "tool_calls": 0,
+            "upstream_requests": 0, "model_request_chars": 0, "model_request_bytes": 0,
+            "largest_model_request_chars": 0, "largest_model_request_bytes": 0, "offered_tools": [],
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
                       "unreported_calls": 0},
             "resumes": 0, "prompt_version": PROMPT_VERSION, "reserved_tools": [],
@@ -602,7 +761,9 @@ class AgentRuntime:
             state = run["state"]
             if state["resumes"] >= 3:
                 raise HTTPException(409, "已达到 3 次手动恢复上限；请新建任务")
-            if state["model_calls"] >= run["params"]["max_model_calls"] or state["tool_calls"] >= run["params"]["max_tool_calls"]:
+            if (state["model_calls"] >= run["params"]["max_model_calls"]
+                    or state["tool_calls"] >= run["params"]["max_tool_calls"]
+                    or state.get("upstream_requests", 0) >= run["params"].get("max_upstream_requests", 60)):
                 raise HTTPException(409, "任务累计调用预算已耗尽")
             state["resumes"] += 1
             self.tasks.reset_cancel(rid)
@@ -610,6 +771,29 @@ class AgentRuntime:
             self.tasks.event(rid, "resumed", {"message": "使用已保存的对话与工具结果继续；模型/工具次数不重置，单次执行时间窗口重新开始"})
             self._launch(rid, config, owner, generation)
             return self.tasks.get(rid, owner=owner)
+
+    def _previous_equivalent_tool_call(self, rid: str, state: dict, current_id: str,
+                                       name: str, args: dict) -> str:
+        """Find an exact prior tool input so the model can be told before it repeats the work."""
+        if name in {"update_plan", "finish_report", "read_evidence"}:
+            return ""
+        normalized = json.dumps(args, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        for message in reversed(state.get("messages", [])):
+            if message.get("role") != "assistant":
+                continue
+            for prior in reversed(message.get("tool_calls", [])):
+                prior_id = prior.get("id", "")
+                function = prior.get("function") or {}
+                if not prior_id or prior_id == current_id or function.get("name") != name:
+                    continue
+                try:
+                    prior_args = json.dumps(json.loads(function.get("arguments", "{}")),
+                                            ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                except (TypeError, ValueError):
+                    continue
+                if prior_args == normalized and self.tasks.cached_tool(rid, prior_id) is not None:
+                    return prior_id
+        return ""
 
     def _launch(self, rid, config, owner: str, generation: int):
         # The lease names the owner so a refused submit can say whether the slot is the caller's own,
@@ -622,6 +806,11 @@ class AgentRuntime:
     def _worker(self, rid, config, generation):
         run = self.tasks.get(rid, internal=True)
         state, params = run["state"], run["params"]
+        state.setdefault("upstream_requests", 0)
+        state.setdefault("model_request_chars", 0)
+        state.setdefault("model_request_bytes", 0)
+        state.setdefault("largest_model_request_chars", 0)
+        state.setdefault("largest_model_request_bytes", 0)
         # The owner is read from the stored run, not from anything the model can supply: a tool call
         # that could name an owner could read anybody's library.
         owner = run.get("owner") or ""
@@ -640,18 +829,64 @@ class AgentRuntime:
 
         def boundary():
             self._authorize_model_lease(owner, generation)
+            if self.quota.emergency_stop:
+                raise BudgetStop("部署者已启用全站急停；保留已有证据，未启动后续请求")
             if self.tasks.cancelled(rid):
                 raise Cancelled
             if self._stop.is_set():
                 raise Paused
+            # Once a report call has returned, validating and storing it is local work covered by
+            # the reserved final model request. Do not turn that answer into budget_exhausted before
+            # its pending tool call can be processed.
+            final_report_pending = (len(state.get("pending") or []) == 1 and
+                                    state["pending"][0].get("function", {}).get("name") == "finish_report")
+            if state.get("report") or final_report_pending:
+                return
             if time.monotonic() >= deadline:
                 raise BudgetStop("本次执行时间预算已用尽；已保留现有证据")
+            max_upstream = int(params.get("max_upstream_requests", 60))
+            if state["upstream_requests"] >= max_upstream:
+                raise BudgetStop(f"本轮上游 HTTP 请求预算已用尽（{state['upstream_requests']}/{max_upstream}）；"
+                                 "保留已取得的证据，没有补造报告")
             if session_model and base_model + state["model_calls"] >= session_model:
                 raise BudgetStop(f"会话累计模型调用已达上限 {base_model + state['model_calls']}/{session_model}；"
                                  "本轮停止，证据保留。继续需要在新一轮请求里显式提高上限")
             if session_tool and base_tool + state["tool_calls"] >= session_tool:
                 raise BudgetStop(f"会话累计工具调用已达上限 {base_tool + state['tool_calls']}/{session_tool}；"
                                  "本轮停止，证据保留。继续需要在新一轮请求里显式提高上限")
+
+        def request_authorizer(kind, request_timeout, *, request_chars=0, request_bytes=0):
+            try:
+                boundary()
+            except Cancelled as exc:
+                raise RequestBoundaryStop("cancelled", str(exc)) from exc
+            except Paused as exc:
+                raise RequestBoundaryStop("paused", "应用停止；当前上游请求未发送") from exc
+            except BudgetStop as exc:
+                raise RequestBoundaryStop("budget", str(exc)) from exc
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RequestBoundaryStop("deadline", "本次执行时间预算已用尽；本次请求未发送")
+            limit = int(params.get("max_upstream_requests", 60))
+            used = int(state.get("upstream_requests", 0))
+            if kind == "provider" and used >= limit - 1:
+                raise UpstreamRequestBudgetExceeded(
+                    f"任务总上游请求预算将保留最后一次模型请求；已达 {used}/{limit}，"
+                    "本次检索没有发出下一页或重试")
+            if used >= limit:
+                raise BudgetStop(f"本轮上游 HTTP 请求预算已用尽（{used}/{limit}）")
+            state["upstream_requests"] = used + 1
+            if kind == "model":
+                state["model_request_chars"] = int(state.get("model_request_chars", 0)) + int(request_chars or 0)
+                state["model_request_bytes"] = int(state.get("model_request_bytes", 0)) + int(request_bytes or 0)
+                state["largest_model_request_chars"] = max(
+                    int(state.get("largest_model_request_chars", 0)), int(request_chars or 0))
+                state["largest_model_request_bytes"] = max(
+                    int(state.get("largest_model_request_bytes", 0)), int(request_bytes or 0))
+            # Reserve and persist before dispatch. A failed request or process restart cannot
+            # silently make this request slot available again.
+            self.tasks.checkpoint(rid, state)
+            return min(float(request_timeout), remaining)
 
         try:
             model = self._model_for_lease(config, owner, generation)
@@ -688,11 +923,19 @@ class AgentRuntime:
                             state["reserved_tools"].append(cid)
                             self.tasks.checkpoint(rid, state)
                         self.tasks.event(rid, "tool_started", {"tool": name, "call_id": cid})
+                        repeated_from = ""
                         try:
                             args = json.loads(call["function"]["arguments"])
-                            allowed = {t["function"]["name"] for t in specifications(params["use_library"], self.tools.web_enabled)}
+                            allowed = set(state.get("offered_tools") or
+                                          [t["function"]["name"] for t in specifications(
+                                              params["use_library"], self.tools.web_enabled)])
                             if name not in allowed:
                                 raise ValueError("该工具不在本任务授权范围内")
+                            repeated_from = self._previous_equivalent_tool_call(rid, state, cid, name, args)
+                            if repeated_from:
+                                self.tasks.event(rid, "tool_repeat_warning", {
+                                    "tool": name, "call_id": cid, "previous_call_id": repeated_from,
+                                    "message": "本任务已经完成相同工具与参数；仍会按本次请求执行。检索可复用缓存，刷新请显式设置 refresh=true（若该工具支持）"})
                             if name == "update_plan":
                                 plan = PlanArgs.model_validate(args)
                                 payload = {"ok": True, "plan": plan.steps}
@@ -722,9 +965,14 @@ class AgentRuntime:
                                 payload = self.read_evidence(rid, args)
                             else:
                                 payload = {"ok": True, **self.tools.execute(
-                                    name, args, use_library=params["use_library"], owner=owner)}
+                                    name, args, use_library=params["use_library"], owner=owner,
+                                    request_authorizer=request_authorizer)}
                         except ValidationError as exc:
                             payload = {"ok": False, "error": "工具参数结构不正确", "fields": [".".join(map(str, e["loc"])) for e in exc.errors()][:10]}
+                        except UpstreamRequestBudgetExceeded as exc:
+                            payload = {"ok": False, "error": str(exc), "request_budget_exhausted": True}
+                        except RequestBoundaryStop as exc:
+                            payload = {"ok": False, "error": str(exc), "execution_stop": exc.kind}
                         except ProviderError as exc:
                             payload = {"ok": False, "error": str(exc), "status": exc.status}
                         except (ValueError, ET.ParseError, KeyError, TypeError, AttributeError, UnicodeError):
@@ -752,16 +1000,42 @@ class AgentRuntime:
                 self.tasks.checkpoint(rid, state)
                 self.tasks.event(rid, "model_started", {"call": state["model_calls"], "message": "模型正在选择下一步行动"})
                 tools = specifications(params["use_library"], self.tools.web_enabled)
-                if state["model_calls"] == params["max_model_calls"] or state["tool_calls"] >= params["max_tool_calls"] - 1:
+                upstream_left = int(params.get("max_upstream_requests", 60)) - state["upstream_requests"]
+                if (state["model_calls"] == params["max_model_calls"]
+                        or state["tool_calls"] >= params["max_tool_calls"] - 1
+                        or upstream_left <= 2):
                     tools = [x for x in tools if x["function"]["name"] == "finish_report"]
+                state["offered_tools"] = [x["function"]["name"] for x in tools]
+                self.tasks.checkpoint(rid, state)
                 # Elide older excerpts well before the serialized hard cap in ChatModel.
                 if len(json.dumps(state["messages"], ensure_ascii=False)) > CONTEXT_COMPACT_CHARS:
                     self.compact_context(rid, state)
                 self._authorize_model_lease(owner, generation)
-                reply = model.complete(state["messages"], tools, timeout=min(60, max(1, deadline-time.monotonic())))
-                # A model call that returned is proof the destination answers, from anywhere in the
-                # process's life: it closes a breaker a restart carried over as well as a live outage.
-                self._record_breaker()
+
+                set_request_authorizer = getattr(model, "set_request_authorizer", None)
+                if set_request_authorizer:
+                    set_request_authorizer(request_authorizer)
+                endpoint = destination_key(config.base_url)
+                destination_permit = self.quota.destination_breakers.acquire(endpoint)
+                if not destination_permit["allowed"]:
+                    state["model_calls"] -= 1
+                    self.tasks.checkpoint(rid, state)
+                    raise ModelError(destination_permit["message"])
+                try:
+                    reply = model.complete(state["messages"], tools,
+                                           timeout=min(60, max(1, deadline-time.monotonic())))
+                except ModelError as exc:
+                    if exc.status == 429:
+                        self.quota.probes.cooldown(owner, endpoint, exc.retry_after or 1,
+                                                   "HTTP 429")
+                        self._save_probe_ledger()
+                    else:
+                        self._record_destination_failure(endpoint, exc)
+                    raise
+                else:
+                    self._record_destination_success(endpoint)
+                finally:
+                    self.quota.destination_breakers.release(endpoint)
                 # Check after I/O as cancellation may have arrived during a request.
                 for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
                     state["usage"][k] += reply["usage"][k]
@@ -785,13 +1059,23 @@ class AgentRuntime:
         except BudgetStop as exc:
             self.tasks.checkpoint(rid, state, "budget_exhausted", str(exc))
             self.tasks.event(rid, "budget_exhausted", {"message": str(exc)})
+        except RequestBoundaryStop as exc:
+            if exc.kind == "cancelled":
+                self.tasks.checkpoint(rid, state, "cancelled", f"{exc}；保留已有证据和调用记录")
+                self.tasks.event(rid, "cancelled", {"message": str(exc)})
+            elif exc.kind == "paused":
+                self.tasks.checkpoint(rid, state, "interrupted", str(exc))
+                self.tasks.event(rid, "interrupted", {"message": str(exc)})
+            else:
+                self.tasks.checkpoint(rid, state, "budget_exhausted", str(exc))
+                self.tasks.event(rid, "budget_exhausted", {"message": str(exc)})
         except ModelError as exc:
-            if exc.destination:
-                # Only a destination failure reaches a site-wide breaker: an unconfigured or refused
-                # key is this account's to fix, and must not stop unrelated work.
-                self._record_breaker(failure=str(exc))
-            self.tasks.checkpoint(rid, state, "failed", str(exc))
-            self.tasks.event(rid, "failed", {"message": str(exc)})
+            message = str(exc)
+            if exc.status == 429:
+                retry = max(1, int((exc.retry_after or 1) + 0.999))
+                message += f"；此账户对当前模型服务冷却约 {retry} 秒；没有自动重试"
+            self.tasks.checkpoint(rid, state, "failed", message)
+            self.tasks.event(rid, "failed", {"message": message})
         except Exception:
             self.tasks.checkpoint(rid, state, "failed", "agent 内部错误；证据已保留。请检查本地版本并提交不含密钥的问题报告")
             self.tasks.event(rid, "failed", {"message": "执行失败，没有生成未经验证的报告"})

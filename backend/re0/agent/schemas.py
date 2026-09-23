@@ -50,7 +50,8 @@ class ModelListRequest(StrictModel):
         return clean_secret(value)
 
 
-BUDGET_FIELDS = ("max_model_calls", "max_tool_calls", "attempt_seconds", "use_library")
+TASK_DEFAULT_FIELDS = ("max_model_calls", "max_tool_calls", "max_upstream_requests",
+                       "attempt_seconds", "use_library", "research_scope")
 
 
 class SessionCaps(StrictModel):
@@ -75,8 +76,10 @@ class TaskDefaults(StrictModel):
 
     max_model_calls: int = Field(default=12, ge=2, le=24)
     max_tool_calls: int = Field(default=20, ge=1, le=40)
+    max_upstream_requests: int = Field(default=60, ge=2, le=300)
     attempt_seconds: int = Field(default=360, ge=30, le=900)
     use_library: bool = False
+    research_scope: Literal["focused", "expanded"] = "focused"
 
     def merged(self, task) -> "TaskDefaults":
         """A task may omit budgets; the stored workspace default then applies.
@@ -86,7 +89,7 @@ class TaskDefaults(StrictModel):
         continuing turn (`RetryInput`) carries budgets but no library flag: that
         one is inherited deliberately, and its absence must read as "not given".
         """
-        supplied = {name: getattr(task, name, None) for name in BUDGET_FIELDS
+        supplied = {name: getattr(task, name, None) for name in TASK_DEFAULT_FIELDS
                     if getattr(task, name, None) is not None}
         return self.model_copy(update=supplied)
 
@@ -96,8 +99,10 @@ class TaskInput(StrictModel):
     # None means "use the workspace default", not "unlimited".
     max_model_calls: int | None = Field(default=None, ge=2, le=24)
     max_tool_calls: int | None = Field(default=None, ge=1, le=40)
+    max_upstream_requests: int | None = Field(default=None, ge=2, le=300)
     attempt_seconds: int | None = Field(default=None, ge=30, le=900)
     use_library: bool | None = None
+    research_scope: Literal["focused", "expanded"] | None = None
     consent_to_send: Literal[True]
 
 
@@ -110,7 +115,9 @@ class TurnBudget(StrictModel):
 
     max_model_calls: int | None = Field(default=None, ge=2, le=24)
     max_tool_calls: int | None = Field(default=None, ge=1, le=40)
+    max_upstream_requests: int | None = Field(default=None, ge=2, le=300)
     attempt_seconds: int | None = Field(default=None, ge=30, le=900)
+    research_scope: Literal["focused", "expanded"] | None = None
 
 
 class FollowUpInput(TurnBudget):

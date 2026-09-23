@@ -1,5 +1,6 @@
 """Offline behavioral tests: real gateway/runtime/tools, fixture model and provider HTTP."""
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import json
 import threading
 import time
@@ -340,9 +341,9 @@ def test_import_existing_paper_never_overwrites_notes(tmp_path):
 
 
 def test_omitted_task_budgets_fall_back_to_workspace_defaults():
-    defaults=TaskDefaults(max_model_calls=6,max_tool_calls=9,attempt_seconds=120,use_library=True)
+    defaults=TaskDefaults(max_model_calls=6,max_tool_calls=9,max_upstream_requests=42,attempt_seconds=120,use_library=True,research_scope='expanded')
     inherited=defaults.merged(TaskInput(goal='检索 layout 论文与资源',consent_to_send=True))
-    assert inherited.model_dump()=={'max_model_calls':6,'max_tool_calls':9,'attempt_seconds':120,'use_library':True}
+    assert inherited.model_dump()=={'max_model_calls':6,'max_tool_calls':9,'max_upstream_requests':42,'attempt_seconds':120,'use_library':True,'research_scope':'expanded'}
     # An explicit per-task value still wins, including an explicit False.
     narrowed=defaults.merged(TaskInput(goal='检索 layout 论文与资源',consent_to_send=True,max_tool_calls=3,use_library=False))
     assert narrowed.max_tool_calls==3 and narrowed.use_library is False and narrowed.max_model_calls==6
@@ -351,13 +352,13 @@ def test_omitted_task_budgets_fall_back_to_workspace_defaults():
 def test_saved_defaults_persist_and_are_applied_to_new_tasks(tmp_path):
     network=FixtureNetwork();path=str(tmp_path/'defaults.sqlite3')
     with TestClient(create_app(path,httpx.MockTransport(network)),headers=HEADERS) as c:
-        assert c.get('/api/agent/config').json()['task_defaults']=={'max_model_calls':12,'max_tool_calls':20,'attempt_seconds':360,'use_library':False}
-        saved=c.put('/api/agent/defaults',json={'max_model_calls':5,'max_tool_calls':4,'attempt_seconds':120,'use_library':True})
+        assert c.get('/api/agent/config').json()['task_defaults']=={'max_model_calls':12,'max_tool_calls':20,'max_upstream_requests':60,'attempt_seconds':360,'use_library':False,'research_scope':'focused'}
+        saved=c.put('/api/agent/defaults',json={'max_model_calls':5,'max_tool_calls':4,'max_upstream_requests':17,'attempt_seconds':120,'use_library':True,'research_scope':'expanded'})
         assert saved.status_code==200
         assert saved.json()['task_defaults']['attempt_seconds']==120
         c.put('/api/agent/config',json=CONFIG)
         run=c.post('/api/agent/runs',json=GOAL).json()
-        assert (run['params']['max_model_calls'],run['params']['max_tool_calls'],run['params']['attempt_seconds'])==(5,4,120)
+        assert (run['params']['max_model_calls'],run['params']['max_tool_calls'],run['params']['max_upstream_requests'],run['params']['attempt_seconds'],run['params']['research_scope'])==(5,4,17,120,'expanded')
         assert run['params']['use_library'] is True
         assert wait_done(c,run['id'])['status']=='completed'
     # A later process on the same database must keep the saved defaults.
@@ -366,7 +367,7 @@ def test_saved_defaults_persist_and_are_applied_to_new_tasks(tmp_path):
 
 
 def test_defaults_reject_invalid_values_without_changing_the_saved_row(client):
-    for payload in ({'max_model_calls':99},{'max_tool_calls':0},{'attempt_seconds':10},{'max_model_calls':6,'unknown':1}):
+    for payload in ({'max_model_calls':99},{'max_tool_calls':0},{'max_upstream_requests':301},{'attempt_seconds':10},{'research_scope':'unknown'},{'max_model_calls':6,'unknown':1}):
         assert client.put('/api/agent/defaults',json=payload).status_code==422
     assert client.get('/api/agent/config').json()['task_defaults']['max_model_calls']==12
 
@@ -379,7 +380,7 @@ def test_clearing_model_memory_keeps_defaults_and_never_echoes_the_key(client):
     remaining=client.get('/api/agent/config').json()
     assert remaining['configured'] is False
     # Clearing the in-memory model must not silently reset workspace policy.
-    assert remaining['task_defaults']=={'max_model_calls':8,'max_tool_calls':20,'attempt_seconds':360,'use_library':True}
+    assert remaining['task_defaults']=={'max_model_calls':8,'max_tool_calls':20,'max_upstream_requests':60,'attempt_seconds':360,'use_library':True,'research_scope':'focused'}
     assert CONFIG['api_key'] not in client.get('/api/agent/config').text
 
 
@@ -413,6 +414,31 @@ def test_model_list_returns_sorted_unique_ids_without_storing_or_echoing_the_key
         assert network.requests[-1].headers['Authorization']=='Bearer '+CONFIG['api_key']
         # Probing is read-only: it must not leave a model configuration behind.
         assert not c.get('/api/agent/config').json()['configured']
+
+
+def test_parallel_model_list_clicks_for_one_owner_send_only_one_probe(tmp_path):
+    entered, release = threading.Event(), threading.Event()
+    requests = []
+    def network(request):
+        requests.append(request)
+        entered.set()
+        assert release.wait(5)
+        return httpx.Response(200, json={'data': [{'id': 'fixture-model'}]})
+    with TestClient(create_app(str(tmp_path/'parallel-model-probes.sqlite3'),
+                               httpx.MockTransport(network)),headers=HEADERS) as c:
+        payload={'base_url':CONFIG['base_url'],'api_key':CONFIG['api_key'],'trust_endpoint':True}
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            first=pool.submit(c.post,'/api/agent/models',json=payload)
+            assert entered.wait(2)
+            refused=[c.post('/api/agent/models',json=payload) for _ in range(20)]
+            assert all(response.status_code==409 for response in refused)
+            assert len(requests)==1, 'the refused parallel probes must not open another provider request'
+            release.set()
+            response=first.result(timeout=5)
+        assert response.status_code==200,response.text
+        assert len(requests)==1
+        probes=c.get('/api/agent/config').json()['quota']['probes']
+        assert probes['counts']['models']==1 and probes['active'] is False
 
 
 def test_model_list_failure_never_relays_the_provider_body_or_the_key(tmp_path):

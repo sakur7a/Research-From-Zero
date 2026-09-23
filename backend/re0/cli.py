@@ -56,7 +56,7 @@ def print_deployment() -> bool:
     """
     from re0.deployment import DeploymentError, from_env
     from re0.paths import describe as describe_layout
-    from re0.quota import quota_limits_from_env
+    from re0.quota import quota_limits_from_env, site_emergency_stop_from_env
 
     deployment = from_env()
     declared = bool(os.getenv("RE0_MODE", "").strip())
@@ -70,6 +70,7 @@ def print_deployment() -> bool:
         return False
     try:
         limits = quota_limits_from_env(os.environ, hosted=deployment.hosted)
+        emergency_stop = site_emergency_stop_from_env(os.environ)
     except ValueError as exc:
         # `create_app` raises the same thing, so the service really would not start on this number.
         print(f"            配额配置无效：{exc}")
@@ -94,10 +95,16 @@ def print_deployment() -> bool:
         for name, label in (("RE0_REQUESTS_PER_MINUTE", "每账户请求/分钟"),
                             ("RE0_TASKS_PER_HOUR", "每账户任务/小时"),
                             ("RE0_SITE_REQUESTS_PER_MINUTE", "全站请求/分钟")))
-        + ("（已显式设置；未设置的项仍不限。全站熔断始终生效）" if not deployment.hosted and any(
+        + ("（已显式设置；未设置的项仍不限）" if not deployment.hosted and any(
                os.getenv(name, "").strip() for name in limits) else
-           "（本地模式默认不限，显式设置即生效；全站熔断始终生效）" if not deployment.hosted else
-           "（未显式设置即为默认值；全站熔断始终生效，模型服务连续不可用时暂停新任务）"))
+           "（本地模式默认不限，显式设置即生效）" if not deployment.hosted else
+           "（未显式设置即为默认值）"))
+    print("            模型目的地熔断：每个已允许的 Base URL 单独计数；401/402/403/404 不打开熔断；"
+          "429 遵守 Retry-After 并按账户冷却")
+    print("            模型探测：每账户模型列表 6 次/分钟、连接测试 3 次/5 分钟；每账户最多 1 个在途探测，"
+          "全站最多 4 个")
+    print(f"            部署者全站急停：{'启用' if emergency_stop else '未启用'}"
+          "（RE0_SITE_EMERGENCY_STOP=1 启用；它不由单个提供商故障自动打开）")
     return True
 
 
@@ -131,6 +138,12 @@ def doctor(probe_network: bool = False) -> int:
     try:
         from re0.agent.tools import TOOL_TYPES
         print(f"tools available to a task: {len(TOOL_TYPES)} ({', '.join(sorted(TOOL_TYPES))})")
+        from re0.agent.schemas import TaskDefaults
+        defaults = TaskDefaults()
+        print("            任务默认值："
+              f"模型调用 {defaults.max_model_calls}、工具调用 {defaults.max_tool_calls}、"
+              f"上游请求 {defaults.max_upstream_requests}、执行窗口 {defaults.attempt_seconds}s、"
+              f"初始范围 {defaults.research_scope}；起步范围不限制后续检索")
     except Exception as exc:  # noqa: BLE001
         print(f"tools: could not be loaded ({type(exc).__name__}); the install looks incomplete")
         return 2

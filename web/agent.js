@@ -1,6 +1,6 @@
 import {e, link, timeLabel} from './core.js';
 import {initTheme} from './theme.js';
-import {RUN_LABELS, TOOL_LABELS, SHIPPED_DEFAULTS, activeRun, budgetSummary, canFollowUp, canResume, canRetry, consentText, deltaSummary, eventText, followupPayload, followupProblem, idempotencyKeyFor, ledgerLine, modelOptionIds, normalizeDefaults, paperCard, reuseChoices, shortUrl, turnLabel} from './agent-core.js';
+import {RUN_LABELS, TOOL_LABELS, SHIPPED_DEFAULTS, RESEARCH_SCOPE_LABELS, activeRun, budgetSummary, canFollowUp, canResume, canRetry, consentText, deltaSummary, eventText, followupPayload, followupProblem, idempotencyKeyFor, ledgerLine, modelOptionIds, normalizeDefaults, paperCard, reuseChoices, shortUrl, turnLabel} from './agent-core.js';
 
 initTheme();
 const workspace = document.querySelector('#workspace');
@@ -8,7 +8,8 @@ const settings = document.querySelector('#settings');
 const side = document.querySelector('#app-side');
 let identity = {kind: 'local'};
 let config = {}, runs = [], current = null, events = [], workspaces = [], pendingWorkspaceBundle = null,
-  resourceMatrix = null, pendingMatrixSelections = [], tab = 'trace', epoch = 0, timer, toastTimer;
+  resourceMatrix = null, pendingMatrixSelections = [], tab = 'trace', epoch = 0, timer, toastTimer,
+  eventCursor = 0, evidenceCursor = 0, pollFailures = 0, lastPollError = '';
 // The conversation the open run belongs to: its cumulative ledger and caps. Fetched with the run so
 // the composer can show what a follow-up would be added to, rather than only what it may spend.
 let conversation = null;
@@ -21,7 +22,13 @@ async function requestJson(base, path, data, method = data === undefined ? 'GET'
   const response = await fetch(base + path, {method, headers:{'Content-Type':'application/json','X-Re0-Client':'web'}, ...(data === undefined ? {} : {body:JSON.stringify(data)})});
   let result;
   try { result = await response.json(); } catch { throw new Error('服务响应无效，请确认 Python 服务仍在运行。'); }
-  if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : (result.detail || []).map(x => `${(x.loc||[]).join('.')}: ${x.msg}`).join('；') || '操作未完成');
+  if (!response.ok) {
+    const error=new Error(typeof result.detail === 'string' ? result.detail : (result.detail || []).map(x => `${(x.loc||[]).join('.')}: ${x.msg}`).join('；') || '操作未完成');
+    error.status=response.status;
+    const retry=response.headers.get('retry-after');
+    error.retryAfter=retry&&/^\d+(?:\.\d+)?$/.test(retry)?Number(retry):0;
+    throw error;
+  }
   return result;
 }
 const api = (path, data, method) => requestJson('/api/agent', path, data, method);
@@ -92,6 +99,7 @@ function home(goal = '') {
     <p class="lead">让 agent 检索文献、追查资源、整理证据。<br>你决定研究目标，也保留对结论的判断。</p>
     ${!config.configured ? '<div class="setup-note"><span>开始前，需要连接你自己的模型。</span><button class="text-button" data-action="settings">配置模型 →</button></div>' : ''}
     <form id="task-form" class="composer"><label class="sr-only" for="goal">研究目标</label><textarea id="goal" name="goal" minlength="5" maxlength="6000" rows="5" placeholder="描述你的研究问题、筛选条件，以及希望得到的结果…" required>${e(goal)}</textarea>
+      <label class="search-scope">初始检索范围<select name="research_scope"><option value="focused" ${defaults.research_scope==='focused'?'selected':''}>小范围起步 · 约 3 篇、少量来源、1 页</option><option value="expanded" ${defaults.research_scope==='expanded'?'selected':''}>较宽起步 · 多个相关来源、各 1 页</option></select><small>只设起步范围；agent 可按问题和证据缺口继续检索，报告会说明未查来源。</small></label>
       <div class="composer-footer"><span><i class="dot"></i> 自主检索 · 证据可追溯 · 入库需确认</span><div class="composer-actions"><button type="button" class="budget-link" data-action="settings">${e(budgetSummary(defaults))}</button><button class="primary" type="submit" ${!config.configured || config.busy ? 'disabled' : ''}>开始研究 ↗</button></div></div>
       <label class="check consent"><input type="checkbox" name="consent_to_send" required>${e(consentText(defaults))}</label>
     </form>
@@ -99,20 +107,63 @@ function home(goal = '') {
     <div class="scope"><strong>当前能力边界</strong><p>检索论文元数据与摘要，阅读仓库文本，核查资源线索。${fullTextCopy}不会执行陌生代码、读取任意网页或认定论文已复现。${config.web_search_enabled ? '公开网页搜索已配置。' : '未配置 Tavily 时，只使用论文与资源平台搜索，不冒充全网检索。'}</p></div>
   </section>`;
 }
+function requestStats(run) {
+  const usage=run.usage||{};
+  const unreported=usage.unreported_calls?`（${usage.unreported_calls} 次用量未回报）`:'';
+  return `起步预设 ${RESEARCH_SCOPE_LABELS[run.params?.research_scope]||'小范围起步'} · 模型 ${run.model_calls||0}/${run.params?.max_model_calls||'—'} · 工具 ${run.tool_calls||0}/${run.params?.max_tool_calls||'—'} · 上游请求 ${run.upstream_requests||0}/${run.params?.max_upstream_requests||'—'} · 请求体 ${Number(run.model_request_chars||0).toLocaleString()} 字符 / ${Math.round((run.model_request_bytes||0)/1024)} KB（最大 ${Math.round((run.largest_model_request_bytes||0)/1024)} KB） · 提供商 token ${usage.total_tokens||0}${unreported}`;
+}
 function runView() {
   if (!current) return;
   const opened=[...document.querySelectorAll('#result-panel details[open]')].map(x=>x.closest('article')?.id);
   document.querySelector('#breadcrumb').textContent = '研究任务';
   workspace.innerHTML = `<section class="run-page"><div class="run-heading"><div><div class="eyebrow">RESEARCH TASK <span>${e(timeLabel(current.created_at))}</span></div><h1>${e(current.goal)}</h1></div><span class="status ${e(current.status)}">${e(RUN_LABELS[current.status])}</span></div>
-    <div class="run-controls"><span>${e(turnLabel(current))} · ${e(current.config.model)} · 模型 ${current.model_calls || 0}/${current.params.max_model_calls} · 工具 ${current.tool_calls || 0}/${current.params.max_tool_calls}</span><div>${activeRun(current) ? '<button class="danger" data-action="cancel">停止研究</button>' : ''}${canResume(current) ? '<button class="primary" data-action="resume">从检查点继续</button>' : ''}<a class="button" href="/api/agent/runs/${e(current.id)}/export" download>导出任务</a>${current.conversation_id ? `<a class="button" href="/api/agent/conversations/${e(current.conversation_id)}/export" download>导出整个会话</a>` : ''}</div></div>
+    <div class="run-controls"><span>${e(turnLabel(current))} · ${e(current.config.model)} · ${e(requestStats(current))}</span><div>${activeRun(current) ? '<button class="danger" data-action="cancel">停止研究</button>' : ''}${canResume(current) ? '<button class="primary" data-action="resume">从检查点继续</button>' : ''}<a class="button" href="/api/agent/runs/${e(current.id)}/export" download>导出任务</a>${current.conversation_id ? `<a class="button" href="/api/agent/conversations/${e(current.conversation_id)}/export" download>导出整个会话</a>` : ''}</div></div>
     ${current.error ? `<div class="error-panel">${e(current.error)}</div>` : ''}
     ${canFollowUp(current) ? followupHtml() : ''}
-    <div class="run-layout"><aside class="plan-panel"><div class="section-label">公开行动计划</div>${current.plan?.length ? `<ol>${current.plan.map(s=>`<li>${e(s)}</li>`).join('')}</ol>` : '<p class="subtle">agent 将在执行时制定计划。</p>'}<div class="plan-bottom">${current.evidence.length}<span>条来源证据</span></div><p class="subtle">计划由模型生成。执行记录来自实际工具调用，不展示模型私有思维。</p></aside>
+    <div class="run-layout"><aside class="plan-panel"><div class="section-label">公开行动计划</div><div id="public-plan" data-steps="${e(JSON.stringify(current.plan||[]))}">${current.plan?.length ? `<ol>${current.plan.map(s=>`<li>${e(s)}</li>`).join('')}</ol>` : '<p class="subtle">agent 将在执行时制定计划。</p>'}</div><div class="plan-bottom">${current.evidence.length}<span>条来源证据</span></div><p class="subtle">计划由模型生成。执行记录来自实际工具调用，不展示模型私有思维。</p></aside>
       <section class="results"><div class="tabs" role="tablist">${[['trace','执行记录'],['report','研究报告'],...(resourceMatrix?[['matrix',`资源矩阵 (${resourceMatrix.rows.filter(row=>row.resource_url).length})`]]:[]),['evidence',`来源证据 (${current.evidence.length})`]].map(([key,title])=>`<button role="tab" aria-selected="${tab===key}" data-tab="${key}" class="${tab===key?'active':''}">${title}</button>`).join('')}</div><div id="result-panel" role="tabpanel"></div></section></div>
     <p class="footnote">模型报告是待复核分析；引用编号存在，不代表引用内容已经支持全部结论。Token 数以提供商实际返回为准，不估算金额。</p></section>`;
   panel(); sidebar();
   for(const id of opened){const details=document.getElementById(id)?.querySelector('details');if(details)details.open=true;}
 }
+
+function updateLiveProgress(run, newEvents, newEvidence) {
+  const atBottom=window.innerHeight+window.scrollY>=document.documentElement.scrollHeight-120;
+  current=run; events.push(...newEvents);
+  const status=document.querySelector('.run-heading .status');
+  if(status){status.className='status '+e(current.status);status.textContent=RUN_LABELS[current.status]||current.status;}
+  const summary=document.querySelector('.run-page > .run-controls span');
+  if(summary){
+    summary.textContent=turnLabel(current)+' · '+(current.config?.model||'')+' · '+requestStats(current);
+  }
+  const plan=document.querySelector('#public-plan');
+  const planSteps=JSON.stringify(current.plan||[]);
+  if(plan&&plan.dataset.steps!==planSteps){
+    plan.dataset.steps=planSteps;
+    plan.innerHTML=current.plan?.length
+      ? '<ol>'+current.plan.map(step=>'<li>'+e(step)+'</li>').join('')+'</ol>'
+      : '<p class="subtle">agent 将在执行时制定计划。</p>';
+  }
+  const evidenceCount=document.querySelector('.plan-bottom');
+  if(evidenceCount)evidenceCount.innerHTML=(current.evidence_count??current.evidence.length)+'<span>条来源证据</span>';
+  const evidenceTab=document.querySelector('[data-tab="evidence"]');
+  if(evidenceTab)evidenceTab.textContent='来源证据 ('+(current.evidence_count??current.evidence.length)+')';
+  if(tab==='trace'){
+    const trace=document.querySelector('.trace');
+    if(trace)for(const item of newEvents){
+      const bad=item.kind==='tool_finished'&&item.data?.ok===false?' bad':'';
+      const html='<article class="trace-row"><span class="trace-marker'+bad+'"></span><div><small>'
+        +e(timeLabel(item.at))+' · '+e(item.kind)+'</small><p>'+e(eventText(item))+'</p></div></article>';
+      const working=trace.querySelector('.working');
+      if(working)working.insertAdjacentHTML('beforebegin',html);else trace.insertAdjacentHTML('beforeend',html);
+    }
+  } else if(tab==='evidence'){
+    const list=document.querySelector('.evidence-list');
+    if(list)for(const item of newEvidence)list.insertAdjacentHTML('beforeend',evidenceCard(item));
+  }
+  if(atBottom)window.scrollTo({top:document.documentElement.scrollHeight,behavior:'instant'});
+}
+
 function plainCardHtml(ev) {
   return `<article class="evidence-card" id="${e(ev.id)}"><div class="evidence-meta"><code>${e(ev.id)}</code><span>${e(ev.kind)}</span></div><h3>${e(ev.paper?.title || TOOL_LABELS[ev.tool] || '来源材料')}</h3><p class="locator">${e(ev.locator)} · ${e(timeLabel(ev.retrieved_at))}</p><details><summary>查看来源摘录</summary><pre>${e(ev.content)}</pre></details><footer><a href="${link(ev.source_url)}" target="_blank" rel="noopener noreferrer">打开来源 ↗</a>${ev.kind==='paper' && ev.paper ? `<button class="button" data-import="${e(ev.id)}">确认加入文献库</button>` : ''}</footer></article>`;
 }
@@ -239,6 +290,7 @@ function followupHtml() {
       <label>本轮新增或变更的条件
         <textarea name="goal" rows="3" maxlength="6000" required
           placeholder="例：只保留有训练代码的两篇，并补查它们的数据划分"></textarea></label>
+      <label class="search-scope">本轮初始检索范围<select name="research_scope"><option value="focused" ${defaults.research_scope==='focused'?'selected':''}>小范围起步</option><option value="expanded" ${defaults.research_scope==='expanded'?'selected':''}>较宽起步</option></select><small>只控制本轮起步；可按证据缺口继续检索。</small></label>
       <fieldset><legend>复用已有证据（勾选的不会重新抓取）</legend>
         ${choices.map(ev => `<label class="reuse"><input type="checkbox" name="reuse" value="${e(ev.id)}"> ${e((ev.paper && ev.paper.title) || ev.locator || ev.kind || ev.id)}</label>`).join('') || '<p class="subtle">这一轮没有可复用的证据。</p>'}
         ${hidden ? `<p class="subtle">另有 ${hidden} 条未在这里列出；用 <code>re0 session scope</code> 或 API 指名。</p>` : ''}
@@ -251,7 +303,7 @@ function followupHtml() {
       <label class="consent"><input type="checkbox" name="use_library"> 本轮授权发送本地文献库元数据（不从上一轮继承）</label>
       <label class="consent"><input type="checkbox" name="trust_destination"> 本轮模型服务与上一轮不同，我确认把历史材料发往它</label>
       <label class="consent"><input type="checkbox" name="authorize" required> 我确认这一轮会产生新的模型调用费用；会话累计额度不会因新建一轮而重置</label>
-      <p class="subtle ledger-note">${e(ledgerLine(conversation))} · 本轮预算 模型 ${defaults.max_model_calls} / 工具 ${defaults.max_tool_calls}</p>
+      <p class="subtle ledger-note">${e(ledgerLine(conversation))} · 本轮预算 模型 ${defaults.max_model_calls} / 工具 ${defaults.max_tool_calls} / 上游请求 ${defaults.max_upstream_requests}</p>
       <div class="run-controls"><button class="primary" type="submit">发起追问</button>${canRetry(current) ? '<button class="button" type="button" data-action="retry">按原目标重试一轮</button>' : ''}</div>
     </form></details>`;
 }
@@ -274,11 +326,12 @@ async function refreshHistory() {
   [runs, config] = await Promise.all([api('/runs'),api('/config')]); sidebar();
 }
 async function selectRun(id) {
-  const token = ++epoch; clearTimeout(timer); tab='evidence'; events=[]; resourceMatrix=null; pendingMatrixSelections=[];
+  const token = ++epoch; clearTimeout(timer); tab='evidence'; events=[]; eventCursor=0; evidenceCursor=0;
+  pollFailures=0;lastPollError='';resourceMatrix=null;pendingMatrixSelections=[];
   try {
     const [r, ev] = await Promise.all([api('/runs/'+id),api('/runs/'+id+'/events')]);
     if (token!==epoch) return;
-    current=r; events=ev;
+    current=r; events=ev;eventCursor=ev.at(-1)?.id||0;evidenceCursor=(r.evidence||[]).length;
     if(!activeRun(r)&&r.report){
       try {resourceMatrix=await api('/runs/'+id+'/matrix');}
       catch(err){notice(`资源矩阵未能生成：${err.message}`);}
@@ -292,25 +345,60 @@ async function selectRun(id) {
   } catch(err){notice(err.message);}
 }
 function poll(token) {
-  if (token!==epoch || !current || !activeRun(current)) return;
+  if (token!==epoch || !current || (!activeRun(current)&&!current.progress_draining)) return;
+  const delay=document.hidden?8000:2500;
   timer=setTimeout(async()=>{
     const id=current?.id;
     if(token!==epoch || !id) return;
     try {
-      const [r, ev] = await Promise.all([api('/runs/'+id),api('/runs/'+id+'/events?after='+(events.at(-1)?.id || 0))]);
+      const response=await api('/runs/'+id+'/progress?after='+eventCursor+'&evidence_after='+evidenceCursor);
       if(token!==epoch) return;
-      current=r; events.push(...ev);
-      if(!activeRun(r)&&r.report&&!resourceMatrix){
+      pollFailures=0;lastPollError='';
+      const previous=current;
+      const next={...response.run,config:{model:response.run.model},
+        evidence:[...(previous.evidence||[]),...(response.evidence||[])]};
+      eventCursor=response.next_event_id||eventCursor;
+      evidenceCursor=response.evidence_cursor??evidenceCursor;
+      const drain=Boolean(response.has_more_events||response.has_more_evidence);
+      if(activeRun(next)||drain){
+        next.progress_draining=!activeRun(next);
+        updateLiveProgress(next,response.events||[],response.evidence||[]);
+        poll(token);
+        return;
+      }
+      current=next;
+      updateLiveProgress(next,response.events||[],response.evidence||[]);
+      if(next.report){
         try {resourceMatrix=await api('/runs/'+id+'/matrix');}
         catch(err){notice(`资源矩阵未能生成：${err.message}`);}
       }
-      if(!activeRun(r)&&r.report&&tab==='evidence')
+      if(tab==='evidence'&&next.report)
         tab=resourceMatrix?.coverage?.agent_run?.proposed_links?'matrix':'report';
+      const scrollY=window.scrollY;
       runView();
-      if(!activeRun(r)) await refreshHistory();
-      poll(token);
-    } catch(err) {if(token===epoch){notice(err.message);poll(token);}}
-  },1400);
+      window.scrollTo(0,scrollY);
+      await refreshHistory();
+    } catch(err) {
+      if(token!==epoch)return;
+      if(err.status===401){
+        clearTimeout(timer);
+        notice('会话已失效；任务状态已保留。请重新登录后从历史任务继续查看。');
+        return;
+      }
+      if(err.status===429){
+        const retryMs=Math.max(1000,Math.min(86400000,(err.retryAfter||5)*1000));
+        const message='进度查询达到请求上限，已按服务器要求等待后重试。';
+        if(lastPollError!==message){lastPollError=message;notice(message);}
+        timer=setTimeout(()=>poll(token),retryMs);
+        return;
+      }
+      pollFailures+=1;
+      const message='暂时无法读取任务进度；保留当前页面，网络恢复后会继续查询。';
+      if(lastPollError!==message){lastPollError=message;notice(message);}
+      const backoff=Math.min(30000,delay*Math.pow(2,Math.min(4,pollFailures-1)));
+      timer=setTimeout(()=>poll(token),backoff);
+    }
+  },delay);
 }
 function openSettings() {
   // Settings re-renders the dialog body, which would take the toast with it.
@@ -334,7 +422,8 @@ function openSettings() {
     <details class="advanced-settings"><summary>高级模型参数</summary><div class="settings-grid"><label>输出预算参数<select name="token_parameter"><option value="max_tokens" ${config.token_parameter==='max_tokens'?'selected':''}>max_tokens</option><option value="max_completion_tokens" ${config.token_parameter==='max_completion_tokens'?'selected':''}>max_completion_tokens</option></select></label><label>单次输出 Token 上限<input name="max_output_tokens" type="number" value="${config.max_output_tokens || 3000}" min="256" max="8192" required></label></div></details>
     <label class="check"><input type="checkbox" name="trust_endpoint" required>我信任这个模型服务，并授权发送一次不含研究材料的连接测试。</label><div class="dialog-actions"><button type="button" class="quiet" data-action="clear-model">清除内存配置</button><button type="submit" class="primary">测试连接并保存</button></div></form>
     <details class="defaults-block advanced-settings"><summary>高级任务预算与数据范围</summary><p class="field-note">仅影响之后新建的任务；每次任务仍会明确提示材料范围与调用费用。</p>
-    <form id="defaults-form"><div class="budget-fields"><label>模型调用上限<input type="number" name="max_model_calls" min="2" max="24" value="${defaults.max_model_calls}" required></label><label>工具调用上限<input type="number" name="max_tool_calls" min="1" max="40" value="${defaults.max_tool_calls}" required></label><label>单次执行窗口（秒）<input type="number" name="attempt_seconds" min="30" max="900" value="${defaults.attempt_seconds}" required></label></div>
+    <form id="defaults-form"><div class="budget-fields"><label>模型调用上限<input type="number" name="max_model_calls" min="2" max="24" value="${defaults.max_model_calls}" required></label><label>工具调用上限<input type="number" name="max_tool_calls" min="1" max="40" value="${defaults.max_tool_calls}" required></label><label>任务总上游请求<input type="number" name="max_upstream_requests" min="2" max="300" value="${defaults.max_upstream_requests}" required></label><label>单次执行窗口（秒）<input type="number" name="attempt_seconds" min="30" max="900" value="${defaults.attempt_seconds}" required></label></div>
+    <label class="search-scope">新任务默认检索范围<select name="research_scope"><option value="focused" ${defaults.research_scope==='focused'?'selected':''}>小范围起步</option><option value="expanded" ${defaults.research_scope==='expanded'?'selected':''}>较宽起步</option></select></label>
     <label class="check"><input type="checkbox" name="use_library" ${defaults.use_library ? 'checked' : ''}>默认允许 agent 检索并发送文献库书目、摘要与方向；不包括私人笔记和附件。每次任务仍需单独确认。</label>
     <div class="dialog-actions"><button type="button" class="quiet" data-action="reset-defaults">恢复初始默认</button><button type="submit" class="primary">保存默认值</button></div></form></details>
     <div class="scope"><strong>当前工具能力</strong><p>论文与资源平台检索 · ${e(fullTextCopy)} · 网页搜索 ${config.web_search_enabled?'已配置':'未配置'}。GitHub token 和 Tavily Key 由服务端配置；不会抓取任意网页或执行陌生代码。</p></div>`;
@@ -426,7 +515,7 @@ document.addEventListener('click', async event => {
       case 'test-model':button.disabled=true;await api('/config/test',{});notice('工具调用测试通过；不代表科研效果已评测。');button.disabled=false;break;
       case 'cancel':await api('/runs/'+current.id+'/cancel',{});notice('已请求停止，将在当前调用结束或超时后生效。');break;
       case 'resume':if(confirm('使用同一模型从检查点继续？可能再次产生调用费用，累计调用预算不重置。')){await api('/runs/'+current.id+'/resume',{confirmed:true});await selectRun(current.id);}break;
-      case 'retry':if(confirm('按上一轮的目标原文重试一轮？会新增模型调用费用，会话累计额度不重置。')){const r=await api('/retries',{parent_run:current.id,authorize_spend:true,consent_to_send:true,idempotency_key:`web-retry-${current.id}-${current.turn||1}`});await refreshHistory();await selectRun(r.id);}break;
+      case 'retry':if(confirm('按上一轮的目标原文重试一轮？会新增模型调用费用，会话累计额度不重置。')){const r=await api('/retries',{parent_run:current.id,authorize_spend:true,consent_to_send:true,research_scope:current.params?.research_scope||normalizeDefaults(config.task_defaults).research_scope,idempotency_key:`web-retry-${current.id}-${current.turn||1}`});await refreshHistory();await selectRun(r.id);}break;
       case 'workspace-preview':{
         const form=button.closest('#followup-form'), file=form?.querySelector('#workspace-bundle-file')?.files?.[0];
         if(!file){notice('先选择一个 JSON bundle 文件。');break;}
@@ -498,14 +587,14 @@ document.addEventListener('submit', async event=>{
       config=await api('/config/connect',{base_url:data.get('base_url'),model:data.get('model'),api_key:data.get('api_key'),trust_endpoint:data.has('trust_endpoint'),token_parameter:data.get('token_parameter'),max_output_tokens:Number(data.get('max_output_tokens'))},'POST');
       form.querySelector('[name=api_key]').value='';settings.close();sidebar();if(!current)home(document.querySelector('#goal')?.value || '');notice('连接测试通过；Key 已保存到服务内存。测试不代表科研效果已评测。');
     } else if(form.id==='defaults-form') {
-      config=await api('/defaults',{max_model_calls:Number(data.get('max_model_calls')),max_tool_calls:Number(data.get('max_tool_calls')),attempt_seconds:Number(data.get('attempt_seconds')),use_library:data.has('use_library')},'PUT');
+      config=await api('/defaults',{max_model_calls:Number(data.get('max_model_calls')),max_tool_calls:Number(data.get('max_tool_calls')),max_upstream_requests:Number(data.get('max_upstream_requests')),attempt_seconds:Number(data.get('attempt_seconds')),use_library:data.has('use_library'),research_scope:data.get('research_scope')},'PUT');
       settings.close();sidebar();if(!current)home(document.querySelector('#goal')?.value || '');notice('任务默认值已保存；只影响之后新建的任务。');
     } else if(form.id==='followup-form') {
       const workspaceId=String(data.get('workspace_id')||'');
       const workspaceReuse=[...form.querySelectorAll('input[name="workspace_reuse"]:checked')]
         .filter(input=>input.dataset.workspaceId===workspaceId).map(input=>input.value);
       const payload=followupPayload({goal:data.get('goal'),reuse:data.getAll('reuse'),workspaceId,
-        workspaceReuse,useLibrary:data.has('use_library'),trustNewDestination:data.has('trust_destination')},current,config.task_defaults);
+        workspaceReuse,useLibrary:data.has('use_library'),trustNewDestination:data.has('trust_destination'),researchScope:data.get('research_scope')},current,config.task_defaults);
       const problem=followupProblem(payload);
       if(problem){notice(problem);return;}
       payload.idempotency_key=idempotencyKeyFor(current,payload);
@@ -514,7 +603,7 @@ document.addEventListener('submit', async event=>{
       notice('已发起新一轮。复用的证据没有重新抓取；本轮花费记在会话累计账本上。');
     } else {
       const defaults=normalizeDefaults(config.task_defaults);
-      const r=await api('/runs',{goal:data.get('goal'),max_model_calls:defaults.max_model_calls,max_tool_calls:defaults.max_tool_calls,attempt_seconds:defaults.attempt_seconds,use_library:defaults.use_library,consent_to_send:data.has('consent_to_send')});
+      const r=await api('/runs',{goal:data.get('goal'),max_model_calls:defaults.max_model_calls,max_tool_calls:defaults.max_tool_calls,max_upstream_requests:defaults.max_upstream_requests,attempt_seconds:defaults.attempt_seconds,use_library:defaults.use_library,research_scope:data.get('research_scope'),consent_to_send:data.has('consent_to_send')});
       await refreshHistory();await selectRun(r.id);
     }
   }catch(err){notice(err.message);}finally{button.disabled=false;}

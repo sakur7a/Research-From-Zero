@@ -144,6 +144,12 @@ preview and human confirmation before adding paper/resources to the library. A t
 name match alone never becomes official attribution. This is a different entry point from the CLI
 Skill: the static search matrix remains a rendering of its own versioned `--json` result.
 
+The Agent task has one upstream HTTP request budget and deadline across model and retrieval calls;
+cancellation or exhaustion is reflected in source coverage, and any source completed before a stop
+remains available. Its `focused` or `expanded` setting controls only the first search pass, not later
+follow-up searches. Check the task's actual coverage and stop reasons before describing what was
+searched. These task controls do not change the CLI Skill's separate `--max-requests` budget.
+
 ## Conference papers
 
 Conference proceedings are covered by the existing scholarly sources. `--venue NAME` is a strict

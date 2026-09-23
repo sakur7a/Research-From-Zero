@@ -4,6 +4,7 @@ The isolation tests in `test_auth.py` ask who may see what. These ask the other 
 service has to answer — how much may be spent, by whom, and what happens when the model service is
 down. Everything here is offline: every model call goes to a stub, and no provider is contacted.
 """
+import json
 import threading
 import time
 
@@ -13,11 +14,12 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from re0.agent.model import ModelError
-from re0.agent.schemas import FollowUpInput, RetryInput
+from re0.agent.schemas import FollowUpInput, ModelConfig, RetryInput
 from re0.deployment import LOCAL_OWNER
 from re0.main import create_app
-from re0.quota import (BREAKER_FAILURE_THRESHOLD, CircuitBreaker, Quota,
-                       quota_limits_from_env)
+from re0.quota import (BREAKER_FAILURE_THRESHOLD, CircuitBreaker, DestinationBreakers,
+                       ProbeLedger, Quota, destination_key, quota_limits_from_env,
+                       site_emergency_stop_from_env)
 
 HOSTED = {"RE0_MODE": "hosted", "RE0_SESSION_SECRET": "a-hosted-secret-that-is-long-enough-to-use",
           "RE0_PUBLIC_ENTRY": "https://re0.example.org",
@@ -113,12 +115,21 @@ def release(app, deadline=20):
 
 
 def open_breaker(app, times=BREAKER_FAILURE_THRESHOLD):
+    if not app.state.agent.vault.configured(owner=LOCAL_OWNER):
+        app.state.agent.vault.set(ModelConfig(**CONFIG), owner=LOCAL_OWNER)
+    endpoint = destination_key(CONFIG["base_url"])
     for index in range(times):
-        app.state.agent._record_breaker(failure=f"fixture：模型服务不可用 {index}")
-    return app.state.agent.quota.breaker.state()
+        app.state.agent.quota.destination_breakers.record_failure(
+            endpoint, f"fixture：模型服务不可用 {index}")
+    app.state.agent._save_destination_breakers()
+    return app.state.agent.quota.destination_breakers.state(endpoint)
 
 
 def breaker_state(client):
+    return client.app.state.agent.quota.destination_breakers.state(destination_key(CONFIG["base_url"]))
+
+
+def site_breaker_state(client):
     return client.get("/api/health").json()["quota"]["breaker"]
 
 
@@ -331,6 +342,65 @@ def test_a_stored_state_is_adopted_and_a_hand_edited_one_is_not_trusted():
     assert "extra" not in junk.snapshot()
 
 
+def test_destination_breakers_are_endpoint_scoped_and_allow_only_one_half_open_probe():
+    breakers = DestinationBreakers()
+    provider_a, provider_b = destination_key(CONFIG["base_url"]), destination_key(
+        "https://api.deepseek.com/v1")
+    for moment in range(BREAKER_FAILURE_THRESHOLD):
+        breakers.record_failure(provider_a, "fixture HTTP 503", now=float(moment))
+    assert breakers.state(provider_a, now=10) == "open"
+    assert breakers.state(provider_b, now=10) == "closed"
+    half_open = BREAKER_FAILURE_THRESHOLD + breakers.cooldown + 2
+    first = breakers.acquire(provider_a, now=float(half_open))
+    assert first["allowed"] and first["state"] == "half-open"
+    second = breakers.acquire(provider_a, now=float(half_open))
+    assert not second["allowed"] and second["retry_after"] == 1
+    breakers.record_failure(provider_a, "half-open fixture still down", now=float(half_open))
+    assert breakers.state(provider_a, now=float(half_open)) == "open"
+    recovered_at = half_open + breakers.cooldown + 2
+    assert breakers.acquire(provider_a, now=float(recovered_at))["allowed"]
+    assert breakers.record_success(provider_a, now=float(recovered_at))["recovered"] is True
+    assert breakers.state(provider_a, now=float(recovered_at)) == "closed"
+    assert breakers.state(provider_b, now=float(recovered_at)) == "closed"
+
+
+def test_probe_ledger_bounds_owner_attempts_tracks_cooldown_and_survives_restart():
+    ledger = ProbeLedger(global_concurrency=4)
+    endpoint = destination_key(CONFIG["base_url"])
+    base = time.time() - 10
+    reserved = ledger.reserve("alice", "models", endpoint, now=base)
+    assert reserved["allowed"]
+    assert ledger.reserve("alice", "connect", endpoint, now=base)["status"] == 409
+    ledger.finish("alice", status="success", now=base)
+    for offset in range(1, 6):
+        assert ledger.reserve("alice", "models", endpoint, now=base + offset)["allowed"]
+        ledger.finish("alice", status="failed", now=base + offset)
+    refused = ledger.reserve("alice", "models", endpoint, now=base + 6)
+    assert not refused["allowed"] and refused["status"] == 429
+    ledger.cooldown("alice", endpoint, 20, now=base + 6)
+    assert ledger.reserve("alice", "connect", endpoint, now=base + 7)["status"] == 429
+    assert ledger.reserve("bob", "models", endpoint, now=base + 7)["allowed"]
+    ledger.finish("bob", status="success", now=base + 7)
+    assert ledger.describe("alice", now=base + 7)["counts"]["models"] == 6
+
+    restored = ProbeLedger()
+    restored.load(ledger.snapshot())
+    assert restored.refusal("alice", endpoint, now=base + 8)["retry_after"] == 18
+    assert restored.describe("bob", now=base + 8)["counts"]["models"] == 1
+    snapshot = json.dumps(restored.snapshot())
+    assert CONFIG["api_key"] not in snapshot
+
+
+def test_explicit_site_emergency_stop_is_separate_from_destination_breakers(tmp_path):
+    app = local_app(tmp_path, quota=generous(emergency_stop=True), name="site-emergency")
+    with TestClient(app, headers=WRITE) as client:
+        assert client.put("/api/agent/config", json=CONFIG).status_code == 200
+        refused = client.post("/api/agent/runs", json=GOAL)
+        assert refused.status_code == 503 and "全站急停" in refused.text
+        assert client.get("/api/agent/runs").json() == []
+        assert client.get("/api/health").json()["quota"]["breaker"] == "open"
+
+
 def test_the_breaker_survives_a_restart_so_restarting_is_not_a_way_around_it(tmp_path):
     """`start()` is what reads the stored state back, so this checks the boot path itself."""
     path = str(tmp_path / "restart.sqlite3")
@@ -340,11 +410,13 @@ def test_the_breaker_survives_a_restart_so_restarting_is_not_a_way_around_it(tmp
 
     second = create_app(path, httpx.MockTransport(_refuse), quota=generous())
     with TestClient(second, headers=WRITE) as client:
+        assert client.put("/api/agent/config", json=CONFIG).status_code == 200
         assert breaker_state(client) == "open", "a restart reset the outage"
         refused = client.post("/api/agent/runs", json=GOAL)
         assert refused.status_code == 503, refused.text
         assert refused.headers["retry-after"]
-        assert "没有产生任何花费" in refused.text
+        assert "本次未发出请求" in refused.text
+        assert site_breaker_state(client) == "closed"
         assert client.get("/api/agent/runs").json() == [], "a refused submit still wrote a row"
     # Control: the state came from the database, not from an object both apps shared.
     fresh = create_app(str(tmp_path / "fresh.sqlite3"), httpx.MockTransport(_refuse), quota=generous())
@@ -379,9 +451,12 @@ def test_only_the_destination_being_down_opens_it_for_everybody(tmp_path):
     app = local_app(tmp_path, quota=generous(), model=broken_key, name="denied")
     with TestClient(app, headers=WRITE) as client:
         client.put("/api/agent/config", json=CONFIG)
-        for _ in range(BREAKER_FAILURE_THRESHOLD * 2):
+        for _ in range(3):
             assert client.post("/api/agent/config/test", json={}).status_code == 422
         assert breaker_state(client) == "closed"
+        rate_limited = client.post("/api/agent/config/test", json={})
+        assert rate_limited.status_code == 429 and rate_limited.headers["retry-after"]
+        assert broken_key.calls == 3
         # ...and a run still starts, because nothing about the service is broken.
         assert client.post("/api/agent/runs", json=GOAL).status_code == 202
         release(app)
@@ -390,20 +465,104 @@ def test_only_the_destination_being_down_opens_it_for_everybody(tmp_path):
     down = local_app(tmp_path, quota=generous(), model=outage, name="down")
     with TestClient(down, headers=WRITE) as client:
         client.put("/api/agent/config", json=CONFIG)
-        for _ in range(BREAKER_FAILURE_THRESHOLD - 1):
-            assert client.post("/api/agent/config/test", json={}).status_code == 422
-        assert breaker_state(client) == "closed"
-        assert client.post("/api/agent/config/test", json={}).status_code == 422
+        for _ in range(BREAKER_FAILURE_THRESHOLD):
+            assert client.post("/api/agent/runs", json=GOAL).status_code == 202
+            release(down)
         assert breaker_state(client) == "open"
         refused = client.post("/api/agent/runs", json=GOAL)
-        assert refused.status_code == 503 and "全站熔断已打开" in refused.text
-        assert client.get("/api/agent/runs").json() == []
-        # The connection test is the way out, so the breaker must not stand in its way.
+        assert refused.status_code == 503 and "模型目的地" in refused.text
+        assert len(client.get("/api/agent/runs").json()) == BREAKER_FAILURE_THRESHOLD
+        # After cooldown, exactly one bounded connection test can probe this destination.
+        endpoint = destination_key(CONFIG["base_url"])
+        saved = down.state.agent.quota.destination_breakers.snapshot()
+        saved["entries"][endpoint]["opened_at"] = time.time() - down.state.agent.quota.destination_breakers.cooldown - 1
+        saved["entries"][endpoint]["updated_at"] = time.time()
+        down.state.agent.quota.destination_breakers.load(saved)
         outage.outcome = "ok"
         assert client.post("/api/agent/config/test", json={}).status_code == 200
         assert breaker_state(client) == "closed"
         assert client.post("/api/agent/runs", json=GOAL).status_code == 202
         release(down)
+
+
+def test_provider_one_outage_does_not_block_provider_two_or_let_its_probe_clear_provider_one(tmp_path):
+    requests, deepseek_calls = [], 0
+    atom = b'''<feed xmlns="http://www.w3.org/2005/Atom"><entry>
+      <id>http://arxiv.org/abs/2501.12345v1</id><title>Fixture Layout Work</title>
+      <summary>Offline fixture metadata.</summary><published>2025-01-01T00:00:00Z</published>
+      <author><name>Fixture</name></author></entry></feed>'''
+
+    def completion(name, args):
+        import json
+        return {"choices": [{"finish_reason": "tool_calls", "message": {"role": "assistant",
+                "content": "", "tool_calls": [{"id": "provider-isolation",
+                "type": "function", "function": {"name": name,
+                "arguments": json.dumps(args, ensure_ascii=False)}}]}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+
+    def network(request):
+        nonlocal deepseek_calls
+        requests.append(request)
+        if request.url.host == "api.openai.com":
+            return httpx.Response(503, json={"error": "fixture destination unavailable"})
+        if request.url.host == "export.arxiv.org":
+            return httpx.Response(200, content=atom, headers={"Content-Type": "application/atom+xml"})
+        assert request.url.host == "api.deepseek.com", request.url
+        data = json.loads(request.content)
+        if isinstance(data.get("tool_choice"), dict):
+            return httpx.Response(200, json=completion("connection_check", {}))
+        deepseek_calls += 1
+        if deepseek_calls == 1:
+            name, args = "update_plan", {"steps": ["检索来源", "整理证据"]}
+        elif deepseek_calls == 2:
+            name, args = "search_papers", {"query": "layout", "source": "arxiv", "limit": 1}
+        elif deepseek_calls == 3:
+            evidence = [item for message in data["messages"] if message["role"] == "tool"
+                        for item in json.loads(message["content"]).get("evidence", [])]
+            paper_ids = [item["id"] for item in evidence if item.get("kind") == "paper"]
+            return httpx.Response(200, json=completion("finish_report", {
+                "title": "Provider isolation fixture", "summary": "Offline provider isolation check.",
+                "findings": [{"claim": "A fixture paper record was retained.",
+                              "evidence_ids": paper_ids, "assessment": "observed"}],
+                "limitations": ["Fixture only; no live endpoint was called."], "outcome": "findings"}))
+        else:
+            raise AssertionError(f"unexpected DeepSeek model call {deepseek_calls}")
+        return httpx.Response(200, json=completion(name, args))
+
+    app = create_app(str(tmp_path / "provider-isolation.sqlite3"),
+                     httpx.MockTransport(network), quota=generous())
+    provider_b = {**CONFIG, "base_url": "https://api.deepseek.com/v1"}
+    with TestClient(app, headers=WRITE) as client:
+        assert client.put("/api/agent/config", json=CONFIG).status_code == 200
+        for _ in range(BREAKER_FAILURE_THRESHOLD):
+            started = client.post("/api/agent/runs", json=GOAL)
+            assert started.status_code == 202, started.text
+            assert release(app)
+            run = client.get(f"/api/agent/runs/{started.json()['id']}").json()
+            assert run["status"] == "failed"
+        provider_a_key = destination_key(CONFIG["base_url"])
+        provider_b_key = destination_key(provider_b["base_url"])
+        assert app.state.agent.quota.destination_breakers.state(provider_a_key) == "open"
+        assert app.state.agent.quota.destination_breakers.state(provider_b_key) == "closed"
+        refused = client.post("/api/agent/runs", json=GOAL)
+        assert refused.status_code == 503
+        assert len(client.get("/api/agent/runs").json()) == BREAKER_FAILURE_THRESHOLD
+
+        assert client.put("/api/agent/config", json=provider_b).status_code == 200
+        probe = client.post("/api/agent/config/test", json={})
+        assert probe.status_code == 200, probe.text
+        assert app.state.agent.quota.destination_breakers.state(provider_b_key) == "closed"
+        assert app.state.agent.quota.destination_breakers.state(provider_a_key) == "open"
+        assert site_breaker_state(client) == "closed"
+        started = client.post("/api/agent/runs", json=GOAL)
+        assert started.status_code == 202, started.text
+        assert release(app)
+        run = client.get(f"/api/agent/runs/{started.json()['id']}").json()
+        assert run["status"] == "completed", run
+        assert len(run["report"]["findings"]) == 1
+        assert app.state.agent.quota.destination_breakers.state(provider_a_key) == "open"
+        assert deepseek_calls == 3
+        assert sum(request.url.host == "api.openai.com" for request in requests) == BREAKER_FAILURE_THRESHOLD
 
 
 def test_opening_the_breaker_does_not_interrupt_the_run_already_in_flight(tmp_path):
@@ -447,6 +606,10 @@ def test_a_negative_or_unparsable_limit_is_refused_rather_than_guessed():
         quota_limits_from_env({"RE0_REQUESTS_PER_MINUTE": "lots"}, hosted=True)
     assert quota_limits_from_env({"RE0_REQUESTS_PER_MINUTE": " 0 "},
                                  hosted=True)["RE0_REQUESTS_PER_MINUTE"] == 0
+    assert not site_emergency_stop_from_env({})
+    assert site_emergency_stop_from_env({"RE0_SITE_EMERGENCY_STOP": "true"})
+    with pytest.raises(ValueError, match="RE0_SITE_EMERGENCY_STOP"):
+        site_emergency_stop_from_env({"RE0_SITE_EMERGENCY_STOP": "maybe"})
 
 
 def test_doctor_prints_the_ceilings_and_a_bad_one_is_not_an_exit_zero(monkeypatch, capsys):
@@ -454,12 +617,15 @@ def test_doctor_prints_the_ceilings_and_a_bad_one_is_not_an_exit_zero(monkeypatc
     from re0 import cli
 
     for var in ("RE0_MODE", "RE0_SESSION_SECRET", "RE0_PUBLIC_ENTRY", "RE0_ALLOWED_ORIGINS", "RE0_STORAGE_MODE",
-                "RE0_REQUESTS_PER_MINUTE", "RE0_SITE_REQUESTS_PER_MINUTE", "RE0_TASKS_PER_HOUR"):
+                "RE0_REQUESTS_PER_MINUTE", "RE0_SITE_REQUESTS_PER_MINUTE", "RE0_TASKS_PER_HOUR",
+                "RE0_SITE_EMERGENCY_STOP"):
         monkeypatch.delenv(var, raising=False)
     assert cli.main(["doctor"]) == 0
-    ceiling = _ceiling_line(capsys)
+    output = capsys.readouterr().out
+    ceiling = [line for line in output.splitlines() if "配额：" in line][0]
     assert "每账户任务/小时 不限" in ceiling and "RE0_" not in ceiling
-    assert "本地模式默认不限" in ceiling and "全站熔断" in ceiling
+    assert "本地模式默认不限" in ceiling and "部署者全站急停：未启用" in output
+    assert "上游请求 60" in output and "起步范围不限制后续检索" in output
 
     monkeypatch.setenv("RE0_TASKS_PER_HOUR", "-3")
     assert cli.main(["doctor"]) == 2
@@ -482,9 +648,11 @@ def test_a_hosted_doctor_reports_the_defaults_it_will_enforce(monkeypatch, capsy
     monkeypatch.setenv("RE0_ALLOWED_ORIGINS", "https://re0.example.org")
     monkeypatch.setenv("RE0_STORAGE_MODE", "persistent")
     assert cli.main(["doctor"]) == 0
-    ceiling = _ceiling_line(capsys)
+    output = capsys.readouterr().out
+    ceiling = [line for line in output.splitlines() if "配额：" in line][0]
     assert "每账户请求/分钟 120" in ceiling and "每账户任务/小时 12" in ceiling
     assert "全站请求/分钟 600" in ceiling and "本地模式" not in ceiling
+    assert "目的地熔断" in output and "全站急停" in output
 
 
 def _ceiling_line(capsys):
@@ -505,7 +673,8 @@ def test_every_ceiling_the_code_reads_is_documented_where_a_caller_looks():
 
     source = Path(quota_module.__file__).read_text(encoding="utf-8")
     names = set(re.findall(r"RE0_[A-Z_]+", source))
-    assert names == {"RE0_REQUESTS_PER_MINUTE", "RE0_SITE_REQUESTS_PER_MINUTE", "RE0_TASKS_PER_HOUR"}
+    assert names == {"RE0_REQUESTS_PER_MINUTE", "RE0_SITE_REQUESTS_PER_MINUTE",
+                     "RE0_TASKS_PER_HOUR", "RE0_SITE_EMERGENCY_STOP"}
     root = Path(quota_module.__file__).parents[2]
     readme = (root / "README.md").read_text(encoding="utf-8")
     for document in ("README.md", "SECURITY.md"):
@@ -551,9 +720,9 @@ def test_what_a_caller_sees_is_their_own_usage_and_the_sites_state(tmp_path):
     assert mine["requests_used"]["account"] >= 8
     assert mine["requests_used"]["site"] >= mine["requests_used"]["account"]
     assert mine["limits"]["RE0_TASKS_PER_HOUR"] == 500
-    assert mine["breaker"]["threshold"] == BREAKER_FAILURE_THRESHOLD
     assert mine["breaker"]["state"] == "closed"
-    assert "只有模型服务连续不可用会计入全站熔断" in mine["breaker"]["note"]
+    assert mine["breaker"]["scope"] == "site_emergency_stop"
+    assert mine["probes"]["counts"] == {"models": 0, "connect": 0}
     assert theirs["requests_used"]["account"] < mine["requests_used"]["account"]
     with app.state.store.db.connect() as con:
         workspaces = [row[0] for row in con.execute("SELECT workspace FROM auth_accounts")]

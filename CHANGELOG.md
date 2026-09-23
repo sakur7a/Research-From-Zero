@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+### Agent execution budgets, compact context and incremental progress (#20)
+
+- Carry one per-task upstream HTTP request allowance, cancellation signal and deadline through
+  model, scholarly-source and full-text calls. Preserve completed source evidence when cancelled
+  between sources, reserve a request for report generation, and persist consumed requests.
+- Add focused/expanded first-pass research scope, exact serialized model-request character/byte
+  totals, provider usage and a bounded request body. Compact the model-facing evidence view while
+  retaining complete source records for explicit read-back; warn on repeated exact tool inputs
+  while keeping explicit cache refresh available.
+- Replace paired detail/event polling with an owner-scoped progress cursor for bounded event and
+  evidence pages. The browser updates incrementally, preserves current interaction state, stops on
+  401/completion, honors 429 Retry-After and backs off during network errors.
+- Offline fixed-fixture A/B kept the same 7 model calls, 7 tool calls, 24 upstream requests, 29
+  evidence records, 3 resource links and report output. Three-run body totals fell from 453,427 to
+  340,473 bytes (24.9%); median harness time was 1.10s vs 1.62s, so this fixture shows no latency
+  gain. No real provider was called.
+
+### Per-owner probe limits and destination-scoped model breakers (#21)
+
+- Replace the shared automatic model breaker with persistent breakers keyed by normalized allowed
+  Base URL, excluding credentials. HTTP 429 cools down the current owner and destination; network,
+  timeout, 408 and 5xx failures only affect that endpoint. A deployer-controlled emergency stop
+  remains separate and never opens automatically from one user's provider error.
+- Bound model-list and connection-test probes with per-owner rate budgets, one in-flight probe per
+  owner, a service-wide concurrency ceiling and a persisted refusal/cooldown ledger. A half-open
+  destination admits one probe; probe requests do not consume the research execution slot.
+- Fixture regressions cover Provider 1 outage isolation, Provider 2 recovery without clearing
+  Provider 1, owner-scoped 429 Retry-After, parallel clicks, half-open admission, restart state and
+  refusal before provider HTTP. Live-provider behavior is not verified; no paid endpoint was used.
+
 ### Live Agent results to a reviewable resource matrix (#19)
 
 - Extend structured reports with evidence-bound candidate links between a paper tool result and a
