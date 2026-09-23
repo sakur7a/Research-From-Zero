@@ -152,7 +152,9 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
     # The ceilings are read once, here, so the middleware and the runtime cannot disagree about them.
     quota = quota if quota is not None else Quota.from_env(os.environ, hosted=deployment.hosted)
     agent = AgentRuntime(store, transport=transport, model_factory=model_factory,
-                         deployment=deployment, quota=quota)
+                         deployment=deployment, quota=quota,
+                         owner_has_live_session=(accounts.owner_has_live_session
+                                                 if deployment.auth_required else None))
 
     @asynccontextmanager
     async def lifespan(app):
@@ -353,6 +355,11 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
             # One message for a wrong password, an unknown user, a disabled account and a locked one,
             # and the same hashing work behind all four.
             raise HTTPException(401, "用户名或口令不正确；连续失败会暂时锁定该账户")
+        workspace = accounts.workspace_for(user_id)
+        if workspace and not accounts.owner_has_live_session(workspace):
+            # A prior operator revoke or an expired final session invalidates the old memory copy.
+            # A second live browser session does not clear credentials another tab is using.
+            agent.revoke_owner(workspace)
         token, _expires = accounts.issue(user_id, note="browser")
         identity = accounts.resolve(token) or anonymous_identity()
         payload = JSONResponse({"identity": identity.public(), "mode": deployment.mode})
@@ -369,7 +376,10 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
         """Revoke this session. Revoked means unusable immediately, not unusable at expiry."""
         token = session_token(request)
         revoked = accounts.revoke(token) if token else False
-        payload = JSONResponse({"revoked": revoked})
+        identity = request.state.identity
+        credentials_cleared = (agent.revoke_owner(identity.owner)
+                               if deployment.auth_required and identity.authenticated else False)
+        payload = JSONResponse({"revoked": revoked, "credentials_cleared": credentials_cleared})
         payload.delete_cookie(SESSION_COOKIE, path="/")
         return payload
 

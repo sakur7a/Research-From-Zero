@@ -58,6 +58,7 @@ def run(output):
         checked.append('agent_home_no_mock_statistics_and_model_required')
         page.locator('.setup-note [data-action=settings]').click()
         page.locator('#settings').wait_for()
+        assert '最多 8 小时' in page.locator('#settings').inner_text()
         page.locator('[name=base_url]').fill(CONFIG['base_url'])
         page.locator('[name=model]').fill(CONFIG['model'])
         page.locator('[name=api_key]').fill(CONFIG['api_key'])
@@ -80,6 +81,7 @@ def run(output):
         page.wait_for_function("!document.querySelector('#settings').open")
         page.locator('.topbar [data-action=settings]').click()
         assert page.locator('[name=api_key]').input_value()==''
+        assert '当前配置最晚有效至' in page.locator('#settings').inner_text()
         page.locator('[data-action=test-model]').click()
         page.wait_for_function("document.querySelector('#notice').textContent.includes('测试通过')")
         page.locator('[data-action=close-settings]').click()

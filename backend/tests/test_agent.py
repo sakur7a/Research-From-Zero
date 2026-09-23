@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from re0.deployment import LOCAL_OWNER
 from re0.main import create_app
 from re0.models import PaperInput
-from re0.agent.model import DEFAULT_HOSTS, LOOPBACK, ChatModel, ModelError, validate_endpoint
+from re0.agent.model import DEFAULT_HOSTS, LOOPBACK, MODEL_KEY_TTL, ChatModel, ModelError, ModelVault, validate_endpoint
 from re0.agent.schemas import ModelConfig, TaskDefaults, TaskInput, PaperSearchArgs, FileArgs, SearchArgs, HubSearchArgs
 from re0.agent.tools import ResearchTools, specifications
 
@@ -435,6 +435,45 @@ def test_model_list_rejects_an_oversized_or_non_json_response(tmp_path):
     with TestClient(create_app(str(tmp_path/'notjson.sqlite3'),httpx.MockTransport(not_json)),headers=HEADERS) as c:
         response=c.post('/api/agent/models',json={'base_url':CONFIG['base_url'],'api_key':CONFIG['api_key'],'trust_endpoint':True})
         assert response.status_code==422 and 'JSON' in response.json()['detail']
+
+
+def test_model_vault_expiry_and_generation_invalidate_old_snapshots():
+    now = [100.0]
+    vault = ModelVault(clock=lambda: now[0])
+    vault.set(ModelConfig(**CONFIG), owner="alice")
+    snapshot, generation = vault.snapshot_with_generation(owner="alice")
+    assert snapshot.api_key.get_secret_value() == CONFIG["api_key"]
+    assert vault.is_current("alice", generation)
+
+    now[0] += MODEL_KEY_TTL.total_seconds() + 0.01
+    assert not vault.is_current("alice", generation)
+    assert vault.public(owner="alice")["configured"] is False
+    with pytest.raises(ModelError, match="尚未配置模型"):
+        vault.snapshot(owner="alice")
+
+    vault.set(ModelConfig(**CONFIG), owner="alice")
+    _, replacement_generation = vault.snapshot_with_generation(owner="alice")
+    vault.clear(owner="alice")
+    assert not vault.is_current("alice", replacement_generation)
+
+
+def test_hosted_chat_call_revalidates_destination_immediately_before_network(monkeypatch):
+    from re0.agent import model as model_module
+
+    requests = []
+
+    def contact(request):
+        requests.append(request)
+        return httpx.Response(200, json=completion("connection_check", {}))
+
+    transport = httpx.MockTransport(contact)
+    monkeypatch.setattr(model_module, "_require_public_resolution", lambda hostname: None)
+    model = ChatModel(ModelConfig(**CONFIG), transport, hosted=True)
+    monkeypatch.setattr(model_module, "_require_public_resolution",
+                        lambda hostname: (_ for _ in ()).throw(ModelError("private resolution")))
+    with pytest.raises(ModelError, match="private resolution"):
+        model.test()
+    assert requests == []
 
 
 def test_tool_result_keeps_metadata_with_a_bounded_excerpt(client):

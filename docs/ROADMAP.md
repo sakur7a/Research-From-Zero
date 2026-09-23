@@ -8,6 +8,29 @@ acceptance**. This is the direction recorded in [GitHub issue #15](https://githu
 The online competition requirement is tracked separately; a static page or local
 server is not an online release.
 
+## R2 execution status
+
+The second-round release plan is tracked by [Issue #15](https://github.com/sakur7a/Research-From-Zero/issues/15)
+and its implementation packages #16–#23. The owner has not yet confirmed a real
+model-test budget, deployment account/storage policy, or contest details. Offline
+security, UI, deployment configuration and fixture work continues; no paid model
+call or public service has been started.
+
+| Issue | Current work | Still required |
+|---|---|---|
+| #16 | Hosted model-list probes now use the same endpoint policy as configuration/inference; eight-hour memory leases invalidate active run snapshots; logout and operator revocation stop subsequent calls. API, runtime and browser regressions pass locally. | Real TLS remains part of #22; no external model call was made. |
+| #17 | Official Render Free limits have been reviewed: idle spin-down and filesystem loss make it suitable only for an explicitly accepted ephemeral demo. | Finish the single-path ADR/Blueprint and clean container smoke; owner must accept temporary storage before deploy. |
+| #18 | Not started. | Independent demo guest sessions and one-path BYOK onboarding. |
+| #19 | Not started. | Real Agent output to resource matrix and one-step preview/approval/export. |
+| #20 | Not started. | Shared request/deadline/cancel budgets, compact model context and incremental polling. |
+| #21 | Not started. | Scope breakers by approved destination, isolate account-level errors/probes and bound concurrency. |
+| #22 | Offline #16 regression work is recorded; previous evaluation snapshot remains 1 complete, 1 partial, 3 pending human review and 1 unknown. | Human review and authorized BYOK/real HTTP acceptance still need owners and access. |
+| #23 | No deployment was created. | Depends on #16–#22 evidence plus an approved owner account/storage decision and a real public URL. |
+
+Current #16 verification: 558 Python tests, 83 JS tests, syntax check, Chromium
+workbench/agent/login/loopback HTTP smoke pass. These are local/fixture checks; they
+do not close the hosted release gates.
+
 ## Code present and acceptance still open
 
 GitHub issues remain open until their full acceptance evidence exists. A commit that

@@ -299,6 +299,27 @@ class AccountStore:
             return con.execute("UPDATE auth_sessions SET revoked_at=? WHERE user_id=? AND revoked_at=''",
                                (_now(), user_id)).rowcount
 
+    def workspace_for(self, user_id: str) -> str:
+        with self.db.connect() as con:
+            row = con.execute("SELECT workspace FROM auth_accounts WHERE user_id=? AND disabled=0",
+                              (user_id,)).fetchone()
+        return str(row[0]) if row else ""
+
+    def owner_has_live_session(self, workspace: str) -> bool:
+        """Whether this owner still has any non-revoked browser session.
+
+        The runtime checks this at every model-call boundary so an operator-side revoke performed
+        by the separate `re0 auth` process cannot leave a task able to spend with its memory copy.
+        """
+        if not workspace:
+            return False
+        with self.db.connect() as con:
+            row = con.execute(
+                "SELECT 1 FROM auth_accounts a JOIN auth_sessions s ON s.user_id=a.user_id "
+                "WHERE a.workspace=? AND a.disabled=0 AND s.revoked_at='' AND s.expires_at>? LIMIT 1",
+                (workspace, _now())).fetchone()
+        return row is not None
+
     def purge_expired(self) -> int:
         """Drop sessions that can no longer be used. Revoked rows are dropped with them."""
         with self.db.connect() as con:

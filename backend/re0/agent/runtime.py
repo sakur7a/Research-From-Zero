@@ -63,12 +63,13 @@ class Paused(Exception):
 
 
 class Cancelled(Exception):
-    pass
+    def __init__(self, message="用户取消"):
+        super().__init__(message)
 
 
 class AgentRuntime:
     def __init__(self, library, *, transport=None, model_factory=None, deployment=None,
-                 quota: Quota | None = None):
+                 quota: Quota | None = None, owner_has_live_session=None):
         self.deployment = deployment or Deployment()
         self.tasks = TaskStore(library.db)
         # One configuration per owner: a global vault would let whoever configured last decide where
@@ -83,6 +84,7 @@ class AgentRuntime:
         self.tools = ResearchTools(library, transport)
         self.model_factory = model_factory or (
             lambda config: ChatModel(config, transport, hosted=self.deployment.hosted))
+        self.owner_has_live_session = owner_has_live_session or (lambda owner: True)
         self._transport = transport
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -136,7 +138,32 @@ class AgentRuntime:
 
     def list_models(self, credential: ModelListRequest):
         """Ask one allowlisted endpoint what it serves. Nothing is stored or logged."""
-        return fetch_model_list(credential, transport=self._transport)
+        return fetch_model_list(credential, transport=self._transport, hosted=self.deployment.hosted)
+
+    def _authorize_model_lease(self, owner: str, generation: int):
+        if not self.vault.is_current(owner, generation):
+            raise Cancelled("模型配置已过期或撤销；已停止后续模型调用，请重新配置")
+        if self.deployment.hosted and not self.owner_has_live_session(owner):
+            self.vault.clear(owner=owner)
+            raise Cancelled("登录会话已过期或撤销；模型配置已清除，后续模型调用已停止")
+
+    def _model_for_lease(self, config, owner: str, generation: int):
+        model = self.model_factory(config)
+        set_authorizer = getattr(model, "set_call_authorizer", None)
+        if set_authorizer:
+            set_authorizer(lambda: self._authorize_model_lease(owner, generation))
+        return model
+
+    def revoke_owner(self, owner: str) -> bool:
+        """Clear this owner's key and stop its next run boundary after logout/revocation."""
+        if not owner:
+            return False
+        configured = self.vault.configured(owner=owner)
+        self.vault.clear(owner=owner)
+        for run in self.tasks.list(owner=owner):
+            if run["status"] in {"queued", "running"}:
+                self.tasks.request_cancel(run["id"], owner=owner)
+        return configured
 
     def model_view(self, cached: dict) -> dict:
         """What the conversation receives for one tool result.
@@ -317,8 +344,13 @@ class AgentRuntime:
         breaker, and the refusal text tells the reader to run exactly this. What it reaches the network
         for, it reports back to.
         """
+        config, generation = self.vault.snapshot_with_generation(owner=owner)
         try:
-            result = self.model_factory(self.vault.snapshot(owner=owner)).test()
+            model = self._model_for_lease(config, owner, generation)
+            self._authorize_model_lease(owner, generation)
+            result = model.test()
+        except Cancelled as exc:
+            raise HTTPException(401, str(exc)) from exc
         except ModelError as exc:
             if exc.destination:
                 self._record_breaker(failure=str(exc))
@@ -329,7 +361,7 @@ class AgentRuntime:
     def submit(self, params: TaskInput, *, owner: str):
         with self._lock:
             self._admit(owner)
-            config = self.vault.snapshot(owner=owner)
+            config, generation = self.vault.snapshot_with_generation(owner=owner)
             defaults = self.task_defaults(owner=owner)
             budgets = defaults.merged(params)
             caps = self.session_caps(owner=owner).model_dump()
@@ -346,7 +378,7 @@ class AgentRuntime:
                                           "idempotency_key": ""},
                           caps=caps, ledger=self.tasks.ledger(conversation_id, owner=owner))
             rid = self._create_turn(scope, [], config, budgets, owner=owner)
-            self._launch(rid, config, owner)
+            self._launch(rid, config, owner, generation)
             return self.tasks.get(rid, owner=owner)
 
     def _replay(self, parent_run: str, key: str, *, owner: str) -> dict | None:
@@ -383,7 +415,7 @@ class AgentRuntime:
             return replayed
         with self._lock:
             self._admit(owner)
-            config = self.vault.snapshot(owner=owner)
+            config, generation = self.vault.snapshot_with_generation(owner=owner)
             budgets = self.task_defaults(owner=owner).merged(params)
             scope, seeds = validate_followup(self.tasks, params, owner=owner,
                                              vault_public=config.public(), budgets=budgets)
@@ -398,7 +430,7 @@ class AgentRuntime:
             budgets = budgets.model_copy(update={"use_library": scope.authorizations["use_library"]})
             rid = self._create_turn(scope, seeds, config, budgets, owner=owner,
                                     raise_caps=params.raise_session_caps)
-            self._launch(rid, config, owner)
+            self._launch(rid, config, owner, generation)
             return self.tasks.get(rid, owner=owner)
 
     def retry(self, params: RetryInput, *, owner: str):
@@ -409,7 +441,7 @@ class AgentRuntime:
             return replayed
         with self._lock:
             self._admit(owner)
-            config = self.vault.snapshot(owner=owner)
+            config, generation = self.vault.snapshot_with_generation(owner=owner)
             budgets = self.task_defaults(owner=owner).merged(params)
             scope, seeds = validate_retry(self.tasks, params, owner=owner,
                                           vault_public=config.public(), budgets=budgets)
@@ -422,7 +454,7 @@ class AgentRuntime:
             budgets = budgets.model_copy(update={"use_library": scope.authorizations["use_library"]})
             rid = self._create_turn(scope, seeds, config, budgets, owner=owner,
                                     raise_caps=params.raise_session_caps)
-            self._launch(rid, config, owner)
+            self._launch(rid, config, owner, generation)
             return self.tasks.get(rid, owner=owner)
 
     def scope_preview(self, params: FollowUpInput | RetryInput, *, owner: str) -> dict:
@@ -508,7 +540,7 @@ class AgentRuntime:
             run = self.tasks.get(rid, owner=owner, internal=True)
             if run["status"] not in {"interrupted", "failed"}:
                 raise HTTPException(409, "仅中断或失败的任务可恢复；已完成、已取消或预算耗尽的任务请新建")
-            config = self.vault.snapshot(owner=owner)
+            config, generation = self.vault.snapshot_with_generation(owner=owner)
             if any(config.public()[k] != run["config"][k] for k in ("base_url", "model", "token_parameter", "max_output_tokens")):
                 raise HTTPException(409, "恢复任务需要同一模型、Base URL 和输出配置，防止把历史内容发送到另一服务")
             state = run["state"]
@@ -520,18 +552,18 @@ class AgentRuntime:
             self.tasks.reset_cancel(rid)
             self.tasks.checkpoint(rid, state, "queued")
             self.tasks.event(rid, "resumed", {"message": "使用已保存的对话与工具结果继续；模型/工具次数不重置，单次执行时间窗口重新开始"})
-            self._launch(rid, config, owner)
+            self._launch(rid, config, owner, generation)
             return self.tasks.get(rid, owner=owner)
 
-    def _launch(self, rid, config, owner: str):
+    def _launch(self, rid, config, owner: str, generation: int):
         # The lease names the owner so a refused submit can say whether the slot is the caller's own,
         # and the configuration travels with the launch: a key changed afterwards cannot redirect a
         # turn that is already running.
         self._busy = True
         self._lease = {"run_id": rid, "owner": owner, "since": now()}
-        self._future = self._pool.submit(self._worker, rid, config)
+        self._future = self._pool.submit(self._worker, rid, config, generation)
 
-    def _worker(self, rid, config):
+    def _worker(self, rid, config, generation):
         run = self.tasks.get(rid, internal=True)
         state, params = run["state"], run["params"]
         # The owner is read from the stored run, not from anything the model can supply: a tool call
@@ -551,6 +583,7 @@ class AgentRuntime:
         self.tasks.event(rid, "running", {"message": "agent 已启动：模型自主选择工具，所有写入需人工确认"})
 
         def boundary():
+            self._authorize_model_lease(owner, generation)
             if self.tasks.cancelled(rid):
                 raise Cancelled
             if self._stop.is_set():
@@ -565,7 +598,7 @@ class AgentRuntime:
                                  "本轮停止，证据保留。继续需要在新一轮请求里显式提高上限")
 
         try:
-            model = self.model_factory(config)
+            model = self._model_for_lease(config, owner, generation)
             while True:
                 boundary()
                 if state.get("report"):
@@ -657,6 +690,7 @@ class AgentRuntime:
                 # Elide older excerpts well before the serialized hard cap in ChatModel.
                 if len(json.dumps(state["messages"], ensure_ascii=False)) > CONTEXT_COMPACT_CHARS:
                     self.compact_context(rid, state)
+                self._authorize_model_lease(owner, generation)
                 reply = model.complete(state["messages"], tools, timeout=min(60, max(1, deadline-time.monotonic())))
                 # A model call that returned is proof the destination answers, from anywhere in the
                 # process's life: it closes a breaker a restart carried over as well as a live outage.
@@ -675,9 +709,10 @@ class AgentRuntime:
                     state["messages"].append({"role": "user", "content": "不要只给文本回答：请调用检索工具获取证据，或者调用 finish_report 提交有证据的报告/说明证据不足。"})
                     self.tasks.event(rid, "protocol_feedback", {"message": "模型未调用工具，已要求其返回可执行行动或结构化报告"})
                 self.tasks.checkpoint(rid, state)
-        except Cancelled:
-            self.tasks.checkpoint(rid, state, "cancelled", "用户取消；已发生的模型调用可能计费")
-            self.tasks.event(rid, "cancelled", {"message": "已停止；保留证据和调用记录"})
+        except Cancelled as exc:
+            message = str(exc)
+            self.tasks.checkpoint(rid, state, "cancelled", f"{message}；已发生的模型调用可能计费")
+            self.tasks.event(rid, "cancelled", {"message": f"{message}；保留证据和调用记录"})
         except Paused:
             self.tasks.checkpoint(rid, state, "interrupted", "应用停止；可手动恢复最近检查点")
         except BudgetStop as exc:

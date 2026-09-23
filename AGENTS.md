@@ -6,7 +6,9 @@
   status cards disguised as AI. `/` is the agent workbench; `/library` retains
   the original local bibliography workspace.
 - Runtime is native Python, FastAPI/SQLite, one worker; frontend is ES modules.
-  No LangGraph, distributed queue, live Zotero sync or PDF parser is present.
+  There is no LangGraph or distributed queue. Bounded arXiv/ACL full-text parsing and
+  read-only Zotero sync are implemented; representative parser review and a real
+  personal-library acceptance still remain open.
 - Run `python -m pytest`, `npm test`, `npm run check` after code changes.
   For UI changes also run both browser smoke scripts with Playwright/Chromium.
 - Separate fixture/protocol tests from real LLM/research evaluations. Never

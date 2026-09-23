@@ -165,14 +165,93 @@ def test_a_revoked_or_expired_session_stops_working_immediately(tmp_path):
     account = store.create_account("alice", PASSWORD)
     token, _ = store.issue(store.verify("alice", PASSWORD))
     assert store.resolve(token).owner == account["workspace"]
+    assert store.owner_has_live_session(account["workspace"])
     assert store.revoke(token)
     assert store.resolve(token) is None
+    assert not store.owner_has_live_session(account["workspace"])
     short, _ = store.issue(account["user_id"], ttl=timedelta(seconds=-1))
     assert store.resolve(short) is None
     # Disabling an account ends the sessions it already had, rather than waiting for them to expire.
     live, _ = store.issue(account["user_id"])
     store.set_disabled(account["user_id"], True)
     assert store.resolve(live) is None
+    assert not store.owner_has_live_session(account["workspace"])
+
+
+def test_model_list_probe_uses_hosted_destination_policy(tmp_path, monkeypatch):
+    import socket
+
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda host, port, **kw: [(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                                                   ("198.18.1.7", 443))])
+    requests = []
+
+    def network(request):
+        requests.append(request)
+        return httpx.Response(200, json={"data": [{"id": "must-not-be-reached"}]})
+
+    app = hosted(tmp_path, httpx.MockTransport(network))
+    alice = session(app, "alice")
+    for base_url in ("http://127.0.0.1:11434/v1", "https://api.openai.com/v1"):
+        response = alice.post("/api/agent/models", json={
+            "base_url": base_url, "api_key": "sentinel-model-list-key", "trust_endpoint": True})
+        assert response.status_code == 422, response.text
+    assert requests == [], "the hosted probe must refuse before opening any connection"
+
+
+@pytest.mark.parametrize("path", ["models", "config", "test", "run"])
+def test_all_hosted_model_paths_reject_private_or_loopback_before_network(tmp_path, monkeypatch, path):
+    import time
+    from re0.agent.model import ModelError
+
+    requests = []
+
+    def network(request):
+        requests.append(request)
+        raise AssertionError("refused model destination must not reach the transport")
+
+    def private_resolution(hostname):
+        raise ModelError("fixture refused private DNS resolution")
+
+    monkeypatch.setattr("re0.agent.model._require_public_resolution", private_resolution)
+    app = hosted(tmp_path, httpx.MockTransport(network))
+    alice = session(app, "alice")
+    if path == "models":
+        response = alice.post("/api/agent/models", json={
+            "base_url": "http://127.0.0.1:11434/v1", "api_key": "sentinel-key",
+            "trust_endpoint": True})
+        assert response.status_code == 422, response.text
+    elif path == "config":
+        response = alice.put("/api/agent/config", json={
+            "base_url": "http://127.0.0.1:11434/v1", "model": "fixture-model",
+            "api_key": "sentinel-key", "trust_endpoint": True})
+        assert response.status_code == 422, response.text
+    else:
+        # Accept during configuration, then model a DNS answer changing before the actual call.
+        monkeypatch.setattr("re0.agent.model._require_public_resolution", lambda hostname: None)
+        response = alice.put("/api/agent/config", json={
+            "base_url": "https://api.openai.com/v1", "model": "fixture-model",
+            "api_key": "sentinel-key", "trust_endpoint": True})
+        assert response.status_code == 200, response.text
+        monkeypatch.setattr("re0.agent.model._require_public_resolution", private_resolution)
+        if path == "test":
+            response = alice.post("/api/agent/config/test", json={})
+            assert response.status_code == 422, response.text
+        else:
+            response = alice.post("/api/agent/runs", json={
+                "goal": "Check one paper resource", "consent_to_send": True,
+                "max_model_calls": 2, "max_tool_calls": 2, "attempt_seconds": 30,
+                "use_library": False})
+            assert response.status_code == 202, response.text
+            rid = response.json()["id"]
+            deadline = time.monotonic() + 5
+            run = app.state.agent.tasks.get(rid, owner=alice.get("/api/auth/session").json()
+                                            ["identity"]["workspace"], internal=True)
+            while run["status"] in {"queued", "running"} and time.monotonic() < deadline:
+                time.sleep(0.01)
+                run = app.state.agent.tasks.get(rid, owner=run["owner"], internal=True)
+            assert run["status"] == "failed", run["status"]
+    assert requests == [], "all four model paths must refuse before opening a connection"
 
 
 # ---------------------------------------------------------------------------------- the HTTP gate
@@ -203,6 +282,103 @@ def test_login_logout_and_who_am_i(tmp_path):
     headers = alice.post("/api/auth/logout").json()
     assert headers["revoked"] is True
     assert alice.get("/api/papers").status_code == 401
+
+
+@pytest.mark.parametrize("revoke_via", ["logout", "operator"])
+def test_session_revoke_clears_the_owner_key_and_stops_the_next_model_call(tmp_path, public_dns,
+                                                                         revoke_via):
+    import json
+    import threading
+    import time
+
+    entered, release = threading.Event(), threading.Event()
+    model_requests = []
+    sentinel = "sentinel-key-cleared-on-logout"
+
+    def network(request):
+        if request.url.path.endswith("/chat/completions"):
+            model_requests.append(request)
+            entered.set()
+            assert release.wait(5), "test did not release the in-flight model call"
+            return httpx.Response(200, json={"choices": [{"finish_reason": "tool_calls", "message": {
+                "role": "assistant", "content": "", "tool_calls": [{"id": "call_plan", "type": "function",
+                    "function": {"name": "update_plan", "arguments": json.dumps({"steps": ["search"]})}}]}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
+        raise AssertionError(f"unexpected outbound request: {request.url}")
+
+    app = create_app(str(tmp_path / "logout-key.sqlite3"), httpx.MockTransport(network),
+                     deployment=deployment())
+    app.state.accounts.create_account("alice", PASSWORD)
+    with TestClient(app, headers=WRITE, base_url="https://testserver") as alice:
+        login = alice.post("/api/auth/login", json={"username": "alice", "password": PASSWORD})
+        assert login.status_code == 200
+        owner = login.json()["identity"]["workspace"]
+        user_id = login.json()["identity"]["user_id"]
+        configured = alice.put("/api/agent/config", json={
+            "base_url": "https://api.openai.com/v1", "model": "fixture-model",
+            "api_key": sentinel, "trust_endpoint": True})
+        assert configured.status_code == 200, configured.text
+        created = alice.post("/api/agent/runs", json={
+            "goal": "Check one paper resource", "consent_to_send": True,
+            "max_model_calls": 3, "max_tool_calls": 3, "attempt_seconds": 60,
+            "use_library": False})
+        assert created.status_code == 202, created.text
+        rid = created.json()["id"]
+        assert entered.wait(5), "the fixture model call did not start"
+
+        if revoke_via == "logout":
+            logged_out = alice.post("/api/auth/logout")
+            assert logged_out.status_code == 200 and logged_out.json()["revoked"] is True
+            assert logged_out.json()["credentials_cleared"] is True
+            assert app.state.agent.vault.public(owner=owner)["configured"] is False
+        else:
+            # The operator CLI revokes rows from a separate process; the worker checks the DB before
+            # the next call and lazily discards the now-unusable memory copy.
+            assert app.state.accounts.revoke_user(user_id) == 1
+        release.set()
+
+        deadline = time.monotonic() + 5
+        run = app.state.agent.tasks.get(rid, owner=owner, internal=True)
+        while run["status"] in {"queued", "running"} and time.monotonic() < deadline:
+            time.sleep(0.01)
+            run = app.state.agent.tasks.get(rid, owner=owner, internal=True)
+        assert run["status"] == "cancelled", run["status"]
+        assert app.state.agent.vault.public(owner=owner)["configured"] is False
+        assert run["state"]["model_calls"] == 1
+        assert len(model_requests) == 1, "logout may let the in-flight call finish, never start another"
+        assert sentinel not in json.dumps(run, ensure_ascii=False)
+
+
+def test_logout_clears_only_the_authenticated_owners_model_key(tmp_path, public_dns):
+    app = hosted(tmp_path)
+    alice, bob = session(app, "alice"), session(app, "bob")
+    config = {"base_url": "https://api.openai.com/v1", "model": "fixture-model",
+              "api_key": "owner-scoped-sentinel", "trust_endpoint": True}
+    assert alice.put("/api/agent/config", json=config).status_code == 200
+    assert bob.put("/api/agent/config", json=config).status_code == 200
+    alice_owner = alice.get("/api/auth/session").json()["identity"]["workspace"]
+    bob_owner = bob.get("/api/auth/session").json()["identity"]["workspace"]
+
+    assert alice.post("/api/auth/logout").json()["credentials_cleared"] is True
+    assert app.state.agent.vault.public(owner=alice_owner)["configured"] is False
+    assert app.state.agent.vault.public(owner=bob_owner)["configured"] is True
+
+
+def test_login_after_operator_revocation_does_not_reuse_the_previous_memory_key(tmp_path, public_dns):
+    app = hosted(tmp_path)
+    alice = session(app, "alice")
+    identity = alice.get("/api/auth/session").json()["identity"]
+    configured = alice.put("/api/agent/config", json={
+        "base_url": "https://api.openai.com/v1", "model": "fixture-model",
+        "api_key": "revoked-account-key", "trust_endpoint": True})
+    assert configured.status_code == 200
+    assert app.state.accounts.revoke_user(identity["user_id"]) == 1
+
+    with TestClient(app, headers=WRITE, base_url="https://testserver") as next_session:
+        login = next_session.post("/api/auth/login", json={"username": "alice", "password": PASSWORD})
+        assert login.status_code == 200, login.text
+        assert next_session.get("/api/agent/config").json()["configured"] is False
+    assert app.state.agent.vault.public(owner=identity["workspace"])["configured"] is False
 
 
 def test_two_accounts_do_not_see_each_others_library_tasks_or_mappings(tmp_path):

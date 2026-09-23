@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Hosted model credential lifecycle and endpoint consistency (#16)
+
+- Apply the hosted public-address policy to transient model-list probes as well as saved model
+  settings and inference; refuse private/loopback destinations before opening a connection.
+- Model keys now have an eight-hour in-memory lease. Logout, operator revocation, account disable,
+  or expiry invalidates the generation held by a running task and prevents its next model call; a
+  request already in flight may still finish and incur a charge.
+- Show the key lifetime and clearing behavior in model settings. No key is added to persistence,
+  task snapshots, logs or exports.
+
 ### Source workspace transfer into the Web workbench (#4)
 
 - Add bounded versioned workspace JSON export/import through `re0 workspace`; preview remains

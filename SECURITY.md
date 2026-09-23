@@ -63,18 +63,22 @@ does not make that service safe to expose.
 
 ## Secrets and material flow
 
-Model settings entered in the browser are posted to the local backend and held
-in process memory. The API never returns the configured key; validation errors
-omit supplied values, and provider error bodies are suppressed. Keys are not
+Model settings entered in the browser are posted to the backend and held in
+process memory for at most **8 hours**. The API never returns the configured key;
+validation errors omit supplied values, and provider error bodies are suppressed. Keys are not
 stored in task tables, normal exports, frontend storage or repository files.
 Startup environment variables are supported but are not deleted by UI clear.
 Memory storage is not a defense against a compromised local OS or process dump.
 
 The vault holding those settings is **keyed by owner**, so one account's key is
-not readable, echoable or clearable by another, and the configuration a turn runs
-with is snapshotted when the turn launches: rotating a key afterwards cannot
-redirect a turn already in flight. Passwords are PBKDF2-HMAC-SHA256 at 210k rounds
-with a per-account salt; session tokens are opaque random values stored as
+not readable, echoable or clearable by another. A running turn keeps an in-memory
+snapshot so changing settings cannot redirect it; clearing, expiry, account disable
+or session revocation invalidates that snapshot before its next model request. A
+request already in progress cannot be recalled and may still incur a charge.
+Model-list probes use the same hosted endpoint policy as saved settings and
+inference, including public DNS resolution; a refused destination is never dialed.
+Logging out clears that owner's key and stops later calls for its active task.
+Passwords are PBKDF2-HMAC-SHA256 at 210k rounds with a per-account salt; session tokens are opaque random values stored as
 SHA-256 so they can be revoked, which a signed token cannot be. Verifying an
 unknown account runs a dummy hash, so a wrong username does not answer faster than
 a wrong password, and five failures lock an account for 15 minutes. Sessions live

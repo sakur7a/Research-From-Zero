@@ -1412,3 +1412,12 @@ URL，Cookie 由**浏览器**保存并回传（`Set-Cookie` 原样转发，只�
 - `scripts/install_smoke.py test-results/skill-demo-smoke-20260923-search-retry`: **通过**。wheel 与 sdist 均在仓库外的干净虚拟环境安装；25 个 Web 文件和 Skill 包资源齐全，MCP 握手、Skill 预览/安装、`/static/skill.html` 及其静态资源均通过。两种安装都用 MockTransport 跑了一个 OpenAlex Skill 搜索 fixture，返回预期版本化 JSON；环境清空凭据，只访问 mock host。
 - 验证：`python -m pytest` **547 passed**，1 个既有 Starlette `BlockingPortal` 弃用警告；`npm test` **83 passed**；`npm run check` passed；Skill quick validator passed。
 - 此预览只证明本地可浏览静态原型；没有实时搜索、模型调用、在线托管或参赛作品链接验收。
+
+## 2026-09-23 R2 #16：托管模型出站与凭据生命周期
+
+- Regression coverage checks hosted policy on model-list, configuration, tool-call test and task inference paths. Loopback and a changing private DNS result are refused before `MockTransport` receives a request.
+- The configured destination is resolved again before every model request, so a DNS answer that changes after configuration is refused before transport dispatch.
+- `ModelVault` lease/generation tests prove eight-hour expiry and snapshot invalidation. Logout clears only the matching owner's key; operator session revocation is checked at the next runtime boundary, and signing in again cannot revive the old in-memory key.
+- An in-flight mock model request may finish after logout/revocation; the next model call is not started, the task records a cancelled state, and the sentinel key is absent from its exported task view.
+- Verification: `python -m pytest` **558 passed** (one existing Starlette `BlockingPortal` deprecation warning); `npm test` **83 passed**; `npm run check` passed; `scripts/browser_smoke.py` 15 stages, `scripts/agent_browser_smoke.py` 12 checks, `scripts/login_browser_smoke.py` 9 steps, and `scripts/real_http_browser_smoke.py` 5 steps passed. The installed wheel/sdist smoke also passed.
+- All model requests in this verification used fixtures/MockTransport. The loopback HTTP smoke did not contact an external model or deploy an HTTPS service. Real TLS and provider acceptance remain in #22.

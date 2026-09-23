@@ -11,6 +11,7 @@ import json
 import os
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
 import httpx
@@ -26,6 +27,7 @@ DEFAULT_HOSTS = {"api.openai.com", "api.deepseek.com", "dashscope.aliyuncs.com",
                  "open.bigmodel.cn", "api.moonshot.cn", "api.siliconflow.cn",
                  "ark.cn-beijing.volces.com"}
 LOOPBACK = {"127.0.0.1", "::1"}
+MODEL_KEY_TTL = timedelta(hours=8)
 
 # Offered to the settings UI so a user only has to paste a key. Hosts must stay
 # inside DEFAULT_HOSTS or an existing deployment variable; see the drift test.
@@ -132,13 +134,14 @@ def _model_entries(payload):
     return []
 
 
-def list_models(credential: "ModelConfig | ModelListRequest", *, transport=None) -> dict:
+def list_models(credential: "ModelConfig | ModelListRequest", *, transport=None,
+                hosted: bool = False) -> dict:
     """One bounded `GET {base_url}/models`.
 
     A provider that does not implement this endpoint, or a gated one, is reported
     as a failure. The caller falls back to typing a model ID; nothing is guessed.
     """
-    config = validate_endpoint(credential)
+    config = validate_endpoint(credential, hosted=hosted)
     headers = {"Content-Type": "application/json"}
     key = config.api_key.get_secret_value()
     if key:
@@ -172,16 +175,20 @@ def list_models(credential: "ModelConfig | ModelListRequest", *, transport=None)
 
 
 class ModelVault:
-    """One configuration per owner, in memory, for the length of the process.
+    """One short-lived configuration per owner, in memory.
 
     Nothing here is written to the database, a checkpoint, a log line or a response; `public()` is
-    the only view that leaves, and it has no key in it. An owner with no configuration gets an
-    error that says so, never somebody else's destination.
+    the only view that leaves, and it has no key in it. Snapshots carry a generation so clearing,
+    expiring, or replacing a key invalidates work that already holds a copy.
     """
 
-    def __init__(self, *, hosted: bool = False):
+    def __init__(self, *, hosted: bool = False, clock=None):
         self._lock = threading.RLock()
         self._configs: dict = {}
+        self._deadlines: dict[str, float] = {}
+        self._expirations: dict[str, str] = {}
+        self._generations: dict[str, int] = {}
+        self._clock = clock or time.monotonic
         self.hosted = hosted
         self.startup_error = ""
         if os.getenv("RE0_LLM_MODEL") and os.getenv("RE0_LLM_BASE_URL"):
@@ -198,37 +205,74 @@ class ModelVault:
             # Validated before it replaces anything, so a refused destination leaves the previous
             # configuration in place rather than clearing it.
             validated = validate_endpoint(config, hosted=self.hosted)
+            self._expire_locked(owner)
+            self._generations[owner] = self._generations.get(owner, 0) + 1
             self._configs[owner] = validated
+            self._deadlines[owner] = self._clock() + MODEL_KEY_TTL.total_seconds()
+            self._expirations[owner] = (datetime.now(timezone.utc) + MODEL_KEY_TTL).replace(
+                microsecond=0).isoformat()
 
     def clear(self, *, owner: str = ""):
         with self._lock:
             if owner:
                 self._configs.pop(owner, None)
+                self._deadlines.pop(owner, None)
+                self._expirations.pop(owner, None)
+                self._generations[owner] = self._generations.get(owner, 0) + 1
             else:
                 # Shutdown only: dropping every owner's configuration is what `close()` means, and
                 # no request path calls it without an owner.
-                self._configs.clear()
+                for existing in tuple(self._configs):
+                    self._configs.pop(existing, None)
+                    self._deadlines.pop(existing, None)
+                    self._expirations.pop(existing, None)
+                    self._generations[existing] = self._generations.get(existing, 0) + 1
 
-    def snapshot(self, *, owner: str):
+    def _expire_locked(self, owner: str) -> bool:
+        deadline = self._deadlines.get(owner)
+        if owner in self._configs and deadline is not None and deadline <= self._clock():
+            self._configs.pop(owner, None)
+            self._deadlines.pop(owner, None)
+            self._expirations.pop(owner, None)
+            self._generations[owner] = self._generations.get(owner, 0) + 1
+            return True
+        return False
+
+    def snapshot_with_generation(self, *, owner: str):
         with self._lock:
+            self._expire_locked(owner)
             config = self._configs.get(owner)
             if config is None:
                 raise ModelError("尚未配置模型：请先设置 Base URL、Model ID 和 API Key")
-            return config.model_copy(deep=True)
+            return config.model_copy(deep=True), self._generations[owner]
+
+    def snapshot(self, *, owner: str):
+        return self.snapshot_with_generation(owner=owner)[0]
+
+    def is_current(self, owner: str, generation: int) -> bool:
+        with self._lock:
+            self._expire_locked(owner)
+            return owner in self._configs and self._generations.get(owner) == generation
 
     def configured(self, *, owner: str) -> bool:
         with self._lock:
+            self._expire_locked(owner)
             return owner in self._configs
 
     def public(self, *, owner: str):
         with self._lock:
+            self._expire_locked(owner)
             config = self._configs.get(owner)
-            return config.public() if config else {"configured": False, "storage": "server_memory",
-                                                   "startup_error": self.startup_error}
+            if config:
+                return {**config.public(), "credential_expires_at": self._expirations.get(owner, "")}
+            return {"configured": False, "storage": "server_memory", "credential_expires_at": "",
+                    "startup_error": self.startup_error}
 
     def owners(self) -> list:
         """Which owners hold a configuration. Names only, for shutdown and diagnostics."""
         with self._lock:
+            for owner in tuple(self._configs):
+                self._expire_locked(owner)
             return sorted(self._configs)
 
 
@@ -239,12 +283,21 @@ def redact(text: str, config: ModelConfig) -> str:
 
 class ChatModel:
     def __init__(self, config: ModelConfig, transport=None, *, hosted: bool = False):
-        # Validated again at construction, not only when it was stored: the destination is re-checked
-        # at the moment it is about to be dialled, which is the only moment the answer matters.
+        # Validate on construction and again before every outbound call: an allowlisted name can
+        # resolve differently later, and a config may have sat in memory since it was saved.
         self.config = validate_endpoint(config, hosted=hosted)
+        self.hosted = hosted
         self.transport = transport
+        self._call_authorizer = None
+
+    def set_call_authorizer(self, callback):
+        """Install a last-moment check used by hosted tasks before each outbound model call."""
+        self._call_authorizer = callback
 
     def complete(self, messages: list[dict], tools: list[dict], *, timeout=60, force_tool=None) -> dict:
+        if self._call_authorizer is not None:
+            self._call_authorizer()
+        self.config = validate_endpoint(self.config, hosted=self.hosted)
         payload = {"model": self.config.model, "messages": messages, "tools": tools,
                    self.config.token_parameter: self.config.max_output_tokens,
                    "tool_choice": {"type": "function", "function": {"name": force_tool}} if force_tool else "auto",

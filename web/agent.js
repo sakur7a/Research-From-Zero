@@ -197,9 +197,12 @@ function openSettings() {
   // Settings re-renders the dialog body, which would take the toast with it.
   noticeHome();
   const defaults = normalizeDefaults(config.task_defaults);
+  const credentialExpires = config.credential_expires_at
+    ? new Date(config.credential_expires_at).toLocaleString() : '';
   const presets = Array.isArray(config.endpoint_presets) ? config.endpoint_presets : [];
   const presetOptions = presets.map(p => `<option value="${e(p.base_url)}" ${p.base_url === config.base_url ? 'selected' : ''}>${e(p.label)}</option>`).join('');
-  settings.innerHTML=`<div class="dialog-header"><div><div class="eyebrow">LOCAL WORKSPACE SETTINGS</div><h2 id="settings-title">模型与任务设置</h2></div><button class="close" data-action="close-settings" aria-label="关闭设置">×</button></div><p class="subtle">使用支持 Chat Completions 工具调用的服务。API Key 只放在本地服务进程内存；重启后重新输入，或用环境变量配置。</p>
+  settings.innerHTML=`<div class="dialog-header"><div><div class="eyebrow">LOCAL WORKSPACE SETTINGS</div><h2 id="settings-title">模型与任务设置</h2></div><button class="close" data-action="close-settings" aria-label="关闭设置">×</button></div><p class="subtle">使用支持 Chat Completions 工具调用的服务。API Key 只保存在服务内存，最多 8 小时；重启、托管会话退出或账户撤销后清除，不写入数据库、浏览器存储或导出。已发出的请求可能仍计费，清除后不会再启动新的模型调用。</p>
+    ${config.configured ? `<p class="field-note">当前配置最晚有效至 ${e(credentialExpires || '未知时间')}。重新使用时需要再次配置 Key。</p>` : ''}
     <form id="model-form" autocomplete="off"><label>服务商<select id="preset"><option value="">选择服务商会自动填入下面的地址（不代表已实测模型兼容性）</option>${presetOptions}<option value="__custom">其他 / 自定义地址</option></select></label>
     <label>API Base URL<input name="base_url" id="base-url" type="url" value="${e(config.base_url || '')}" placeholder="https://api.example.com/v1" required></label><p class="field-note">只接受预设可信域名和显式端口的回环地址。自定义域名需设置 RE0_LLM_ALLOWED_HOSTS。</p>
     <label>API Key<input name="api_key" type="password" autocomplete="new-password" placeholder="${config.has_api_key?'已配置；重新保存时需再次输入，不会回填旧密钥':'本地无认证服务可留空'}" maxlength="2048"></label>
