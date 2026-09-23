@@ -843,7 +843,7 @@ class AgentRuntime:
             if state.get("report") or final_report_pending:
                 return
             if time.monotonic() >= deadline:
-                raise BudgetStop("本次执行时间预算已用尽；已保留现有证据")
+                raise RequestBoundaryStop("deadline", "本次执行时间预算已用尽；已保留现有证据")
             max_upstream = int(params.get("max_upstream_requests", 60))
             if state["upstream_requests"] >= max_upstream:
                 raise BudgetStop(f"本轮上游 HTTP 请求预算已用尽（{state['upstream_requests']}/{max_upstream}）；"

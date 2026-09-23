@@ -1441,12 +1441,12 @@ URL，Cookie 由**浏览器**保存并回传（`Set-Cookie` 原样转发，只�
 
 ## 2026-09-24 R2 #20/#21：Agent 请求边界与 BYOK 故障隔离
 
-- The complete fixed-fixture Python suite passed: **588 passed**, with one existing Starlette `BlockingPortal` deprecation warning. This run used MockTransport for model/provider boundaries; no live model endpoint, user key or paid request was used.
+- The complete fixed-fixture Python suite passed: **589 passed**, with one existing Starlette `BlockingPortal` deprecation warning. This run used MockTransport for model/provider boundaries; no live model endpoint, user key or paid request was used.
 - Frontend: `npm test` **84 passed**; `npm run check` passed. Offline Chromium: `scripts/agent_browser_smoke.py` **14 stages**, including the two-tab 401/429/offline/recovery/completion path; `scripts/browser_smoke.py` **15 stages**. Both reported zero browser errors and no external network use.
-- `compileall` and `git diff --check` passed after the final documentation/CLI doctor adjustment. The progress pagination fixture now takes its cursor after the completed task's final event; the final full-suite rerun passed all 588 tests.
+- `compileall` and `git diff --check` passed after the runtime deadline and fake-clock regression were added. The progress pagination fixture takes its cursor after the completed task's final event; the final full-suite rerun passed all 589 tests.
 - A three-run A/B on the same long-abstract/large-resource `MatrixFixture` preserved 7 model calls, 7 tool calls, 24 upstream requests, 29 evidence records, 3 resource links and report output. Total serialized model body size changed from **453,427 bytes / 425,687 characters** to **340,473 bytes / 312,127 characters** (about **24.9% fewer bytes**); maximum body size changed from **104,323** to **79,839 bytes**. Median harness time was **1.10s** at `cbb4a82` vs **1.62s** in the working tree, so this fixture did not demonstrate a latency improvement.
-- Targeted regressions cover the task-wide request ledger, report-call reserve, cancellation between sources, long serialized bodies, compact views with evidence read-back, bounded progress cursors, endpoint-specific breakers, per-owner 429 cooldowns, probe concurrency/budgets, half-open admission, restart persistence, and one provider outage not blocking a second endpoint.
-- GitHub issues #20/#21 remain open pending the final pushed state and any acceptance evidence outside this local fixture/browser scope. This does not approve hosted deployment, a real-model/paid test or a public demo.
+- Targeted regressions cover the task-wide request ledger, report-call reserve, cancellation and fake-clock deadline between sources, long serialized bodies, compact views with evidence read-back, bounded progress cursors, endpoint-specific breakers, per-owner 429 cooldowns, probe concurrency/budgets, half-open admission, restart persistence, and one provider outage not blocking a second endpoint.
+- GitHub issues #20/#21 remain open for the broader acceptance record. This local work does not approve hosted deployment, a real-model/paid test or a public demo; those decisions remain `未定` in the owner response.
 
 ## 2026-09-24 R2 #19：Agent 结果到论文—资源矩阵
 

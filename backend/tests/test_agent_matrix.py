@@ -7,6 +7,7 @@ import time
 import httpx
 from fastapi.testclient import TestClient
 
+import re0.agent.runtime as runtime_module
 from re0.agent.tools import TOOL_TYPES
 from re0.main import create_app
 
@@ -246,6 +247,43 @@ class CancelledSearchFixture:
         raise AssertionError(f"cancelled task unexpectedly made model request {self.model_calls}")
 
 
+class DeadlineClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def expire(self):
+        self.now = 30.0
+
+
+class DeadlineSearchFixture:
+    """An elapsed attempt deadline blocks the next source after retaining arXiv evidence."""
+    def __init__(self, clock):
+        self.clock = clock
+        self.requests = []
+        self.model_calls = 0
+
+    def __call__(self, request):
+        self.requests.append(request)
+        if request.url.host == "export.arxiv.org":
+            self.clock.expire()
+            return httpx.Response(200, content=atom_feed(), headers={"Content-Type": "application/atom+xml"})
+        if request.url.host == "api.crossref.org":
+            raise AssertionError("deadline must refuse the next source before HTTP dispatch")
+        assert request.url == "https://api.openai.com/v1/chat/completions"
+        self.model_calls += 1
+        call_id = f"deadline-search-{self.model_calls}"
+        if self.model_calls == 1:
+            return httpx.Response(200, json=tool_completion(
+                call_id, "update_plan", {"steps": ["检索候选来源", "保留已取得材料"]}))
+        if self.model_calls == 2:
+            return httpx.Response(200, json=tool_completion(
+                call_id, "search_papers", {"query": "LayerKit", "sources": ["arxiv", "crossref"], "limit": 3}))
+        raise AssertionError(f"deadline task unexpectedly made model request {self.model_calls}")
+
+
 def wait_done(client, run_id):
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
@@ -459,4 +497,25 @@ def test_cancel_between_search_sources_keeps_completed_source_and_starts_no_next
         cached = client.app.state.agent.tasks.cached_tool(run_id, "call_re0_2_0")
         assert cached["coverage"]["state"] == "cancelled"
         assert any(row["source"] == "crossref" and row["stop_reason"] == "cancelled"
+                   for row in cached["coverage"]["pagination"])
+
+
+def test_deadline_between_search_sources_keeps_completed_source_and_starts_no_next_request(tmp_path, monkeypatch):
+    clock = DeadlineClock()
+    monkeypatch.setattr(runtime_module, "time", clock)
+    fixture = DeadlineSearchFixture(clock)
+    with TestClient(create_app(str(tmp_path / "deadline-search.sqlite3"), httpx.MockTransport(fixture)),
+                    headers=HEADERS) as client:
+        assert client.put("/api/agent/config", json=CONFIG).status_code == 200
+        started = client.post("/api/agent/runs", json={**GOAL, "attempt_seconds": 30})
+        assert started.status_code == 202, started.text
+        run = wait_done(client, started.json()["id"])
+        assert run["status"] == "budget_exhausted", run
+        assert run["model_calls"] == fixture.model_calls == 2
+        assert run["upstream_requests"] == len(fixture.requests) == 3
+        assert not any(item.url.host == "api.crossref.org" for item in fixture.requests)
+        assert len(run["evidence"]) == 3 and all(item["kind"] == "paper" for item in run["evidence"])
+        cached = client.app.state.agent.tasks.cached_tool(run["id"], "call_re0_2_0")
+        assert cached["coverage"]["state"] == "time_budget"
+        assert any(row["source"] == "crossref" and row["stop_reason"] == "time_budget"
                    for row in cached["coverage"]["pagination"])
