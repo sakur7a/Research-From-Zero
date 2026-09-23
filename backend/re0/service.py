@@ -921,6 +921,53 @@ class Store:
         with self.db.connect() as con:
             return con.execute("DELETE FROM papers WHERE is_demo=1 AND owner=?", (owner,)).rowcount
 
+    def delete_owner_data(self, *, owner: str) -> int:
+        """Delete every database row for one verified temporary owner, including evidence and settings.
+
+        Owner-bearing tables are discovered from SQLite's schema and removed child-first by their
+        foreign-key graph. Rows without an owner column (for example resources and observations)
+        are removed through their parent's declared cascades. `local` and caller-provided strings are
+        refused; this method is for the server's guest-retention cleanup only.
+        """
+        if not re.fullmatch(r"ws_[0-9a-f]{16}", str(owner or "")):
+            raise ValueError("仅支持删除已验证的临时访客工作区")
+        with self.db.connect() as con:
+            tables = [row[0] for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+            owned = set()
+            for table in tables:
+                columns = {row[1] for row in con.execute(f'PRAGMA table_info("{table}")')}
+                if "owner" in columns:
+                    owned.add(table)
+
+            children: dict[str, set[str]] = {table: set() for table in owned}
+            for child in owned:
+                for foreign_key in con.execute(f'PRAGMA foreign_key_list("{child}")'):
+                    parent = foreign_key[2]
+                    if parent in owned:
+                        children[parent].add(child)
+            order: list[str] = []
+            visited: set[str] = set()
+
+            def visit(table: str):
+                if table in visited:
+                    return
+                visited.add(table)
+                for child in sorted(children[table]):
+                    visit(child)
+                order.append(table)
+
+            for table in sorted(owned):
+                visit(table)
+
+            con.execute("BEGIN IMMEDIATE")
+            deleted = 0
+            for table in order:
+                safe_table = table.replace('"', '""')
+                result = con.execute(f'DELETE FROM "{safe_table}" WHERE owner=?', (owner,))
+                deleted += max(0, result.rowcount)
+            return deleted
+
 
 def bibtex_export(papers: list[dict]) -> str:
     def tex(value: str) -> str:

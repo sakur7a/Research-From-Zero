@@ -62,6 +62,7 @@ class Deployment:
     public_entry: str = ""
     allowed_origins: tuple[str, ...] = ()
     storage_mode: str = "local"
+    guest_access_enabled: bool = False
     problems: tuple[str, ...] = ()
 
     @property
@@ -105,6 +106,7 @@ class Deployment:
         return {"mode": self.mode, "auth_required": self.auth_required,
                 "public_entry": self.public_entry, "allowed_origins": list(self.allowed_origins),
                 "storage_mode": self.storage_mode,
+                "guest_access_enabled": self.guest_access_enabled,
                 "session_secret_configured": bool(self.session_secret),
                 "problems": list(self.problems)}
 
@@ -189,8 +191,10 @@ def from_env(environ: dict | None = None) -> Deployment:
         else:
             problems.append(f"RE0_STORAGE_MODE 只能是 {' 或 '.join(STORAGE_MODES)}，收到 {storage_mode!r}")
 
+    guest_access = (env.get("RE0_GUEST_ACCESS") or "").strip().lower() in {"1", "true", "yes", "on"}
     return Deployment(mode="hosted", session_secret=secret, public_entry=entry,
-                      allowed_origins=origins, storage_mode=storage_mode, problems=tuple(problems))
+                      allowed_origins=origins, storage_mode=storage_mode,
+                      guest_access_enabled=guest_access, problems=tuple(problems))
 
 
 def trusted_hosts_from_env(environ: dict | None = None) -> tuple[str, ...]:

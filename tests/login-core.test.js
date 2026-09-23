@@ -13,12 +13,12 @@ import {loginFailure, loginRedirect, nextLabel, safeNext, sessionView} from '../
 const HOSTED_SIGNED_OUT = {
   identity: {user_id: '', workspace: '', authenticated: false, expires_at: ''},
   deployment: {mode: 'hosted', auth_required: true, public_entry: 'https://re0.example.org',
-               storage_mode: 'ephemeral-demo'},
+               storage_mode: 'ephemeral-demo', guest_access_enabled: true},
   accounts_provisioned: 2,
   note: '托管模式：未登录时接口一律 401',
 };
 const HOSTED_SIGNED_IN = {
-  identity: {user_id: 'usr_deadbeef', workspace: 'ws_cafebabe', authenticated: true,
+  identity: {user_id: 'usr_deadbeef', workspace: 'ws_cafebabe', authenticated: true, kind: 'user',
              expires_at: '2026-09-23T12:00:00+00:00'},
   deployment: {mode: 'hosted', auth_required: true},
   accounts_provisioned: 2,
@@ -100,6 +100,7 @@ test('the three states the page can be in come from the server, not from the URL
   assert.equal(signedOut.authenticated, false);
   assert.equal(signedOut.required, true);
   assert.equal(signedOut.storageMode, 'ephemeral-demo');
+  assert.equal(signedOut.guestAccessAvailable, true);
   assert.equal(signedOut.next.path, '/library');
   assert.equal(signedOut.next.label, '文献库');
 
@@ -109,6 +110,7 @@ test('the three states the page can be in come from the server, not from the URL
   assert.equal(signedIn.workspace, 'ws_cafebabe');
   assert.equal(signedIn.expiresAt, '2026-09-23T12:00:00+00:00');
   assert.equal(signedIn.storageMode, 'local');
+  assert.equal(signedIn.isGuest, false);
   assert.equal(signedIn.next.path, '/');
 
   const local = sessionView(LOCAL, '/library');
@@ -117,6 +119,18 @@ test('the three states the page can be in come from the server, not from the URL
   assert.equal(local.required, false);
   assert.equal(local.mode, 'local');
   assert.equal(local.storageMode, 'local');
+});
+
+test('a guest session is identified without exposing its internal owner name as an account', () => {
+  const guest = sessionView({
+    identity: {user_id: 'gst_deadbeef', workspace: 'ws_cafebabe', authenticated: true,
+               expires_at: '2026-09-24T02:00:00+00:00', kind: 'guest'},
+    deployment: {mode: 'hosted', auth_required: true, guest_access_enabled: true,
+                 storage_mode: 'ephemeral-demo'},
+  }, '/');
+  assert.equal(guest.isGuest, true);
+  assert.equal(guest.kind, 'guest');
+  assert.equal(guest.guestAccessAvailable, true);
 });
 
 test('nothing about a signed-out or local visitor invents an identity', () => {

@@ -23,8 +23,8 @@ BASE = f"http://127.0.0.1:{PORT}"
 SERVER_HARNESS = Path(__file__).with_name("container_smoke_server.py").resolve()
 
 
-def docker(args, *, check=True, quiet=False, stdin=None):
-    result = subprocess.run(["docker", *args], check=False, text=True, input=stdin,
+def docker(args, *, check=True, quiet=False):
+    result = subprocess.run(["docker", *args], check=False, text=True,
                             stdout=subprocess.DEVNULL if quiet else subprocess.PIPE,
                             stderr=subprocess.DEVNULL if quiet else subprocess.PIPE)
     if check and result.returncode:
@@ -66,6 +66,7 @@ def start(name, image, secret, *, harness=False):
             "--publish", f"127.0.0.1:{PORT}:10000",
             "--env", "PORT=10000", "--env", "RE0_HOST=0.0.0.0",
             "--env", "RE0_MODE=hosted", "--env", "RE0_STORAGE_MODE=ephemeral-demo",
+            "--env", "RE0_GUEST_ACCESS=true",
             "--env", f"RE0_SESSION_SECRET={secret}", "--env", "RENDER=true",
             "--env", f"RENDER_EXTERNAL_URL=https://{HOST}",
             "--env", f"RENDER_EXTERNAL_HOSTNAME={HOST}"]
@@ -109,27 +110,19 @@ def wait_for_container_health(name, timeout=30):
     raise AssertionError(f"Dockerfile healthcheck did not pass: {latest}")
 
 
-def provision_account(name, password):
-    docker(["exec", "-i", name, "python", "-m", "re0", "auth", "create-user",
-            "--username", "smoke-reader", "--password-stdin"], stdin=password + "\n")
-
-
-def login(password):
-    payload, headers = json_request("/api/auth/login", method="POST",
-                                    data={"username": "smoke-reader", "password": password})
-    if not payload.get("identity", {}).get("authenticated"):
-        raise AssertionError(f"login response did not authenticate: {payload}")
+def start_guest():
+    payload, headers = json_request("/api/auth/guest", method="POST", data={})
+    if payload.get("identity", {}).get("kind") != "guest":
+        raise AssertionError(f"guest entry did not create an isolated identity: {payload}")
     cookie = re.search(r"(?:^|;\s*)re0_session=([^;]+)", headers.get("Set-Cookie", ""))
     if not cookie:
-        raise AssertionError("hosted login did not issue the session cookie")
+        raise AssertionError("guest entry did not issue a session cookie")
     return cookie.group(1)
 
 
 def run(image="re0:ci"):
     name = "re0-hosted-smoke"
     secret = secrets.token_urlsafe(48)
-    password = secrets.token_urlsafe(24)
-    new_password = secrets.token_urlsafe(24)
     checks = []
     try:
         # Exercise the image's production CMD and Docker health route, including platform PORT.
@@ -159,8 +152,7 @@ def run(image="re0:ci"):
         # Run the actual task loop in a clean container. Only the model object is a fixture.
         start(name, image, secret, harness=True)
         wait_for_health()
-        provision_account(name, password)
-        cookie = login(password)
+        cookie = start_guest()
         paper, _ = json_request("/api/papers", method="POST", cookie=cookie,
                                 data={"title": "Container smoke fixture paper",
                                       "abstract": "Seeded CI metadata for the hosted container smoke."},
@@ -201,8 +193,8 @@ def run(image="re0:ci"):
             raise AssertionError("the task export contains the configured API key")
         checks.append("202_poll_tool_loop_report_evidence_and_full_export")
 
-        # Remove/recreate the container to model an ephemeral cold start. The old session token must
-        # not authenticate, and a fresh account sees no old task; the export above remains with the user.
+        # Remove/recreate the container to model an ephemeral cold start. The old guest token must
+        # not authenticate, and a fresh guest sees no old task; the export remains with the user.
         docker(["rm", "--force", name], quiet=True)
         start(name, image, secret, harness=True)
         wait_for_health()
@@ -210,12 +202,11 @@ def run(image="re0:ci"):
         if session.get("identity", {}).get("authenticated") or session.get("accounts_provisioned") != 0:
             raise AssertionError("ephemeral cold start unexpectedly retained account state")
         json_request("/api/agent/runs", cookie=cookie, expected=401)
-        provision_account(name, new_password)
-        fresh_cookie = login(new_password)
+        fresh_cookie = start_guest()
         runs, _ = json_request("/api/agent/runs", cookie=fresh_cookie)
         if runs:
             raise AssertionError("the fresh ephemeral instance exposed a task from the previous instance")
-        checks.append("ephemeral_cold_start_invalidates_old_session_and_task_state")
+        checks.append("ephemeral_cold_start_invalidates_old_guest_and_task_state")
 
         result = {"commit": os.getenv("GITHUB_SHA", "local"),
                   "checks": checks, "task_statuses": statuses,

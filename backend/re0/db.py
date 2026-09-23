@@ -26,7 +26,7 @@ from typing import Iterator
 
 from .deployment import LOCAL_OWNER
 
-SCHEMA_TARGET = 3
+SCHEMA_TARGET = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -51,6 +51,11 @@ CREATE INDEX IF NOT EXISTS observations_resource ON observations(resource_id, id
 CREATE TABLE IF NOT EXISTS topics (
   name TEXT NOT NULL, owner TEXT NOT NULL DEFAULT 'local', PRIMARY KEY (owner, name)
 );
+CREATE TABLE IF NOT EXISTS auth_guest_sessions (
+  token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL UNIQUE, workspace TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL, expires_at TEXT NOT NULL, revoked_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS auth_guest_sessions_expiry ON auth_guest_sessions(expires_at, revoked_at);
 """
 
 # Created after the migration has run, because a v1 database does not have the columns they name.
@@ -65,8 +70,8 @@ CREATE INDEX IF NOT EXISTS papers_owner ON papers(owner, updated_at DESC, id);
 DEFAULT_TOPICS = ("图层分解 / 生成", "Layout 生成", "推荐系统")
 
 MIGRATION_NOTE = ("library schema v1→v2 为 papers/topics 增加 owner；v2→v3 增加 Work、PaperVersion、"
-                  "SourceSnapshot、版本化方向模板、主题成员和可追溯关系表。既有 paper.id 成为 Work id，"
-                  "历史观察只绑定其显式版本快照；无法确定的版本保持未绑定。")
+                  "SourceSnapshot、版本化方向模板、主题成员和可追溯关系表；v3→v4 增加独立的短期访客会话表。"
+                  "既有 paper.id 成为 Work id，历史观察只绑定其显式版本快照；无法确定的版本保持未绑定。")
 
 
 def encode(value: object) -> str:
@@ -204,6 +209,9 @@ class Database:
 
             migrate_v3(con)
             con.execute("UPDATE schema_version SET version=3")
+            version = 3
+        if version < 4:
+            con.execute("UPDATE schema_version SET version=4")
         broken = con.execute("PRAGMA foreign_key_check").fetchall()
         if broken:
             # Reported rather than ignored: a migration that leaves a dangling reference has already

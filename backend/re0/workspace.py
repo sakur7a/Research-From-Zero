@@ -23,6 +23,7 @@ import hashlib
 import json
 import pathlib
 import re
+import shutil
 import time
 import uuid
 
@@ -85,6 +86,27 @@ def managed_workspace_path(database_path, owner: str, workspace_id: str) -> path
     if not isinstance(workspace_id, str) or not WORKSPACE_ID_PATTERN.fullmatch(workspace_id):
         raise WorkspaceError("工作区 ID 格式无效")
     return managed_workspaces_root(database_path, owner) / workspace_id
+
+
+def delete_managed_workspaces(database_path, owner: str) -> bool:
+    """Remove a verified owner's server-managed source bundles without following escaped paths."""
+    candidate = managed_workspaces_root(database_path, owner)
+    database_parent = pathlib.Path(database_path).expanduser().resolve().parent
+    base = database_parent / "workspaces"
+    resolved_base = base.resolve()
+    if not resolved_base.is_relative_to(database_parent):
+        raise WorkspaceError("工作区根目录超出了数据库数据目录")
+    if candidate.is_symlink():
+        # Delete only the link entry; its target may be outside Re0's data directory.
+        candidate.unlink()
+        return True
+    if not candidate.exists():
+        return False
+    resolved = candidate.resolve()
+    if resolved.parent != resolved_base or resolved == resolved_base:
+        raise WorkspaceError("拒绝删除数据库数据目录之外的工作区")
+    shutil.rmtree(resolved)
+    return True
 
 
 def _validated_bundle(bundle: dict, *, expected_workspace_id: str = "") -> tuple[str, list, list]:

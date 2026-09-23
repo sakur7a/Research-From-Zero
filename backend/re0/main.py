@@ -15,6 +15,7 @@ configuration, and refuse to answer as anybody when it does not know who is aski
 from __future__ import annotations
 
 import os
+import sys
 from contextlib import asynccontextmanager
 import threading
 import time
@@ -32,7 +33,8 @@ from .agent.api import agent_router
 from .agent.runtime import AgentRuntime
 from .agent.model import ModelError
 from . import __version__
-from .auth import SESSION_TTL, AccountStore, Identity, anonymous_identity, local_identity
+from .auth import (GUEST_SESSION_TTL, SESSION_TTL, AccountStore, GuestCapacityError,
+                   Identity, anonymous_identity, local_identity)
 from .db import Database
 from .deployment import SESSION_COOKIE, Deployment, DeploymentError, from_env, trusted_hosts_from_env
 from .models import (MetadataRequest, PaperInput, ResearchRelationInput,
@@ -46,12 +48,13 @@ from .service import Store, bibtex_export, validation_message
 from .zotero import Connection, ZoteroClient, ZoteroError, ZoteroStore
 from .zotero_sync import sync as run_zotero_sync
 from .workspace import (Workspace, WorkspaceError, managed_workspace_path,
-                        managed_workspaces_root)
+                        managed_workspaces_root, delete_managed_workspaces)
 
 # Routes that answer without a session: the shell has to load before anybody can log in, health has
 # to answer before an orchestrator sends traffic, and login is the door. None of them returns a row
 # belonging to anybody, which is what makes the list short.
-OPEN_API_PATHS = frozenset({"/api/health", "/api/auth/login", "/api/auth/session"})
+OPEN_API_PATHS = frozenset({"/api/health", "/api/auth/login", "/api/auth/session",
+                            "/api/auth/guest"})
 
 
 class CslImport(BaseModel):
@@ -155,12 +158,53 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
                          deployment=deployment, quota=quota,
                          owner_has_live_session=(accounts.owner_has_live_session
                                                  if deployment.auth_required else None))
+    guest_cleanup_lock = threading.Lock()
+    deleting_guest_owners: set[str] = set()
+    guest_request_counts: dict[str, int] = {}
+    guest_cleanup_stop = threading.Event()
+
+    def cleanup_guest_owner(owner: str) -> bool:
+        """Clear one expired guest only after its current task has reached a safe boundary."""
+        if not owner:
+            return False
+        with guest_cleanup_lock:
+            if owner in deleting_guest_owners:
+                return False
+            deleting_guest_owners.add(owner)
+            try:
+                agent.revoke_owner(owner)
+                if guest_request_counts.get(owner, 0) or agent.busy_view(owner)["queue"]["mine"]:
+                    return False
+                store.delete_owner_data(owner=owner)
+                delete_managed_workspaces(store.db.path, owner)
+                accounts.delete_guest_owner(owner)
+                return True
+            finally:
+                deleting_guest_owners.discard(owner)
+
+    def sweep_expired_guests():
+        while not guest_cleanup_stop.wait(30):
+            for guest in accounts.expired_guest_sessions():
+                try:
+                    cleanup_guest_owner(guest["workspace"])
+                except Exception as exc:  # noqa: BLE001 - keep cleanup alive for the next bounded pass
+                    # No owner, row contents, path or key is written to logs.
+                    print(f"guest cleanup deferred ({type(exc).__name__})", file=sys.stderr)
 
     @asynccontextmanager
     async def lifespan(app):
         agent.start()
-        yield
-        agent.close()
+        sweeper = None
+        if deployment.guest_access_enabled:
+            sweeper = threading.Thread(target=sweep_expired_guests, name="re0-guest-cleanup", daemon=True)
+            sweeper.start()
+        try:
+            yield
+        finally:
+            guest_cleanup_stop.set()
+            if sweeper is not None:
+                sweeper.join(timeout=2)
+            agent.close()
 
     app = FastAPI(title="re0 research agent", version=__version__, lifespan=lifespan)
     app.state.agent = agent
@@ -214,11 +258,17 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
         """
         if not deployment.auth_required:
             return local_identity()
-        return accounts.resolve(session_token(request)) or anonymous_identity()
+        identity = accounts.resolve(session_token(request)) or anonymous_identity()
+        if identity.kind == "guest" and identity.owner in deleting_guest_owners:
+            return anonymous_identity()
+        return identity
 
     def owner_of(request: Request) -> str:
         """The owner this request acts as. Never a value from the body, the query or a header."""
-        return request.state.identity.owner
+        identity = request.state.identity
+        if identity.kind == "guest" and not accounts.owner_has_live_session(identity.owner):
+            raise HTTPException(401, "访客会话已结束；本次数据正在清理")
+        return identity.owner
 
     def workspaces_for(owner: str) -> dict:
         """List only this owner's server-managed workspaces; no caller-supplied paths are read."""
@@ -319,6 +369,20 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
                     return JSONResponse({"detail": "请求体不能超过 4 MiB"}, 413)
             request._body = bytes(body)
 
+        tracked_guest_owner = ""
+        cleanup_request = ((path == "/api/auth/guest/data" and request.method == "DELETE")
+                           or (path == "/api/auth/logout" and request.method == "POST"))
+        if identity is not None and identity.kind == "guest" and not cleanup_request:
+            # Register immediately before the route runs. A delete/expiry cleanup that races a request
+            # either sees it in this count or revokes first and causes this request to be refused.
+            with guest_cleanup_lock:
+                if (identity.owner in deleting_guest_owners
+                        or not accounts.owner_has_live_session(identity.owner)):
+                    identity = anonymous_identity()
+                else:
+                    tracked_guest_owner = identity.owner
+                    guest_request_counts[tracked_guest_owner] = (
+                        guest_request_counts.get(tracked_guest_owner, 0) + 1)
         if deployment.auth_required and path.startswith("/api") and path not in OPEN_API_PATHS:
             if not identity.authenticated:
                 # 401, not 403: nothing about this caller has been established, and the answer must
@@ -327,7 +391,16 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
         request.state.identity = identity or (local_identity() if not deployment.auth_required
                                               else anonymous_identity())
 
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        finally:
+            if tracked_guest_owner:
+                with guest_cleanup_lock:
+                    remaining = guest_request_counts.get(tracked_guest_owner, 0) - 1
+                    if remaining > 0:
+                        guest_request_counts[tracked_guest_owner] = remaining
+                    else:
+                        guest_request_counts.pop(tracked_guest_owner, None)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Frame-Options"] = "DENY"
@@ -371,6 +444,46 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
                            path="/")
         return payload
 
+    @app.post("/api/auth/guest")
+    def create_guest(request: Request):
+        """Issue a distinct short-lived owner only when the deployment explicitly enables guests."""
+        if not deployment.hosted or not deployment.guest_access_enabled:
+            raise HTTPException(404, "此部署未开放临时访客会话")
+        current = request.state.identity
+        if current.authenticated:
+            if current.kind == "guest":
+                return {"identity": current.public(), "deployment": deployment.describe(),
+                        "existing_session": True}
+            raise HTTPException(409, "当前浏览器已登录账户；请先退出再开始临时访客会话")
+        # Bound retained data before admitting another session. Expired/revoked guests with a running
+        # request stay counted until cleanup reaches that request's next safe boundary.
+        for guest in accounts.expired_guest_sessions():
+            cleanup_guest_owner(guest["workspace"])
+        try:
+            identity, token = accounts.create_guest(ttl=GUEST_SESSION_TTL)
+        except GuestCapacityError as exc:
+            raise HTTPException(429, str(exc), headers={"Retry-After": "30"}) from exc
+        payload = JSONResponse({"identity": identity.public(), "deployment": deployment.describe(),
+                                "existing_session": False})
+        payload.set_cookie(SESSION_COOKIE, token, max_age=int(GUEST_SESSION_TTL.total_seconds()),
+                           httponly=True, secure=deployment.cookie_secure, samesite="strict", path="/")
+        return payload
+
+    @app.delete("/api/auth/guest/data")
+    def delete_guest_data(request: Request):
+        """Explicitly delete this guest's library, task/evidence rows and imported source files."""
+        identity = request.state.identity
+        if identity.kind != "guest":
+            raise HTTPException(404, "当前会话不是临时访客会话")
+        accounts.revoke_guest_owner(identity.owner)
+        deleted = cleanup_guest_owner(identity.owner)
+        payload = JSONResponse({"deleted": deleted, "pending": not deleted,
+                                "note": ("本次访客数据已删除" if deleted else
+                                         "任务正在停止；会话已失效，数据将在安全边界后清理")},
+                               status_code=200 if deleted else 202)
+        payload.delete_cookie(SESSION_COOKIE, path="/")
+        return payload
+
     @app.post("/api/auth/logout")
     def logout(request: Request):
         """Revoke this session. Revoked means unusable immediately, not unusable at expiry."""
@@ -379,17 +492,29 @@ def create_app(db_path: str | None = None, transport=None, model_factory=None,
         identity = request.state.identity
         credentials_cleared = (agent.revoke_owner(identity.owner)
                                if deployment.auth_required and identity.authenticated else False)
-        payload = JSONResponse({"revoked": revoked, "credentials_cleared": credentials_cleared})
+        data_deleted = False
+        if identity.kind == "guest":
+            data_deleted = cleanup_guest_owner(identity.owner)
+        payload = JSONResponse({"revoked": revoked, "credentials_cleared": credentials_cleared,
+                                "guest_data_deleted": data_deleted,
+                                "guest_cleanup_pending": identity.kind == "guest" and not data_deleted})
         payload.delete_cookie(SESSION_COOKIE, path="/")
         return payload
 
     @app.get("/api/auth/session")
     def session(request: Request):
         """Who is asking, and what this deployment requires. No secret and nobody's rows."""
-        return {"identity": identity_for(request).public(), "deployment": deployment.describe(),
+        identity = request.state.identity
+        if identity.kind == "guest":
+            note = "临时访客会话：本次数据独立隔离，最多保留 2 小时；可随时删除"
+        elif deployment.guest_access_enabled:
+            note = "无需管理员开户：可创建独立的短期访客会话；实时任务需要自己的模型 Key"
+        else:
+            note = ("托管模式：未登录时接口一律 401" if deployment.auth_required
+                    else "本地模式：所有数据属于本机唯一所有者，没有登录这一步")
+        return {"identity": identity.public(), "deployment": deployment.describe(),
                 "accounts_provisioned": accounts.count_accounts(),
-                "note": ("托管模式：未登录时接口一律 401" if deployment.auth_required
-                         else "本地模式：所有数据属于本机唯一所有者，没有登录这一步")}
+                "note": note}
 
     @app.get("/api/health")
     def health(request: Request):

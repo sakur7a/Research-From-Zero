@@ -7,8 +7,10 @@ unless a test says so, and no provider is contacted at all.
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from datetime import timedelta
 
-from re0.auth import MAX_FAILED_ATTEMPTS, AccountStore, hash_password, new_secret, verify_password
+from re0.auth import (MAX_FAILED_ATTEMPTS, MAX_GUEST_SESSIONS, AccountStore, GuestCapacityError,
+                      hash_password, new_secret, verify_password)
 from re0.db import Database
 from re0.deployment import DeploymentError, from_env, trusted_hosts_from_env
 from re0.main import create_app
@@ -95,6 +97,34 @@ def test_hosted_mode_requires_an_explicit_storage_contract():
     with pytest.raises(DeploymentError, match="ephemeral-demo.*persistent"):
         from_env({**HOSTED, "RE0_STORAGE_MODE": "guess"}).require_startable()
     assert from_env({**HOSTED, "RE0_STORAGE_MODE": "persistent"}).require_startable().storage_mode == "persistent"
+
+
+def test_guest_access_is_opt_in_and_publicly_described():
+    disabled = from_env(HOSTED).require_startable()
+    enabled = from_env({**HOSTED, "RE0_GUEST_ACCESS": "true"}).require_startable()
+    assert disabled.guest_access_enabled is False
+    assert enabled.describe()["guest_access_enabled"] is True
+
+
+def test_guest_sessions_are_distinct_bounded_revocable_and_not_admin_accounts(tmp_path):
+    accounts = AccountStore(Database(str(tmp_path / "guests.sqlite3")))
+    first, first_token = accounts.create_guest(max_active=1)
+    assert first.kind == "guest" and first.authenticated
+    assert accounts.resolve(first_token) == first
+    assert accounts.owner_has_live_session(first.owner)
+    assert accounts.count_accounts() == 0 and accounts.accounts() == []
+    with pytest.raises(GuestCapacityError):
+        accounts.create_guest(max_active=1)
+    second, second_token = accounts.create_guest(ttl=timedelta(hours=2), max_active=2)
+    assert first.owner != second.owner and first.user_id != second.user_id
+    assert first_token != second_token
+    assert accounts.revoke(first_token)
+    assert accounts.resolve(first_token) is None
+    assert not accounts.owner_has_live_session(first.owner)
+    assert accounts.owner_has_live_session(second.owner)
+    assert accounts.delete_guest_owner(first.owner)
+    assert accounts.revoke(second_token) and accounts.delete_guest_owner(second.owner)
+    assert accounts.create_guest(max_active=1)[0].kind == "guest"
 
 
 def test_render_environment_supplies_only_its_declared_public_entry():
@@ -779,10 +809,10 @@ def test_a_single_user_database_is_migrated_to_the_local_owner_and_backed_up(tmp
     # The direction the single user already had came across with the row. The existing paper
     # membership and its notes are not inferred from the template or overwritten by it.
     assert "旧主题" in store.topics(owner="local")
-    # The upgrade copied the file before v1→v2→v3 migration.
-    assert list(tmp_path.glob("old.sqlite3.pre-v3-*.sqlite3")), list(tmp_path.iterdir())
+    # The upgrade copied the file before v1→v2→v3→v4 migration.
+    assert list(tmp_path.glob("old.sqlite3.pre-v4-*.sqlite3")), list(tmp_path.iterdir())
     with database.connect() as con:
-        assert con.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+        assert con.execute("SELECT version FROM schema_version").fetchone()[0] == 4
         assert con.execute("SELECT owner FROM papers WHERE id='old-1'").fetchone()[0] == "local"
         assert con.execute("SELECT data FROM papers WHERE id='old-1'").fetchone()[0].find("保留的旧笔记") >= 0
         assert con.execute("SELECT COUNT(*) FROM works WHERE id='old-1'").fetchone()[0] == 1

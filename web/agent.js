@@ -5,6 +5,8 @@ import {RUN_LABELS, TOOL_LABELS, SHIPPED_DEFAULTS, activeRun, budgetSummary, can
 initTheme();
 const workspace = document.querySelector('#workspace');
 const settings = document.querySelector('#settings');
+const side = document.querySelector('#app-side');
+let identity = {kind: 'local'};
 let config = {}, runs = [], current = null, events = [], workspaces = [], pendingWorkspaceBundle = null,
   tab = 'trace', epoch = 0, timer, toastTimer;
 // The conversation the open run belongs to: its cumulative ledger and caps. Fetched with the run so
@@ -42,10 +44,48 @@ function noticeHome() {
 function sidebar() {
   document.querySelector('#history').innerHTML = runs.length ? runs.map(r => `<button class="history-item ${r.id === current?.id ? 'is-current' : ''}" data-run="${e(r.id)}"><strong>${e(r.goal)}</strong><small><i class="dot ${e(r.status)}"></i>${e(RUN_LABELS[r.status] || r.status)} · ${e(timeLabel(r.created_at))}</small></button>`).join('') : '<p class="subtle">尚无研究任务。<br>从右侧提出第一个问题。</p>';
   document.querySelector('#model-status').innerHTML = `<i class="dot ${config.configured ? 'completed' : ''}"></i><span>${config.configured ? e(config.model) : '尚未接入模型'}</span><small>${config.configured ? '模型配置仅保留在进程内存' : '接入 API 或本地模型后开始'}</small>`;
+  const guest = identity.kind === 'guest';
+  document.querySelector('#guest-session-actions').hidden = !guest;
+  document.querySelector('#identity-label').innerHTML = guest
+    ? 'TEMPORARY GUEST <span>2 小时</span>' : 'LOCAL WORKSPACE <span>v0.2</span>';
+}
+
+function guestLanding(deployment) {
+  epoch++; clearTimeout(timer); current = null; events = []; side.hidden = true;
+  document.body.classList.add('guest-door');
+  document.querySelector('#breadcrumb').textContent = '开始研究';
+  workspace.innerHTML = `<section class="guest-welcome">
+    <div class="guest-hero"><div class="eyebrow">RESEARCH FROM ZERO · BYOK WEB DEMO</div>
+      <h1>从一个问题开始。<br><span>证据一路可查。</span></h1>
+      <p>用自己的模型 API Key，交给 Re0 检索文献、核对代码与数据线索、整理带来源的结果。你决定研究问题，也保留对结论的判断。</p>
+    </div>
+    <div class="guest-welcome-grid">
+      <article class="guest-start-card"><div class="eyebrow">实时研究 · 需要自己的 Key</div>
+        <h2>不需要安装或联系管理员开户</h2>
+        <p>开始后会创建只属于这个浏览器的临时访客会话。模型 Key 最多保留 8 小时，只存在服务内存；每次任务开始前会明确提示发送范围与调用费用。</p>
+        <button class="primary guest-start-button" data-action="begin-guest">创建临时会话并继续 ↗</button>
+        <small>项目方没有提供免 Key 试用额度。没准备模型 Key 时，可以先浏览右侧的历史案例。</small>
+      </article>
+      <article class="guest-history-card"><div class="history-date">历史案例 · 2026-09-22</div>
+        <h2>microsoft / LoRA</h2>
+        <p>看一次真实历史资源核验：论文记录 → 摘要中的仓库候选 → 固定版本文件清单。它是只读回放，不是本次实时检索。</p>
+        <a href="/static/skill.html" target="_blank" rel="noopener noreferrer">打开历史来源链 ↗</a>
+      </article>
+    </div>
+    <div class="guest-retention" role="note"><strong>${deployment.storage_mode === 'ephemeral-demo' ? '临时演示存储' : '临时访客会话'}</strong>
+      <span>${deployment.storage_mode === 'ephemeral-demo'
+        ? '访客数据最多保留 2 小时；服务休眠、重启或重新部署可能更早清除数据库和工作区文件。请勿保存唯一副本或敏感材料。'
+        : '会话最多 2 小时；可随时退出或删除本次数据。'}</span></div>
+  </section>`;
+  document.querySelector('#guest-session-actions').hidden = true;
 }
 function home(goal = '') {
   epoch++; clearTimeout(timer); current = null; events = []; sidebar();
   const defaults = normalizeDefaults(config.task_defaults);
+  const fullText = config.capabilities?.full_text;
+  const fullTextCopy = fullText?.enabled
+    ? `支持 ${fullText.sources.join(' / ')} 的有界 ${fullText.formats.join(' / ')} 文本读取。`
+    : '当前部署没有开放全文读取。';
   document.querySelector('#breadcrumb').textContent = '新研究';
   workspace.innerHTML = `<section class="home"><div class="eyebrow">AN AGENT FOR YOUR NEXT DISCOVERY</div>
     <h1>从一个问题，<br>开始研究<span>。</span></h1>
@@ -56,7 +96,7 @@ function home(goal = '') {
       <label class="check consent"><input type="checkbox" name="consent_to_send" required>${e(consentText(defaults))}</label>
     </form>
     <div class="example-heading">从这些研究任务开始 <span>示例提示，不是预置研究结果</span></div><div class="examples">${examples.map(([title,text],i) => `<button data-example="${i}"><small>0${i+1} / ${e(title)}</small><p>${e(text)}</p><span>使用这个问题 ↗</span></button>`).join('')}</div>
-    <div class="scope"><strong>当前能力边界</strong><p>检索论文元数据与摘要，阅读仓库文本，核查资源线索。不会自动读取 PDF 全文、执行陌生代码或认定论文已复现。${config.web_search_enabled ? '公开网页搜索已配置。' : '未配置 Tavily 时，只使用论文与资源平台搜索，不冒充全网检索。'}</p></div>
+    <div class="scope"><strong>当前能力边界</strong><p>检索论文元数据与摘要，阅读仓库文本，核查资源线索。${fullTextCopy}不会执行陌生代码、读取任意网页或认定论文已复现。${config.web_search_enabled ? '公开网页搜索已配置。' : '未配置 Tavily 时，只使用论文与资源平台搜索，不冒充全网检索。'}</p></div>
   </section>`;
 }
 function runView() {
@@ -167,11 +207,11 @@ async function refreshHistory() {
   [runs, config] = await Promise.all([api('/runs'),api('/config')]); sidebar();
 }
 async function selectRun(id) {
-  const token = ++epoch; clearTimeout(timer); tab='trace'; events=[];
+  const token = ++epoch; clearTimeout(timer); tab='evidence'; events=[];
   try {
     const [r, ev] = await Promise.all([api('/runs/'+id),api('/runs/'+id+'/events')]);
     if (token!==epoch) return;
-    current=r; events=ev;
+    current=r; events=ev; if(!activeRun(r)&&r.report)tab='report';
     conversation = r.conversation_id ? await api('/conversations/'+r.conversation_id) : null;
     try { workspaces=(await appApi('/workspaces')).workspaces||[]; }
     catch(err) { workspaces=[]; notice(`未能读取已导入工作区：${err.message}`); }
@@ -187,7 +227,7 @@ function poll(token) {
     try {
       const [r, ev] = await Promise.all([api('/runs/'+id),api('/runs/'+id+'/events?after='+(events.at(-1)?.id || 0))]);
       if(token!==epoch) return;
-      current=r; events.push(...ev); runView();
+      current=r; events.push(...ev); if(!activeRun(r)&&r.report&&tab==='evidence')tab='report'; runView();
       if(!activeRun(r)) await refreshHistory();
       poll(token);
     } catch(err) {if(token===epoch){notice(err.message);poll(token);}}
@@ -199,23 +239,26 @@ function openSettings() {
   const defaults = normalizeDefaults(config.task_defaults);
   const credentialExpires = config.credential_expires_at
     ? new Date(config.credential_expires_at).toLocaleString() : '';
+  const fullText = config.capabilities?.full_text;
+  const fullTextCopy = fullText?.enabled
+    ? `全文：${(fullText.sources || []).join('、')} 的有界 ${(fullText.formats || []).join('/')} 文本读取`
+    : '全文读取：当前不可用';
   const presets = Array.isArray(config.endpoint_presets) ? config.endpoint_presets : [];
   const presetOptions = presets.map(p => `<option value="${e(p.base_url)}" ${p.base_url === config.base_url ? 'selected' : ''}>${e(p.label)}</option>`).join('');
-  settings.innerHTML=`<div class="dialog-header"><div><div class="eyebrow">LOCAL WORKSPACE SETTINGS</div><h2 id="settings-title">模型与任务设置</h2></div><button class="close" data-action="close-settings" aria-label="关闭设置">×</button></div><p class="subtle">使用支持 Chat Completions 工具调用的服务。API Key 只保存在服务内存，最多 8 小时；重启、托管会话退出或账户撤销后清除，不写入数据库、浏览器存储或导出。已发出的请求可能仍计费，清除后不会再启动新的模型调用。</p>
+  settings.innerHTML=`<div class="dialog-header"><div><div class="eyebrow">MODEL CONNECTION</div><h2 id="settings-title">连接你自己的模型</h2></div><button class="close" data-action="close-settings" aria-label="关闭设置">×</button></div><p class="subtle">连接测试会向所选服务发送一次工具调用请求，可能产生费用，但不发送你的研究问题或文献材料。成功后 Key 只保存在服务内存，最多 8 小时；退出、会话撤销或服务重启后清除。</p>
     ${config.configured ? `<p class="field-note">当前配置最晚有效至 ${e(credentialExpires || '未知时间')}。重新使用时需要再次配置 Key。</p>` : ''}
     <form id="model-form" autocomplete="off"><label>服务商<select id="preset"><option value="">选择服务商会自动填入下面的地址（不代表已实测模型兼容性）</option>${presetOptions}<option value="__custom">其他 / 自定义地址</option></select></label>
     <label>API Base URL<input name="base_url" id="base-url" type="url" value="${e(config.base_url || '')}" placeholder="https://api.example.com/v1" required></label><p class="field-note">只接受预设可信域名和显式端口的回环地址。自定义域名需设置 RE0_LLM_ALLOWED_HOSTS。</p>
     <label>API Key<input name="api_key" type="password" autocomplete="new-password" placeholder="${config.has_api_key?'已配置；重新保存时需再次输入，不会回填旧密钥':'本地无认证服务可留空'}" maxlength="2048"></label>
     <label>Model ID<input name="model" list="model-options" value="${e(config.model || '')}" placeholder="填写，或从下面拉取后选择" required maxlength="150"></label><datalist id="model-options"></datalist>
-    <div class="connection-test"><button type="button" class="button" data-action="fetch-models">拉取可用模型</button><span>向该地址发出一次 GET /models。返回的列表只说明该服务报告了哪些模型，<b>不代表它们支持工具调用</b>；Key 只用于这次请求，不保存、不回填。</span></div>
-    <div class="settings-grid"><label>输出预算参数<select name="token_parameter"><option value="max_tokens" ${config.token_parameter==='max_tokens'?'selected':''}>max_tokens</option><option value="max_completion_tokens" ${config.token_parameter==='max_completion_tokens'?'selected':''}>max_completion_tokens</option></select></label><label>单次输出 Token 上限<input name="max_output_tokens" type="number" value="${config.max_output_tokens || 3000}" min="256" max="8192" required></label></div>
-    <label class="check"><input type="checkbox" name="trust_endpoint" required>我信任此模型服务，并同意将任务材料发送到这个地址。</label><div class="dialog-actions"><button type="button" class="quiet" data-action="clear-model">清除内存配置</button><button type="submit" class="primary">保存配置</button></div></form>
-    <div class="connection-test"><button class="button" data-action="test-model" ${config.configured?'':'disabled'}>测试工具调用</button><span>会发起一次模型请求，可能计费；测试不包含文献数据。</span></div>
-    <div class="defaults-block"><h3>任务预算与数据权限</h3><p class="field-note">新建任务时自动应用。已创建的任务保留自己的预算，不受此处修改影响。</p>
+    <div class="connection-test"><button type="button" class="button" data-action="fetch-models">获取模型列表（可跳过）</button><span>只查询服务返回的模型 ID；如果接口不支持，直接手动填写即可。列表不代表支持工具调用。</span></div>
+    <details class="advanced-settings"><summary>高级模型参数</summary><div class="settings-grid"><label>输出预算参数<select name="token_parameter"><option value="max_tokens" ${config.token_parameter==='max_tokens'?'selected':''}>max_tokens</option><option value="max_completion_tokens" ${config.token_parameter==='max_completion_tokens'?'selected':''}>max_completion_tokens</option></select></label><label>单次输出 Token 上限<input name="max_output_tokens" type="number" value="${config.max_output_tokens || 3000}" min="256" max="8192" required></label></div></details>
+    <label class="check"><input type="checkbox" name="trust_endpoint" required>我信任这个模型服务，并授权发送一次不含研究材料的连接测试。</label><div class="dialog-actions"><button type="button" class="quiet" data-action="clear-model">清除内存配置</button><button type="submit" class="primary">测试连接并保存</button></div></form>
+    <details class="defaults-block advanced-settings"><summary>高级任务预算与数据范围</summary><p class="field-note">仅影响之后新建的任务；每次任务仍会明确提示材料范围与调用费用。</p>
     <form id="defaults-form"><div class="budget-fields"><label>模型调用上限<input type="number" name="max_model_calls" min="2" max="24" value="${defaults.max_model_calls}" required></label><label>工具调用上限<input type="number" name="max_tool_calls" min="1" max="40" value="${defaults.max_tool_calls}" required></label><label>单次执行窗口（秒）<input type="number" name="attempt_seconds" min="30" max="900" value="${defaults.attempt_seconds}" required></label></div>
-    <label class="check"><input type="checkbox" name="use_library" ${defaults.use_library ? 'checked' : ''}>允许 agent 检索并发送本地文献库的书目、摘要与方向；不包括私人笔记和附件。启用后，新建任务的同意项会一并写明文献库材料将发送到模型服务。</label>
-    <div class="dialog-actions"><button type="button" class="quiet" data-action="reset-defaults">恢复初始默认</button><button type="submit" class="primary">保存默认值</button></div></form></div>
-    <div class="scope"><strong>其他工具凭证</strong><p>GitHub token 和 Tavily 搜索 Key 通过服务器环境变量配置。网页搜索：${config.web_search_enabled?'已配置':'未配置（仍可搜索论文、GitHub、Hugging Face）'}。首版不支持任意网页全文抓取或 PDF 阅读。</p></div>`;
+    <label class="check"><input type="checkbox" name="use_library" ${defaults.use_library ? 'checked' : ''}>默认允许 agent 检索并发送文献库书目、摘要与方向；不包括私人笔记和附件。每次任务仍需单独确认。</label>
+    <div class="dialog-actions"><button type="button" class="quiet" data-action="reset-defaults">恢复初始默认</button><button type="submit" class="primary">保存默认值</button></div></form></details>
+    <div class="scope"><strong>当前工具能力</strong><p>论文与资源平台检索 · ${e(fullTextCopy)} · 网页搜索 ${config.web_search_enabled?'已配置':'未配置'}。GitHub token 和 Tavily Key 由服务端配置；不会抓取任意网页或执行陌生代码。</p></div>`;
   settings.showModal();
 }
 document.addEventListener('click', async event => {
@@ -233,6 +276,26 @@ document.addEventListener('click', async event => {
       notice(result.created?'已加入文献库。':'已有这篇论文，未覆盖原有内容。');button.disabled=false;return;
     }
     switch(button.dataset.action) {
+      case 'begin-guest':{
+        button.disabled=true;button.textContent='正在创建临时会话…';
+        await appApi('/auth/guest',{},'POST');
+        window.location.assign('/');
+        break;
+      }
+      case 'delete-guest-data':{
+        if(!confirm('删除这次访客会话保存的论文、任务、证据和工作区文件？此操作无法撤销。'))break;
+        button.disabled=true;
+        const result=await appApi('/auth/guest/data',{},'DELETE');
+        notice(result.pending?'访客会话已失效；正在停止任务并清理数据。':'本次数据已删除。');
+        window.location.assign('/');
+        break;
+      }
+      case 'logout':{
+        if(!confirm('退出会结束本次访客会话，并安排清理这次的数据。'))break;
+        await appApi('/auth/logout',{},'POST');
+        window.location.assign('/');
+        break;
+      }
       case 'history':document.querySelector('.side').classList.toggle('mobile-expanded');break;
       case 'new': await refreshHistory();home();break;
       case 'settings': config=await api('/config');openSettings();break;
@@ -325,8 +388,8 @@ document.addEventListener('submit', async event=>{
   event.preventDefault();const form=event.target, data=new FormData(form), button=form.querySelector('[type=submit]');button.disabled=true;
   try {
     if(form.id==='model-form') {
-      config=await api('/config',{base_url:data.get('base_url'),model:data.get('model'),api_key:data.get('api_key'),trust_endpoint:data.has('trust_endpoint'),token_parameter:data.get('token_parameter'),max_output_tokens:Number(data.get('max_output_tokens'))},'PUT');
-      form.querySelector('[name=api_key]').value='';settings.close();sidebar();if(!current)home(document.querySelector('#goal')?.value || '');notice('配置已保存到进程内存。建议先测试工具调用。');
+      config=await api('/config/connect',{base_url:data.get('base_url'),model:data.get('model'),api_key:data.get('api_key'),trust_endpoint:data.has('trust_endpoint'),token_parameter:data.get('token_parameter'),max_output_tokens:Number(data.get('max_output_tokens'))},'POST');
+      form.querySelector('[name=api_key]').value='';settings.close();sidebar();if(!current)home(document.querySelector('#goal')?.value || '');notice('连接测试通过；Key 已保存到服务内存。测试不代表科研效果已评测。');
     } else if(form.id==='defaults-form') {
       config=await api('/defaults',{max_model_calls:Number(data.get('max_model_calls')),max_tool_calls:Number(data.get('max_tool_calls')),attempt_seconds:Number(data.get('attempt_seconds')),use_library:data.has('use_library')},'PUT');
       settings.close();sidebar();if(!current)home(document.querySelector('#goal')?.value || '');notice('任务默认值已保存；只影响之后新建的任务。');
@@ -349,4 +412,16 @@ document.addEventListener('submit', async event=>{
     }
   }catch(err){notice(err.message);}finally{button.disabled=false;}
 });
-(async()=>{try{await refreshHistory();home();}catch(err){workspace.innerHTML=`<div class="empty-result"><h1>无法连接本地服务</h1><p>${e(err.message)}</p><p>请用 python run.py 启动后刷新页面。</p></div>`;}})();
+(async()=>{
+  try {
+    const session=await appApi('/auth/session');
+    identity=session.identity||{kind:'anonymous'};
+    if(session.deployment?.mode==='hosted'&&!identity.authenticated){
+      if(session.deployment.guest_access_enabled){guestLanding(session.deployment);return;}
+      window.location.replace('/login?next=%2F');return;
+    }
+    side.hidden=false;
+    document.body.classList.remove('guest-door');
+    await refreshHistory();home();
+  }catch(err){workspace.innerHTML=`<div class="empty-result"><h1>无法连接服务</h1><p>${e(err.message)}</p><p>确认服务仍在运行后刷新页面。</p></div>`;}
+})();

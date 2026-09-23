@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Temporary guest sessions and one-step BYOK onboarding (#18)
+
+- Add an opt-in hosted guest entry: each visitor receives a separate two-hour owner, cookie and
+  in-memory key namespace. The guest pool is bounded, guests cannot enter the admin account list,
+  and local mode ignores the guest flag.
+- Logout and explicit delete revoke the guest immediately, stop the owner's active task at its next
+  safe boundary, then clear its database rows and server-managed workspace files. A bounded sweeper
+  handles expired/revoked sessions; active requests are not reported as deleted before cleanup.
+- Replace separate “test” and “save” model steps with one test-and-save action. The credential is
+  retained only after its tool-call protocol check succeeds. Capability text comes from the backend;
+  budgets and library scope stay in advanced settings, while task-level material/fee consent remains.
+- Add an anonymous landing page and make report/evidence the default result views. Chromium checks
+  cover guest deletion, non-disclosure of owner IDs, one connection test, task completion and narrow
+  layout. No live provider request or participant test was performed.
+- Verification: 576 Python tests, 84 JS tests, `npm run check`, six Chromium smoke scripts, and
+  loopback HTTP smoke passed. The non-implementer usability check remains open; container CI will
+  run after push.
+
 ### Hosted demo deployment contract (#17)
 
 - Require an explicit hosted storage contract (`persistent` or `ephemeral-demo`) and show the selected

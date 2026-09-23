@@ -19,7 +19,7 @@ from re0.quota import Quota
 HOSTED = {"RE0_MODE": "hosted", "RE0_SESSION_SECRET": "a-hosted-secret-that-is-long-enough-to-use",
           "RE0_PUBLIC_ENTRY": "https://re0.example.org",
           "RE0_ALLOWED_ORIGINS": "https://re0.example.org",
-          "RE0_STORAGE_MODE": "ephemeral-demo"}
+          "RE0_STORAGE_MODE": "ephemeral-demo", "RE0_GUEST_ACCESS": "true"}
 WRITE = {"X-Re0-Client": "web", "Content-Type": "application/json"}
 PASSWORD = "a-password-nobody-guesses"
 # The two sentences `login-core.js` quotes back to the reader. They are one string in two languages on
@@ -135,6 +135,7 @@ def test_the_session_endpoint_answers_what_sessionview_reads(tmp_path):
     assert payload["deployment"]["auth_required"] is True
     assert payload["deployment"]["mode"] == "hosted"
     assert payload["deployment"]["storage_mode"] == "ephemeral-demo"
+    assert payload["deployment"]["guest_access_enabled"] is True
     assert payload["deployment"]["session_secret_configured"] is True
     assert payload["identity"]["authenticated"] is False
     assert payload["identity"]["user_id"] == "" and payload["identity"]["workspace"] == ""

@@ -36,6 +36,12 @@
       <p class="door-alt" id="door-alt"></p>
     </form>
 
+    <section id="guest-entry" class="guest-entry" hidden>
+      <p class="eyebrow">无需管理员开户</p>
+      <p>创建一个属于当前浏览器的临时会话。每位访客独立隔离；实时研究需要自己的模型 API Key，连接测试可能产生费用。</p>
+      <button class="primary" id="guest-start" type="button">开始临时访客会话</button>
+    </section>
+
     <section id="signed-in" class="door-card" hidden>
       <p class="eyebrow">已登录</p>
       <p class="who">这个会话属于 <b id="who-name">—</b></p>
@@ -46,6 +52,7 @@
       <p class="door-lede">退出会立刻让这张会话票失效——不是“等到过期”，也不是清一下浏览器就完事。</p>
       <div class="row">
         <a class="primary buttonish" id="continue-link" href="/">继续</a>
+        <button class="danger" id="guest-delete" type="button" hidden>删除本次数据</button>
         <button class="quiet" type="button" id="logout">退出登录</button>
       </div>
     </section>

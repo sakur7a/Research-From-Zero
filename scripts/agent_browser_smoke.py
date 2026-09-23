@@ -26,7 +26,8 @@ def run(output):
     checked,errors=[],[]
     for key in ['RE0_LLM_MODEL','RE0_LLM_API_KEY','RE0_LLM_BASE_URL','TAVILY_API_KEY']:
         os.environ.pop(key,None)
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp, TestClient(create_app(str(Path(temp)/'browser.sqlite3'),httpx.MockTransport(FixtureNetwork()))) as client, sync_playwright() as engine:
+    fixture=FixtureNetwork()
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp, TestClient(create_app(str(Path(temp)/'browser.sqlite3'),httpx.MockTransport(fixture))) as client, sync_playwright() as engine:
         opts={'headless':True}
         if os.getenv('CHROMIUM_PATH'):opts['executable_path']=os.environ['CHROMIUM_PATH']
         browser=engine.chromium.launch(**opts)
@@ -83,16 +84,19 @@ def run(output):
         assert page.locator('[name=api_key]').input_value()==''
         saved_config=client.get('/api/agent/config').json()
         assert saved_config['configured'] and saved_config['credential_expires_at'], saved_config
+        connection_tests=[request for request in fixture.requests
+                          if request.url.path.endswith('/chat/completions')
+                          and isinstance(json.loads(request.content).get('tool_choice'),dict)]
+        assert len(connection_tests)==1, f'connect-and-save must send one connection test: {len(connection_tests)}'
         settings_text=page.locator('#settings').inner_text()
         assert '当前配置最晚有效至' in settings_text, settings_text
-        page.locator('[data-action=test-model]').click()
-        page.wait_for_function("document.querySelector('#notice').textContent.includes('测试通过')")
         page.locator('[data-action=close-settings]').click()
-        checked.append('model_configuration_secret_not_returned_and_tool_protocol_test')
+        checked.append('one_click_connection_test_saves_only_after_success_without_returning_key')
         # Budgets and library permission live in settings, not in the task form.
         assert page.locator('#task-form details.budget').count()==0
         assert '文献库未授权' in page.locator('.budget-link').inner_text()
         page.locator('.budget-link').click()
+        page.locator('.defaults-block > summary').click()
         page.locator('#defaults-form').wait_for()
         assert page.locator('#defaults-form [name=max_model_calls]').input_value()=='12'
         page.locator('#defaults-form [name=max_tool_calls]').fill('14')
@@ -113,6 +117,8 @@ def run(output):
         page.locator('[name=consent_to_send]').check()
         page.locator('#task-form [type=submit]').click()
         page.wait_for_function("document.querySelector('.status')?.textContent==='报告已生成'",timeout=15000)
+        assert page.locator('[data-tab="report"][aria-selected="true"]').count()==1
+        page.locator('[data-tab="trace"]').click()
         assert page.locator('.trace-row').count()>5
         checked.append('real_runtime_model_tool_observation_loop_fixture_network')
         rid=client.get('/api/agent/runs').json()[0]['id']

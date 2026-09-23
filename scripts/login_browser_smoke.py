@@ -41,7 +41,7 @@ from re0.main import create_app
 ORIGIN = "https://re0.test"
 HOSTED = {"RE0_MODE": "hosted", "RE0_SESSION_SECRET": "a-long-enough-secret-for-this-smoke-run",
           "RE0_PUBLIC_ENTRY": ORIGIN, "RE0_ALLOWED_ORIGINS": ORIGIN,
-          "RE0_STORAGE_MODE": "ephemeral-demo"}
+          "RE0_STORAGE_MODE": "ephemeral-demo", "RE0_GUEST_ACCESS": "true"}
 PASSWORD = "a-password-nobody-guesses"
 # Headers that describe the bytes httpx already decoded. Forwarding them over a fulfilled response
 # would tell the browser to decode a body that is not encoded. `set-cookie` is deliberately *not* in
@@ -125,13 +125,40 @@ def run(output_dir: Path):
         # ------------------------------------------------- 2. hosted, no accounts: the form and its hint
         first = Path(temp) / "hosted.sqlite3"
         app, client, context, page = session(first, deployment=from_env(HOSTED).require_startable())
+        page.on("dialog", lambda dialog: dialog.accept())
         page.goto(f"{ORIGIN}/login")
         page.wait_for_selector("#login-form:not([hidden])")
         assert page.is_visible("#storage-warning"), "temporary hosted storage was not disclosed before login"
         warning = page.inner_text("#storage-warning")
         assert "重启" in warning and "工作区文件" in warning, warning
+        assert page.is_visible("#guest-entry"), "the opt-in guest path was not offered"
+        page.goto(f"{ORIGIN}/")
+        page.wait_for_selector(".guest-welcome")
+        welcome = page.inner_text(".guest-welcome")
+        assert "历史案例 · 2026-09-22" in welcome and "不是本次实时检索" in welcome, welcome
+        page.click("[data-action=begin-guest]")
+        page.wait_for_selector("#task-form")
+        guest_identity = page.evaluate("async () => (await (await fetch('/api/auth/session')).json()).identity")
+        assert guest_identity["kind"] == "guest" and guest_identity["authenticated"]
+        assert "ws_" not in page.locator("body").inner_text(), "the UI exposed the internal owner id"
+        guest_paper = page.evaluate("""async () => {
+          const r=await fetch('/api/papers',{method:'POST',headers:{'Content-Type':'application/json','X-Re0-Client':'web'},
+            body:JSON.stringify({title:'temporary guest smoke',abstract:'temporary'})});
+          return {status:r.status,data:await r.json()};
+        }""")
+        assert guest_paper["status"] == 201, guest_paper
+        page.goto(f"{ORIGIN}/login")
+        page.wait_for_selector("#guest-delete:not([hidden])")
+        assert page.inner_text("#who-name") == "临时访客"
+        page.click("#guest-delete")
+        page.wait_for_selector("#guest-entry:not([hidden])")
+        assert app.state.store.list_papers(owner=guest_identity["workspace"]) == []
+        assert app.state.accounts.count_accounts() == 0
+        completed.append("guest_landing_creates_independent_session_and_delete_removes_its_data")
+        page.goto(f"{ORIGIN}/login")
+        page.wait_for_selector("#login-form:not([hidden])")
         assert page.inner_text("#door-alt").strip(), "the empty-account hint did not render"
-        assert "auth create-user" in page.inner_text("#door-alt")
+        assert "访客" in page.inner_text("#door-alt")
         assert page.is_visible("#username") and page.is_visible("#password")
         assert page.evaluate("document.activeElement.id") == "username", "keyboard users land nowhere"
         assert "auth_required" not in page.inner_text("#door").lower()
@@ -243,7 +270,7 @@ def run(output_dir: Path):
                                                   encoding="utf-8")
     print(json.dumps({"steps": completed, "browser_errors": errors,
                       "requests": len(served)}, ensure_ascii=False, indent=2))
-    return 0 if not errors and len(completed) == 9 else 1
+    return 0 if not errors and len(completed) == 10 else 1
 
 
 if __name__ == "__main__":

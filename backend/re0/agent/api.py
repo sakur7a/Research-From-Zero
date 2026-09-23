@@ -26,6 +26,11 @@ def agent_router(runtime):
     def configure(data: ModelConfig, request: Request):
         return runtime.configure(data, owner=owner(request))
 
+    @router.post("/config/connect")
+    def connect(data: ModelConfig, request: Request):
+        # The key is tested before it is retained, then remains only in the server's memory vault.
+        return runtime.connect(data, owner=owner(request))
+
     @router.delete("/config")
     def clear(request: Request):
         return runtime.configure(None, owner=owner(request))

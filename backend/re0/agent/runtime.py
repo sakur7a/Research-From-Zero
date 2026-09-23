@@ -87,6 +87,8 @@ class AgentRuntime:
         self.owner_has_live_session = owner_has_live_session or (lambda owner: True)
         self._transport = transport
         self._lock = threading.RLock()
+        self._connect_guard = threading.Lock()
+        self._connecting_owners: set[str] = set()
         self._stop = threading.Event()
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="re0-agent")
         self._future = None
@@ -127,15 +129,22 @@ class AgentRuntime:
     def public(self, *, owner: str):
         """Everything the settings panel needs about *this* owner. No key, and nobody else's state:
         `busy` is a fact about the process, and the lease says only whether the slot is theirs."""
+        tool_names = [x["function"]["name"] for x in specifications(True, self.tools.web_enabled)]
+        has_full_text = "fetch_paper_text" in tool_names
         return {**self.vault.public(owner=owner), **self.busy_view(owner),
                 "runtime": "native-durable-tool-loop",
                 "deployment": self.deployment.describe(),
                 "quota": self.quota.describe(owner),
                 "web_search_enabled": self.tools.web_enabled,
+                "capabilities": {"tools": tool_names,
+                                 "full_text": {"enabled": has_full_text,
+                                               "sources": ["arXiv", "ACL Anthology"] if has_full_text else [],
+                                               "formats": ["HTML", "PDF"] if has_full_text else [],
+                                               "bounded": True}},
                 "task_defaults": self.task_defaults(owner=owner).model_dump(),
                 "session_caps": self.session_caps(owner=owner).model_dump(),
                 "endpoint_presets": ENDPOINT_PRESETS,
-                "tool_names": [x["function"]["name"] for x in specifications(True, self.tools.web_enabled)]}
+                "tool_names": tool_names}
 
     def list_models(self, credential: ModelListRequest):
         """Ask one allowlisted endpoint what it serves. Nothing is stored or logged."""
@@ -315,6 +324,11 @@ class AgentRuntime:
         window is consumed last and only here, so a turn refused for a reason the service already knew
         about does not also cost the caller one of their remaining starts.
         """
+        if self.deployment.auth_required and not self.owner_has_live_session(owner):
+            raise HTTPException(401, "登录会话已结束；该操作没有创建任务")
+        with self._connect_guard:
+            if owner in self._connecting_owners:
+                raise HTTPException(409, "正在测试模型连接；测试结束后再开始任务")
         if self._busy or self._stop.is_set():
             raise HTTPException(409, self._busy_message())
         refusal = self.quota.breaker.refusal()
@@ -327,6 +341,9 @@ class AgentRuntime:
                                 headers={"Retry-After": str(int(gate["retry_after"]) + 1)})
 
     def configure(self, config: ModelConfig | None, *, owner: str):
+        with self._connect_guard:
+            if owner in self._connecting_owners:
+                raise HTTPException(409, "正在测试模型连接；测试结束后再修改配置")
         if self._owner_busy(owner):
             raise HTTPException(409, "你有一轮任务正在运行；停止后再更换或清除模型配置")
         if config is None:
@@ -334,6 +351,43 @@ class AgentRuntime:
         else:
             self.vault.set(config, owner=owner)
         return self.public(owner=owner)
+
+    def connect(self, config: ModelConfig, *, owner: str):
+        """Test a submitted BYOK credential once, and keep it only after tool calling succeeds."""
+        with self._lock:
+            if self._owner_busy(owner) or self._busy or self._stop.is_set():
+                raise HTTPException(409, self._busy_message())
+            with self._connect_guard:
+                if owner in self._connecting_owners:
+                    raise HTTPException(409, "已在测试这组模型配置；请等待当前请求完成")
+                self._connecting_owners.add(owner)
+        try:
+            def authorize():
+                if self.deployment.auth_required and not self.owner_has_live_session(owner):
+                    raise Cancelled("登录会话已结束；Key 未保存，请重新开始")
+
+            model = ChatModel(config, self._transport, hosted=self.deployment.hosted)
+            model.set_call_authorizer(authorize)
+            authorize()
+            result = model.test()
+            authorize()
+            self.vault.set(config, owner=owner)
+            try:
+                authorize()
+            except Cancelled:
+                self.vault.clear(owner=owner)
+                raise
+            self._record_breaker()
+            return {**self.public(owner=owner), "connection_test": result}
+        except Cancelled as exc:
+            raise HTTPException(401, str(exc)) from exc
+        except ModelError as exc:
+            if exc.destination:
+                self._record_breaker(failure=str(exc))
+            raise
+        finally:
+            with self._connect_guard:
+                self._connecting_owners.discard(owner)
 
     def test_connection(self, *, owner: str):
         """One possibly billed capability test against this owner's own destination.

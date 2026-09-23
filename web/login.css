@@ -18,6 +18,9 @@
 
 .door-form{display:flex;flex-direction:column;gap:16px;border:1px solid var(--line);border-radius:14px;
   padding:20px;background:var(--paper)}
+.guest-entry{display:grid;gap:10px;border:1px solid var(--line);border-radius:14px;padding:20px;background:var(--paper)}
+.guest-entry p:not(.eyebrow){font-size:12px;line-height:1.8;color:var(--ink-2)}
+.guest-entry button{justify-self:start}
 .field{display:flex;flex-direction:column;gap:6px}
 .field label{font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--ink-3)}
 /* agent.css 给了 input{width:100%}，这里只需要保证不被 flex 撑破 */

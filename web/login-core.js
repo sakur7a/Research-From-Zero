@@ -70,12 +70,16 @@ export function sessionView(payload, next) {
   const data = payload && typeof payload === 'object' ? payload : {};
   const identity = data.identity && typeof data.identity === 'object' ? data.identity : {};
   const deployment = data.deployment && typeof data.deployment === 'object' ? data.deployment : {};
+  const kind = ['guest', 'user', 'local', 'anonymous'].includes(identity.kind) ? identity.kind : 'user';
   const required = deployment.auth_required === true;
   const authenticated = identity.authenticated === true;
   return {
     required,
     authenticated,
     mode: deployment.mode === 'hosted' ? 'hosted' : 'local',
+    kind,
+    isGuest: authenticated && kind === 'guest',
+    guestAccessAvailable: deployment.guest_access_enabled === true,
     storageMode: deployment.storage_mode === 'ephemeral-demo' ? 'ephemeral-demo'
       : (deployment.storage_mode === 'persistent' ? 'persistent' : 'local'),
     who: authenticated ? String(identity.user_id || '') : '',

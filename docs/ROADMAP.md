@@ -19,19 +19,15 @@ call or public service has been started.
 | Issue | Current work | Still required |
 |---|---|---|
 | #16 | Hosted model-list probes now use the same endpoint policy as configuration/inference; eight-hour memory leases invalidate active run snapshots; logout and operator revocation stop subsequent calls. API, runtime and browser regressions pass locally. | Real TLS remains part of #22; no external model call was made. |
-| #17 | One Render Free Docker path is documented in an ADR and Blueprint. `PORT`, platform URL/Host defaults, explicit storage mode and visitor loss warning are implemented; CI now covers the production entrypoint plus a fake-model task/export/cold-start sequence. | Remote container CI must pass; owner must accept temporary storage and account/bandwidth exposure before deploy. Real cold-start/TLS acceptance stays in #22/#23. |
-| #18 | Not started. | Independent demo guest sessions and one-path BYOK onboarding. |
+| #17 | One Render Free Docker path is documented in an ADR and Blueprint. `PORT`, platform URL/Host defaults, explicit storage mode, visitor loss warning and the fixture task/export/cold-start job are implemented. The current container job failed before guest onboarding replaced the prior account-bootstrap step; the updated job needs a green run on the next push. | Remote container CI must pass; owner must accept temporary storage and account/bandwidth exposure before deploy. Real cold-start/TLS acceptance stays in #22/#23. |
+| #18 | Hosted opt-in guest sessions, independent owner/data/key namespaces, two-hour expiry, bounded guest count, logout/delete cleanup, guest landing page and a one-button “test connection and save” BYOK flow are implemented and covered by fixtures/Chromium. | One non-implementer usability record is still required by the issue. No participant was contacted. |
 | #19 | Not started. | Real Agent output to resource matrix and one-step preview/approval/export. |
 | #20 | Not started. | Shared request/deadline/cancel budgets, compact model context and incremental polling. |
 | #21 | Not started. | Scope breakers by approved destination, isolate account-level errors/probes and bound concurrency. |
 | #22 | Offline #16 regression work is recorded; previous evaluation snapshot remains 1 complete, 1 partial, 3 pending human review and 1 unknown. | Human review and authorized BYOK/real HTTP acceptance still need owners and access. |
 | #23 | No deployment was created. | Depends on #16–#22 evidence plus an approved owner account/storage decision and a real public URL. |
 
-Current #16 verification: 561 Python tests, 83 JS tests, syntax check, Chromium
-workbench/agent/login/loopback HTTP smoke pass. #17 local verification is 567 Python tests,
-83 JS tests, syntax check, 9 login / 12 Agent / 15 library browser stages, 5 real-loopback browser
-stages and 10 loopback HTTP routes. Docker is not installed locally; the container job runs in GitHub
-CI after push. These are local/fixture checks and do not close the hosted release gates.
+Current local verification after #18: 576 Python tests, 84 JS tests, JS syntax check, 10 login / 12 Agent / 15 library / 8 search / 5 static Skill browser stages, 5 real-loopback browser stages, and 10 loopback HTTP routes passed. The Docker image is not installed locally; the updated container workflow must run on the next push. These are local/fixture checks and do not close the hosted release gates.
 
 ## Code present and acceptance still open
 

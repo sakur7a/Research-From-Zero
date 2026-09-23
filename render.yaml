@@ -13,5 +13,7 @@ services:
         value: hosted
       - key: RE0_STORAGE_MODE
         value: ephemeral-demo
+      - key: RE0_GUEST_ACCESS
+        value: "true"
       - key: RE0_SESSION_SECRET
         sync: false

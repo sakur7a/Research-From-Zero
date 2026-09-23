@@ -39,6 +39,8 @@ SALT_BYTES = 16
 MIN_PASSWORD_CHARS = 10
 USERNAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,31}$")
 SESSION_TTL = timedelta(hours=12)
+GUEST_SESSION_TTL = timedelta(hours=2)
+MAX_GUEST_SESSIONS = 20
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT = timedelta(minutes=15)
 TOKEN_BYTES = 32
@@ -73,6 +75,10 @@ CREATE INDEX IF NOT EXISTS auth_sessions_user ON auth_sessions(user_id, expires_
 
 class AuthError(RuntimeError):
     """A refusal with a message that can be shown to a person and leaks nothing."""
+
+
+class GuestCapacityError(AuthError):
+    """The bounded pool of temporary guest sessions is full."""
 
 
 def _now() -> str:
@@ -117,6 +123,7 @@ class Identity:
     workspace: str
     authenticated: bool
     expires_at: str = ""
+    kind: str = "user"
 
     @property
     def owner(self) -> str:
@@ -129,12 +136,13 @@ class Identity:
 
     def public(self) -> dict:
         return {"user_id": self.user_id, "workspace": self.workspace,
-                "authenticated": self.authenticated, "expires_at": self.expires_at}
+                "authenticated": self.authenticated, "expires_at": self.expires_at,
+                "kind": self.kind}
 
 
 def local_identity() -> Identity:
     """The one identity a single-user local service has. Not authenticated — nobody asked it to be."""
-    return Identity(user_id=LOCAL_OWNER, workspace=LOCAL_OWNER, authenticated=False)
+    return Identity(user_id=LOCAL_OWNER, workspace=LOCAL_OWNER, authenticated=False, kind="local")
 
 
 def anonymous_identity() -> Identity:
@@ -145,7 +153,7 @@ def anonymous_identity() -> Identity:
     convenient mistake: the migrated single-user data is exactly what a logged-out visitor must not
     be handed.
     """
-    return Identity(user_id="", workspace="", authenticated=False)
+    return Identity(user_id="", workspace="", authenticated=False, kind="anonymous")
 
 
 class AccountStore:
@@ -264,6 +272,30 @@ class AccountStore:
                         "VALUES (?,?,?,?,?)", (hash_token(token), user_id, _now(), expires, note[:200]))
         return token, expires
 
+    def create_guest(self, *, ttl: timedelta = GUEST_SESSION_TTL,
+                     max_active: int = MAX_GUEST_SESSIONS) -> tuple[Identity, str]:
+        """Create one isolated, short-lived identity with the same opaque-cookie contract as users.
+
+        Guests have no username or password and are never inserted into `auth_accounts`; each gets a
+        unique owner, session token and memory-key namespace. The limit counts revoked sessions until
+        cleanup so repeatedly logging out cannot grow storage without bound.
+        """
+        now = datetime.now(timezone.utc)
+        created = now.replace(microsecond=0).isoformat()
+        expires_at = (now + ttl).replace(microsecond=0).isoformat()
+        user_id, workspace = "gst_" + secrets.token_hex(8), "ws_" + secrets.token_hex(8)
+        token = secrets.token_urlsafe(TOKEN_BYTES)
+        with self.db.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            active = con.execute("SELECT COUNT(*) FROM auth_guest_sessions WHERE expires_at > ?",
+                                 (created,)).fetchone()[0]
+            if active >= max_active:
+                raise GuestCapacityError("当前临时访客较多；稍后再试，或先删除本次会话数据")
+            con.execute("INSERT INTO auth_guest_sessions(token_hash,user_id,workspace,created_at,expires_at) "
+                        "VALUES (?,?,?,?,?)", (hash_token(token), user_id, workspace, created, expires_at))
+        return Identity(user_id=user_id, workspace=workspace, authenticated=True,
+                        expires_at=expires_at, kind="guest"), token
+
     def resolve(self, token: str) -> Identity | None:
         """The identity behind a session token, or None if it is unknown, expired or revoked."""
         if not token:
@@ -273,24 +305,40 @@ class AccountStore:
             row = con.execute("SELECT s.user_id, s.expires_at, s.revoked_at, a.workspace, a.disabled "
                               "FROM auth_sessions s JOIN auth_accounts a ON a.user_id=s.user_id "
                               "WHERE s.token_hash=?", (digest,)).fetchone()
-            if row is None:
+            if row is not None:
+                user_id, expires_at, revoked_at, workspace, disabled = tuple(row)
+                if revoked_at or disabled:
+                    return None
+                expires = _parse(expires_at)
+                if expires is None or expires <= datetime.now(timezone.utc):
+                    # An expired session is revoked rather than left to be resolved repeatedly.
+                    con.execute("UPDATE auth_sessions SET revoked_at=? WHERE token_hash=? AND revoked_at=''",
+                                (_now(), digest))
+                    return None
+                return Identity(user_id=user_id, workspace=workspace, authenticated=True,
+                                expires_at=expires_at, kind="user")
+            guest = con.execute("SELECT user_id, workspace, expires_at, revoked_at "
+                                "FROM auth_guest_sessions WHERE token_hash=?", (digest,)).fetchone()
+            if guest is None:
                 return None
-            user_id, expires_at, revoked_at, workspace, disabled = tuple(row)
-            if revoked_at or disabled:
-                return None
+            user_id, workspace, expires_at, revoked_at = tuple(guest)
             expires = _parse(expires_at)
+            if revoked_at:
+                return None
             if expires is None or expires <= datetime.now(timezone.utc):
-                # An expired session is revoked rather than left to be resolved again and again: the
-                # row now says when it stopped being usable.
-                con.execute("UPDATE auth_sessions SET revoked_at=? WHERE token_hash=? AND revoked_at=''",
+                con.execute("UPDATE auth_guest_sessions SET revoked_at=? WHERE token_hash=? AND revoked_at=''",
                             (_now(), digest))
                 return None
         return Identity(user_id=user_id, workspace=workspace, authenticated=True,
-                        expires_at=expires_at)
+                        expires_at=expires_at, kind="guest")
 
     def revoke(self, token: str) -> bool:
         with self.db.connect() as con:
             result = con.execute("UPDATE auth_sessions SET revoked_at=? WHERE token_hash=? "
+                                 "AND revoked_at=''", (_now(), hash_token(token)))
+            if result.rowcount:
+                return True
+            result = con.execute("UPDATE auth_guest_sessions SET revoked_at=? WHERE token_hash=? "
                                  "AND revoked_at=''", (_now(), hash_token(token)))
         return bool(result.rowcount)
 
@@ -318,7 +366,28 @@ class AccountStore:
                 "SELECT 1 FROM auth_accounts a JOIN auth_sessions s ON s.user_id=a.user_id "
                 "WHERE a.workspace=? AND a.disabled=0 AND s.revoked_at='' AND s.expires_at>? LIMIT 1",
                 (workspace, _now())).fetchone()
+            if row is None:
+                row = con.execute("SELECT 1 FROM auth_guest_sessions WHERE workspace=? "
+                                  "AND revoked_at='' AND expires_at>? LIMIT 1",
+                                  (workspace, _now())).fetchone()
         return row is not None
+
+    def expired_guest_sessions(self) -> list[dict]:
+        with self.db.connect() as con:
+            rows = con.execute("SELECT user_id, workspace FROM auth_guest_sessions "
+                               "WHERE expires_at<=? OR revoked_at!=''", (_now(),)).fetchall()
+        return [{"user_id": row[0], "workspace": row[1]} for row in rows]
+
+    def revoke_guest_owner(self, workspace: str) -> bool:
+        with self.db.connect() as con:
+            result = con.execute("UPDATE auth_guest_sessions SET revoked_at=? WHERE workspace=? "
+                                 "AND revoked_at=''", (_now(), workspace))
+        return bool(result.rowcount)
+
+    def delete_guest_owner(self, workspace: str) -> bool:
+        with self.db.connect() as con:
+            result = con.execute("DELETE FROM auth_guest_sessions WHERE workspace=?", (workspace,))
+        return bool(result.rowcount)
 
     def purge_expired(self) -> int:
         """Drop sessions that can no longer be used. Revoked rows are dropped with them."""
