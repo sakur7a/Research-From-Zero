@@ -42,9 +42,6 @@ jobs:
         run: docker build --tag re0:ci .
       - name: Check production entrypoint, 202 task, report export and ephemeral cold start
         run: python scripts/container_smoke.py re0:ci
-      - name: Show container logs on failure
-        if: failure()
-        run: docker logs re0-hosted-smoke
       - name: Remove smoke container
         if: always()
         run: docker rm --force re0-hosted-smoke || true
