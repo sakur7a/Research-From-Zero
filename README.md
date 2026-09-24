@@ -4,6 +4,12 @@
 
 输入研究目标，由模型自主选择检索工具、阅读返回材料、补查资源并输出有来源的研究报告。文献库不再是主入口，而是研究结果的保存位置。**这不是把固定脚本包装成 agent，也没有在未配置模型时用演示结果冒充分析。**
 
+## 快速入口
+
+- **打开 Demo** — [Vercel 静态 Skill 展示](https://re0-skill-demo.vercel.app/)：只读历史案例，不调用后端或模型。此公开快照来自 `54d529a`，不会随 GitHub 推送自动更新；它不是可运行的在线 Agent。
+- **本地使用** — [启动 Re0](#启动)，配置自己的工具调用模型后运行任务。
+- **当前能力与限制** — 查看[路线图](docs/ROADMAP.md)、[安全边界](SECURITY.md)和[部署说明](docs/DEPLOYMENT_ADR.md)。
+
 ## 从一个问题开始
 
 例如：
@@ -61,7 +67,7 @@ python run.py
 
 `compose.yaml` 只提供托管模式模板：端口仅发布到宿主机回环地址；必须配置会话密钥、HTTPS 入口、允许来源和存储策略，缺失时应用拒绝启动。它不含 TLS 终端，也没有经过真实反向代理或第二账户验收，**不能据此把服务开放到公网**。构建、开户、备份与恢复步骤见[交付说明](docs/DELIVERY.md)。
 
-参赛 Web Demo 当前只准备了一条线上候选路径：Render Free Docker Blueprint（[`render.yaml`](render.yaml)）。它采用临时文件系统，页面会提示重启、休眠或重新部署可能丢失数据；配置和本地容器 CI 不等于已部署。宿主、存储策略、预算及竞赛规则仍须由项目所有者确认，完整边界见[部署决策记录](docs/DEPLOYMENT_ADR.md)。
+Vercel 上已有一个公开的静态 Skill 页面，**不含 Re0 API、数据库或任务 worker**；Vercel 将项目首个部署标记为 production。完整 Agent/BYOK 服务尚未部署。Render Free Docker Blueprint（[`render.yaml`](render.yaml)）仍只是全后端候选，使用临时文件系统，数据可能在重启、休眠或重部署后丢失。完整服务的宿主、存储策略、费用上限及竞赛规则仍须由项目所有者确认，见[部署决策记录](docs/DEPLOYMENT_ADR.md)。
 
 ## v0.2 已实现的架构
 
