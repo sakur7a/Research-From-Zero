@@ -3,7 +3,7 @@
   "query": "LoRA",
   "queries": ["LoRA"],
   "scope": "2026-09-22 公开历史案例整理：仅呈现已记录的 LoRA 论文与 microsoft/LoRA 仓库检查。原始完整检索覆盖和运行参数未保留在此样本中。",
-  "note": "由 README.md 的 2026-09-22 真实运行摘要和 web/skill.html 的历史案例整理；不是原始完整 --json 输出，不是实时检索，也未验证训练流程或作者归属。",
+  "note": "由 README.md 的 2026-09-22 真实运行摘要和 web/skill.html 的历史案例整理；题录作者与中文简介据 arXiv:2106.09685 页面补充，简介为概述而非原文。不是原始完整 --json 输出，不是实时检索，也未验证训练流程或作者归属。",
   "coverage": {
     "documents": 1,
     "sources_queried": [],
@@ -15,6 +15,8 @@
   "documents": [{
     "paper": {
       "title": "LoRA: Low-Rank Adaptation of Large Language Models",
+      "authors": ["Edward J. Hu", "Yelong Shen", "Phillip Wallis", "Zeyuan Allen-Zhu", "Yuanzhi Li", "Shean Wang", "Lu Wang", "Weizhu Chen"],
+      "abstract": "摘要要点（非原文）：LoRA 冻结预训练模型权重，在 Transformer 中加入可训练的低秩矩阵，以更少的可训练参数适配下游任务。论文比较了参数量、显存需求和多个语言模型上的微调表现。",
       "arxiv_id": "2106.09685",
       "year": 2021,
       "paper_url": "https://arxiv.org/abs/2106.09685"

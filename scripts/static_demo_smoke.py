@@ -37,6 +37,14 @@ def run(origin: str) -> None:
         page.get_by_role("button", name="打开历史案例").click()
         page.get_by_role("button", name="候选论文").click()
         assert "LoRA: Low-Rank" in page.locator("#candidate-list").inner_text()
+        page.locator(".candidate-preview").first.click()
+        assert page.locator("#paper-detail").is_visible()
+        assert "Edward J. Hu" in page.locator("#paper-detail").inner_text()
+        assert "partially_available" in page.locator("#paper-detail").inner_text()
+        assert page.locator('#paper-detail a[href="https://arxiv.org/abs/2106.09685"]').count() == 1
+        assert page.locator('#paper-detail a[href="https://arxiv.org/pdf/2106.09685"]').count() == 1
+        page.keyboard.press("Escape")
+        assert not page.locator("#paper-detail").is_visible()
         page.locator("#f-query").fill("no-such-paper")
         assert "没有符合条件" in page.locator("#candidate-list").inner_text()
         page.locator("#f-query").fill("LoRA")
@@ -80,6 +88,10 @@ def run(origin: str) -> None:
         assert page.locator("#candidate-list img").count() == 0
         assert page.evaluate("window.xss === undefined")
         assert page.locator('#candidate-list a[href^="javascript:"]').count() == 0
+        page.locator(".candidate-preview").first.click()
+        assert page.locator('#paper-detail img').count() == 0
+        assert page.locator('#paper-detail a[href^="javascript:"]').count() == 0
+        page.locator('[data-action="close-detail"]').click()
         page.locator('[data-action="back-to-load"]').click()
         page.locator("details.own-result summary").click()
         page.locator("#file").set_input_files(str(Path(__file__).resolve().parents[1] /
@@ -96,6 +108,12 @@ def run(origin: str) -> None:
         assert "从论文候选" in page.locator("h1").inner_text()
         page.locator('[data-action="menu"]').click()
         assert "mobile-expanded" in page.locator(".side").get_attribute("class")
+        page.get_by_role("button", name="打开历史案例").click()
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        assert page.locator(".candidate-preview .preview-title").first.bounding_box()["height"] > 0
+        page.locator(".candidate-preview").first.click()
+        assert page.locator("#paper-detail").is_visible()
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         assert context.request.get(origin + "/static/search.html").status == 200
         assert context.request.get(origin + "/static/skill.html").status == 200
         assert not errors, errors

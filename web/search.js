@@ -30,7 +30,7 @@ const VIEWS = [['coverage', '检索覆盖'], ['candidates', '候选论文'], ['m
 const state = {
   fileName: '', result: null, warning: '', error: '', view: 'load',
   filters: {query: '', year: '', source: '', publication: '', openOnly: false, sort: 'relevance'},
-  selected: new Set(), openAbstracts: new Set(), openRows: new Set(),
+  selected: new Set(), openRows: new Set(),
   importReport: null, busy: false,
 };
 
@@ -110,10 +110,9 @@ function accept(text, fileName) {
   state.error = '';
   state.fileName = fileName;
   state.selected = new Set();
-  state.openAbstracts = new Set();
   state.openRows = new Set();
   state.importReport = null;
-  state.view = 'coverage';
+  state.view = staticDemo ? 'candidates' : 'coverage';
   const info = summary(parsed.result);
   crumb.textContent = `${fileName} · ${info.documents} 篇候选`;
   render();
@@ -241,6 +240,10 @@ function candidatesView() {
     </div>
     <p class="filter-note" id="candidate-count"></p>
     <div id="candidate-list"></div>
+    <dialog id="paper-detail" class="paper-detail" aria-labelledby="paper-detail-title">
+      <div class="paper-detail-inner"><button type="button" class="paper-detail-close" data-action="close-detail" aria-label="关闭论文详情">×</button>
+      <div id="paper-detail-content"></div></div>
+    </dialog>
   </section>`;
 }
 
@@ -252,52 +255,55 @@ function candidateCount(shown, all) {
 }
 
 function candidateCard(row) {
-  const open = state.openAbstracts.has(row.key);
   const publication = `${row.publication_label}（${row.publication}）`
     + (row.publication_venue ? ` · ${row.publication_venue}` : '')
     + (row.publication_source ? `（据 ${row.publication_source}）` : '');
-  const audits = row.audits.map(item => `<div class="audit-line">
-      <a href="${link(item.resource_url)}" rel="noopener noreferrer" target="_blank">${e(item.resource_url || '')}</a>
-      <span class="chip ${item.status === 'access_failed' ? 'bad' : item.access === 'open' ? 'good' : ''}">${
-        labelled(AUDIT_LABELS, item.status)}</span>
-      <span class="meta-line">深度 ${labelled(DEPTH_LABELS, item.verification_depth)} · 归属 ${
-        labelled(ATTRIBUTION_LABELS, item.attribution)} · 访问 ${labelled(ACCESS_LABELS, item.access)}</span>
-    </div>`).join('');
+  const identifier = row.arxiv_id ? `arXiv:${row.arxiv_id}` : row.doi ? `DOI:${row.doi}` : '题录记录';
   return `<article class="candidate" data-key="${e(row.key)}">
-    <header>
-      <input type="checkbox" data-action="select" data-key="${e(row.key)}" ${state.selected.has(row.key) ? 'checked' : ''}
-        aria-label="勾选用于 BibTeX：${e(row.title)}">
-      <div style="flex:1">
-        <h3 class="paper-title" style="margin:0">${e(row.title)}</h3>
-        <div class="paper-authors">${(row.authors || []).slice(0, 12).map(name =>
-          `<span class="paper-chip">${e(name)}</span>`).join('')}${
-          row.authors.length > 12 ? `<span class="paper-chip">另有 ${row.authors.length - 12} 位</span>` : ''}</div>
-      </div>
-    </header>
-    <div class="paper-card">
-      <div>
-        <p class="meta-line">${e(row.year ?? '年份未知')} · ${e(publication)}${
-          row.venue ? ` · <b>${e(row.venue)}</b>` : ''}${row.sources.length ? ` · 来自 ${row.sources.map(e).join('、')}` : ''}${
-          row.citations === null ? '' : ` · 被引 ${e(String(row.citations))}`}</p>
-        ${row.preprint_also ? `<p class="meta-line">另有预印本版本：${e(JSON.stringify(row.preprint_also))}</p>` : ''}
-        ${row.abstract ? `<p class="paper-abstract" style="${open ? '' : 'display:none'}">${e(row.abstract)}</p>
-          <button type="button" class="abstract-toggle" data-action="abstract" data-key="${e(row.key)}">${
-            open ? '收起摘要' : `摘要（${row.abstract.length} 字符）`}</button>` : '<p class="meta-line">来源未提供摘要</p>'}
-        <p class="meta-line">机构: ${row.institutions.length
-          ? e(row.institutions.slice(0, 3).join(', ')) + (row.institutions.length > 3 ? `（另有 ${row.institutions.length - 3} 个）` : '')
-          : '各来源均未提供'}</p>
-      </div>
-      <aside class="paper-aside">
-        <div class="paper-links">${row.links.map(item =>
-          `<a href="${link(item.url)}" rel="noopener noreferrer" target="_blank">${e(item.label)} ${icon('external')}</a>`).join('')
-          || '<span class="subtle">没有可跳转的标识符</span>'}</div>
-        <span class="status">资源候选 ${row.audit_count} · 已核验 ${row.checked} · 可公开获取 ${row.open}</span>
-        <span class="status">名称检索 ${labelled(SEARCH_STATE_LABELS, row.search_state)}</span>
-      </aside>
+    <div class="candidate-copy">
+      <div class="candidate-kicker"><span>论文候选 ${String(row.index + 1).padStart(2, '0')}</span><span>${e(row.year ?? '年份未知')}</span></div>
+      <div class="candidate-heading"><input type="checkbox" data-action="select" data-key="${e(row.key)}" ${state.selected.has(row.key) ? 'checked' : ''}
+          aria-label="勾选用于 BibTeX：${e(row.title)}"><h3 class="paper-title">${e(row.title)}</h3></div>
+      <div class="paper-authors">${(row.authors || []).slice(0, 5).map(name =>
+        `<span class="paper-chip">${e(name)}</span>`).join('')}${
+        row.authors.length > 5 ? `<span class="paper-chip">另有 ${row.authors.length - 5} 位</span>` :
+          (!row.authors.length ? '<span class="paper-chip">作者未记录</span>' : '')}</div>
+      <p class="candidate-excerpt">${e(row.abstract || '这份结果没有提供摘要。打开预览可查看题录、来源和资源检查信息。')}</p>
+      <div class="candidate-bottom"><span>${e(publication)}${row.sources.length ? ` · ${row.sources.map(e).join('、')}` : ''}</span>
+        <span>资源候选 ${row.audit_count} · 已核验 ${row.checked} · 可公开获取 ${row.open}${row.citations === null ? '' : ` · 被引 ${e(String(row.citations))}`}</span></div>
+      ${row.preprint_also ? `<p class="meta-line">另有预印本版本：${e(JSON.stringify(row.preprint_also))}</p>` : ''}
+      <div class="candidate-links">${row.links.map(item =>
+        `<a href="${link(item.url)}" rel="noopener noreferrer" target="_blank">${e(item.label)} ${icon('external')}</a>`).join('')}</div>
     </div>
-    ${audits ? `<div style="padding:0 18px 16px">${audits}</div>` : `<div style="padding:0 18px 16px">
-      <p class="audit-line">没有可审计的资源候选：${e(noCandidateReason(row))}</p></div>`}
+    <button type="button" class="candidate-preview" data-action="paper-detail" data-key="${e(row.key)}"
+      aria-label="打开《${e(row.title)}》的简要详情">
+      <span class="preview-sheet" aria-hidden="true"><span class="preview-label">题录预览</span><span class="preview-rule"></span>
+        <span class="preview-title">${e(row.title)}</span><span class="preview-byline">${e(row.authors.slice(0, 3).join(' · ') || identifier)}</span>
+        <span class="preview-rule thin"></span><span class="preview-lines"></span><span class="preview-lines short"></span>
+        <span class="preview-lines"></span><span class="preview-lines medium"></span>
+        <span class="preview-id">${e(identifier)}</span></span>
+      <span class="preview-action">打开简要详情 <span aria-hidden="true">↗</span></span>
+    </button>
   </article>`;
+}
+
+function paperDetail(row) {
+  const pdf = /^\d{4}\.\d{4,5}(?:v\d+)?$/.test(row.arxiv_id)
+    ? `<a class="detail-primary" href="https://arxiv.org/pdf/${e(row.arxiv_id)}" rel="noopener noreferrer" target="_blank">查看论文 PDF ${icon('external')}</a>` : '';
+  const links = row.links.filter(item => link(item.url) !== '#').map(item =>
+    `<a href="${link(item.url)}" rel="noopener noreferrer" target="_blank">打开 ${e(item.label)} 来源 ${icon('external')}</a>`).join('');
+  const audits = row.audits.map(item => `<li><span>${e(item.resource_type || '资源')} · ${labelled(AUDIT_LABELS, item.status)}</span>
+    ${link(item.resource_url) !== '#' ? `<a href="${link(item.resource_url)}" rel="noopener noreferrer" target="_blank">${e(shorten(item.resource_url))} ↗</a>` : ''}
+    <small>${labelled(DEPTH_LABELS, item.verification_depth)} · ${labelled(ATTRIBUTION_LABELS, item.attribution)} · ${labelled(ACCESS_LABELS, item.access)}${item.checked_at ? ` · 检查于 ${e(item.checked_at)}` : ''}</small></li>`).join('');
+  return `<div class="detail-kicker">论文详情 <span>来源记录 · 非实时核验</span></div>
+    <h2 id="paper-detail-title">${e(row.title)}</h2>
+    <p class="detail-meta">${e(row.authors.join(' · ') || '作者未记录')}<br>${e(row.year ?? '年份未知')} · ${e(row.publication_label)}${row.venue ? ` · ${e(row.venue)}` : ''}</p>
+    <section><h3>摘要或简介</h3><p>${e(row.abstract || '当前结果未提供摘要。')}</p></section>
+    <section><h3>来源与资源</h3><div class="detail-links">${pdf}${links || '<span>当前结果没有可打开的论文链接</span>'}</div>
+      ${audits ? `<ul class="detail-audits">${audits}</ul>` : `<p>没有可审计的资源候选：${e(noCandidateReason(row))}</p>`}</section>
+    <details class="detail-more"><summary>更多题录字段</summary><p>机构：${e(row.institutions.join('、') || '未记录')}<br>
+      名称检索：${labelled(SEARCH_STATE_LABELS, row.search_state)}${row.citations === null ? '' : `<br>被引：${e(String(row.citations))}`}</p></details>
+    <p class="detail-note">这张预览图由题录字段排版生成，不是论文 PDF 截图；资源状态只表示记录中的检查范围。</p>`;
 }
 
 /** The search's own outcome, so "nobody searched" never reads as "searched and found nothing". */
@@ -485,6 +491,8 @@ function render() {
   if (state.view === 'candidates') {
     renderCandidateList();
     bindFilters();
+    const dialog = document.querySelector('#paper-detail');
+    dialog.addEventListener('click', event => { if (event.target === dialog) dialog.close(); });
   }
 }
 
@@ -601,12 +609,15 @@ document.addEventListener('click', async (event) => {
   }
   if (!state.result) return;
   if (action === 'goto-coverage') { state.view = 'coverage'; render(); return; }
-  if (action === 'abstract') {
-    const key = node.dataset.key;
-    state.openAbstracts.has(key) ? state.openAbstracts.delete(key) : state.openAbstracts.add(key);
-    renderCandidateList();
+  if (action === 'paper-detail') {
+    const row = rows().find(item => item.key === node.dataset.key);
+    if (!row) return;
+    const dialog = document.querySelector('#paper-detail');
+    document.querySelector('#paper-detail-content').innerHTML = paperDetail(row);
+    dialog.showModal();
     return;
   }
+  if (action === 'close-detail') { document.querySelector('#paper-detail').close(); return; }
   if (action === 'select') return;   // handled on change, so the checkbox state stays authoritative
   if (action === 'row') {
     const index = Number(node.dataset.index);
