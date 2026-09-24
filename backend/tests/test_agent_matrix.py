@@ -1,5 +1,7 @@
 """Live Agent-to-resource-matrix flow with source/provider/model fixtures, not a JSON upload."""
 import base64
+import csv
+import io
 import json
 import threading
 import time
@@ -11,6 +13,7 @@ from fastapi.testclient import TestClient
 import re0.agent.runtime as runtime_module
 from re0.agent.tools import TOOL_TYPES
 from re0.main import create_app
+from re0.resource_matrix import COMPONENT_LABELS
 
 CONFIG = {"base_url": "https://api.openai.com/v1", "model": "matrix-fixture",
           "api_key": "sk-matrix-fixture-not-a-real-key", "trust_endpoint": True}
@@ -384,7 +387,7 @@ def test_live_agent_run_builds_evidence_linked_matrix_and_batches_human_approval
         response = client.get(f"/api/agent/runs/{run['id']}/matrix")
         assert response.status_code == 200, response.text
         matrix = response.json()
-        assert matrix["schema_version"] == "2"
+        assert matrix["schema_version"] == "3"
         assert matrix["coverage"]["agent_run"] == {
             "run_id": run["id"], "paper_evidence": 3, "proposed_links": 3, "unlinked_checks": 2}
         linked = [row for row in matrix["rows"] if row.get("resource_url")]
@@ -433,6 +436,70 @@ def test_live_agent_run_builds_evidence_linked_matrix_and_batches_human_approval
         assert csv_response.status_code == md_response.status_code == 200
         assert "association_evidence_ids" in csv_response.text
         assert "待人工确认" in md_response.text and "unconfirmed" in md_response.text
+        exported_rows = list(csv.DictReader(io.StringIO(csv_response.text)))
+        exported_by_link = {(row["paper_evidence_id"], row["resource_evidence_id"]): row
+                            for row in exported_rows}
+        assert len(exported_rows) == len(matrix["rows"])
+        for row in matrix["rows"]:
+            exported = exported_by_link[(row["paper_evidence_id"], row["resource_evidence_id"])]
+            assert exported["work_identifier"] == row["work_identifier"]
+            assert exported["work_version"] == row["work_version"]
+            assert exported["resource_url"] == row["resource_url"]
+            assert exported["status"] == row["status"]
+            assert exported["checked_at"] == row["checked_at"]
+            assert exported["scope"] == row["scope"]
+            assert exported["association_evidence_ids"] == "; ".join(row["association_evidence_ids"])
+            assert exported["association_sources"] == "; ".join(row["association_sources"])
+            if row["resource_url"]:
+                markdown_row = next(line for line in md_response.text.splitlines()
+                                    if row["paper_title"] in line and row["resource_url"] in line)
+                assert row["scope"] in markdown_row
+                assert row["checked_at"] in markdown_row
+                assert all(evidence_id in markdown_row
+                           for evidence_id in row["association_evidence_ids"])
+
+        for row in linked:
+            paper = next(item for item in papers
+                         if item["arxiv_id"] == row["work_identifier"]
+                         and item["title"] == row["paper_title"])
+            resource = next(item for item in paper["resources"] if item["url"] == row["resource_url"])
+            audit = resource["latest"]
+            assert audit["resource_url"] == row["resource_url"]
+            assert audit["work_identifier"] == row["work_identifier"]
+            assert audit["work_version"] == row["work_version"] == resource["applicable_version"]
+            assert audit["status"] == row["status"]
+            assert audit["checked_at"] == row["checked_at"]
+            assert audit["scope"] == row["scope"]
+            assert audit["attribution"] == row["attribution"] == "unconfirmed"
+            assert audit["version_match"] == row["version_match"] == "unknown"
+            for name, state in row["coverage"].items():
+                raw_state = audit["coverage"].get(name, {}).get("state", "unknown")
+                assert state == COMPONENT_LABELS[raw_state]
+            audit_sources = {source["source_url"] for source in audit["evidence"]}
+            audit_sources.update(source for finding in audit["coverage"].values()
+                                 for source in finding["sources"])
+            assert set(row["sources"]).issubset(audit_sources)
+            approvals = [item for item in audit["agent_association_approvals"]
+                         if item["resource_evidence_id"] == row["resource_evidence_id"]]
+            assert len(approvals) == 1
+            approval = approvals[0]
+            assert approval["run_id"] == run["id"]
+            assert approval["decision"] == "confirmed_by_user"
+            assert approval["resource_checked_at"] == row["checked_at"]
+            assert approval["resource_scope"] == row["scope"]
+            assert approval["proposal_evidence_ids"] == row["association_evidence_ids"]
+            assert approval["proposal_sources"] == row["association_evidence"]
+            assert approval["proposal_note"] == row["association_note"]
+
+        library_export = client.get("/api/export").json()
+        for paper in papers:
+            exported_paper = next(item for item in library_export["papers"]
+                                  if item["id"] == paper["id"])
+            for resource in paper["resources"]:
+                exported_resource = next(item for item in exported_paper["resources"]
+                                         if item["id"] == resource["id"])
+                assert exported_resource["observations"][-1]["agent_association_approvals"] \
+                    == resource["latest"]["agent_association_approvals"]
 
         # Progress is bounded per response; clients can drain the remainder without losing a cursor.
         with client.app.state.store.db.connect() as con:

@@ -299,6 +299,15 @@ def run(output):
             assert matrix_page.locator('.matrix-card').count()==4
             assert matrix_page.locator('.matrix-card input[name="matrix-selection"]').count()==3
             assert '待人工确认' in matrix_page.locator('.resource-matrix').inner_text()
+            matrix_payload=matrix_client.get(
+                f"/api/agent/runs/{matrix_client.get('/api/agent/runs').json()[0]['id']}/matrix").json()
+            assert all(row['scope'] for row in matrix_payload['rows'] if row['resource_url'])
+            matrix_page.locator('.matrix-card .matrix-details summary').first.click()
+            first_matrix_card=matrix_page.locator('.matrix-card').first
+            matrix_details=first_matrix_card.locator('.matrix-details').first.inner_text()
+            assert '检查范围' in matrix_details
+            assert '默认分支文件树' in matrix_details
+            checked.append('agent_matrix_displays_check_scope_alongside_coverage')
             matrix_selections=matrix_page.locator('.matrix-card input[name="matrix-selection"]')
             for index in range(matrix_selections.count()):matrix_selections.nth(index).check()
             matrix_page.locator('[data-action=matrix-preview]').click()

@@ -265,7 +265,8 @@ class Store:
         return self.save_observation(resource_id, revision.model_dump(mode="json"), owner=owner,
                                      kind="confirmation", origin="user")
 
-    def import_audits(self, items: list[dict], dry_run: bool = True, *, owner: str) -> dict:
+    def import_audits(self, items: list[dict], dry_run: bool = True, *, owner: str,
+                      agent_associations: list[list[dict]] | None = None) -> dict:
         """Link approved papers and their resource audits into the library.
 
         Idempotent by identifier, by resource URL and by audit fingerprint, and it never updates a
@@ -318,7 +319,49 @@ class Store:
                         skipped.append({"index": index, "url": audit.resource_url,
                                         "reason": "同一次检查已导入过"})
                         continue
-                    self.save_observation(resource_id, audit.model_dump(mode="json"), owner=owner,
+                    observation = audit.model_dump(mode="json")
+                    item_associations = (agent_associations[index]
+                                         if agent_associations and index < len(agent_associations) else [])
+                    approvals = []
+                    for proposal in item_associations:
+                        if audit.resource_url not in proposal.get("resource_urls", []):
+                            continue
+                        sources = []
+                        for source in proposal.get("sources", [])[:8]:
+                            if not isinstance(source, dict):
+                                continue
+                            try:
+                                source_url = safe_url(str(source.get("source_url") or ""))
+                            except ValueError:
+                                continue
+                            evidence_id = str(source.get("evidence_id") or "")[:100]
+                            if not evidence_id:
+                                continue
+                            sources.append({"evidence_id": evidence_id,
+                                            "source_url": source_url,
+                                            "locator": str(source.get("locator") or "")[:400],
+                                            "retrieved_at": str(source.get("retrieved_at") or "")[:60]})
+                        evidence_ids = list(dict.fromkeys(
+                            str(value)[:100] for value in proposal.get("evidence_ids", [])
+                            if value))[:8]
+                        if not evidence_ids or not sources:
+                            continue
+                        approvals.append({
+                            "run_id": str(proposal.get("run_id") or "")[:80],
+                            "paper_evidence_id": str(proposal.get("paper_evidence_id") or "")[:100],
+                            "resource_evidence_id": str(proposal.get("resource_evidence_id") or "")[:100],
+                            "resource_url": audit.resource_url,
+                            "resource_checked_at": audit.checked_at,
+                            "resource_scope": audit.scope,
+                            "proposal_evidence_ids": evidence_ids,
+                            "proposal_sources": sources,
+                            "proposal_note": str(proposal.get("rationale") or "")[:600],
+                            "decision": "confirmed_by_user",
+                            "confirmed_at": now(),
+                        })
+                    if approvals:
+                        observation["agent_association_approvals"] = approvals
+                    self.save_observation(resource_id, observation, owner=owner,
                                           kind="observation", origin="import")
                     linked.append({"index": index, "paper_id": paper_id,
                                    "resource_id": resource_id, "url": audit.resource_url,

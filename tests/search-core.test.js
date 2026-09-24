@@ -142,6 +142,7 @@ test('every audited candidate becomes a matrix row', () => {
   assert.equal(found.rows[0].status, 'metadata_readable');
   assert.equal(found.rows[0].coverage.code_training, COMPONENT_LABELS.present);
   assert.equal(found.rows[0].licences.code, 'MIT');
+  assert.equal(found.rows[0].scope, '仓库根目录与 README');
   assert.ok(found.rows[0].sources.length, 'an affirmative row keeps the link it rests on');
 });
 
@@ -212,6 +213,8 @@ test('the CSV export has one header and one line per row', () => {
   const lines = csv.trimEnd().split('\r\n');
   assert.equal(lines.length, 5);
   assert.deepEqual(lines[0].split(','), MATRIX_COLUMNS);
+  assert.ok(MATRIX_COLUMNS.includes('scope'));
+  assert.ok(csv.includes('仓库根目录与 README'));
   assert.ok(MATRIX_COLUMNS.includes('record_kind'));
 });
 

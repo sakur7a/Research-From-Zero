@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Preserve Agent association evidence through library approval (#19)
+
+- Add each resource check's `scope` to the shared matrix row model and carry it into JSON, Markdown,
+  CSV, the Agent result view and the imported matrix workbench. The matrix contract is now schema 3.
+- When a reader confirms a proposed paper–resource link, append its run/evidence IDs, source URLs,
+  locators, retrieval times, model rationale and user-confirmation time beside the imported audit.
+  Show this provenance in the library evidence history and retain it in the full library export.
+- Keep the provider audit as an observation; approval of a candidate link does not promote
+  attribution or version matching. Fixture regressions compare matrix, all exports and library data.
+
 ### Preserve independent evaluation summaries (#22)
 
 - Scoring one channel updates only that channel's section in `evals/results/SUMMARY.md`, preserving

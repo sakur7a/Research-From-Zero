@@ -551,6 +551,21 @@ def test_only_links_a_reader_can_open_reach_the_matrix():
     assert line["sources"] == ["https://github.com/lab/paper/blob/x/w.safetensors"]
 
 
+def test_resource_matrix_preserves_the_check_scope_in_each_export():
+    audit = resource_audit.unchecked_audit(
+        "https://github.com/lab/paper", candidate={"url": "https://github.com/lab/paper"},
+        paper=dict(PAPER), publication={}, reason="scope fixture").model_dump(mode="json")
+    audit["scope"] = "默认分支文件树、README、前 10 个 Release"
+    item = {"paper": dict(PAPER), "resource_audits": [audit], "artifact_outcome": "not_checked"}
+    payload = resource_matrix.matrix([item], {}, generated_at="x")
+    row = payload["rows"][0]
+    assert row["scope"] == item["resource_audits"][0]["scope"]
+    assert row["scope"] in resource_matrix.markdown(payload)
+    csv_rows = list(csv_module.reader(io.StringIO(resource_matrix.csv_text(payload))))
+    assert csv_rows[0][resource_matrix.COLUMNS.index("scope")] == "scope"
+    assert csv_rows[1][resource_matrix.COLUMNS.index("scope")] == row["scope"]
+
+
 def test_the_three_exports_are_written_from_one_structure(tmp_path):
     item = audited_document("LayerKit: A Study", ["train.py", "model.safetensors"],
                             "Code at https://github.com/lab/paper")

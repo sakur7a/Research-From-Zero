@@ -345,6 +345,7 @@ function matrixDetail(row) {
   return `<div style="padding-top:12px">
     <p class="meta-line"><b>标识</b> ${e(row.work_identifier || '（无）')}${row.work_version ? ` · 版本 ${e(row.work_version)}` : ''}
       ${row.revision ? ` · revision ${e(row.revision)}` : ''}${row.checked_at ? ` · 检查于 ${e(row.checked_at)}` : ''}</p>
+    <p class="meta-line"><b>检查范围</b> ${e(row.scope || '结果未记录')}</p>
     <p class="meta-line"><b>候选来源</b> ${e(row.candidate_origin || '（未记录）')}${row.provider ? ` · 提供商 ${e(row.provider)}` : ''}</p>
     ${row.summary ? `<p class="meta-line"><b>摘要</b> ${e(row.summary)}</p>` : ''}
     <p class="meta-line"><b>资源类别覆盖</b></p><div class="cov">${coverage}</div>

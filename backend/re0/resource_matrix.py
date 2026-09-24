@@ -22,7 +22,7 @@ import time
 
 from .models import AUDIT_COMPONENTS, AUDIT_LABELS, COMPONENT_LABELS, safe_url
 
-MATRIX_SCHEMA_VERSION = "2"
+MATRIX_SCHEMA_VERSION = "3"
 # A comparison set wider than this stops being comparable; the matrix says so rather than hiding
 # rows, because the reader chose the query that produced them.
 COMPARABLE_PAPERS = 6
@@ -112,6 +112,7 @@ def audit_row(row: dict, document: dict) -> dict:
         "access": row.get("access", "unknown"),
         "revision": row.get("revision", ""),
         "checked_at": row.get("checked_at", ""),
+        "scope": str(row.get("scope") or "")[:600],
         "verification_depth": row.get("verification_depth", "not_checked"),
         "version_match": row.get("version_match", "unknown"),
         "licences": row.get("licences") or {},
@@ -152,6 +153,7 @@ def absent_row(document: dict) -> dict:
         "access": "not_applicable" if state == "not_found_in_scope" else "unknown",
         "revision": "",
         "checked_at": "",
+        "scope": "",
         "verification_depth": "not_checked",
         "version_match": "unknown",
         "licences": {},
@@ -190,7 +192,7 @@ def rows(documents: list) -> list:
 COLUMNS = ("paper_title", "work_identifier", "work_version", "resource_url", "resource_type",
            "candidate_origin", "attribution", "author_declaration", "status", "status_label",
            "provider_status", "access", "verification_depth", "version_match", "revision",
-           "checked_at", "coverage", "licences", "sources", "blockers", "limitations",
+           "checked_at", "scope", "coverage", "licences", "sources", "blockers", "limitations",
            "record_kind", "association_status", "paper_evidence_id", "resource_evidence_id",
            "association_evidence_ids", "association_sources", "association_note")
 
@@ -266,7 +268,7 @@ def markdown(payload: dict) -> str:
               "**这张表不能回答**：资源是否能跑通、结果能否复现、许可证是否允许你的用途、"
               "以及候选仓库是否真出自论文作者。这些都需要人工确认，确认后是另一条记录。", ""]
     headers = ("论文", "资源", "类型", "候选来源", "状态", "提供商状态", "访问", "核验深度",
-               "归属", "作者声明", "版本对应", "revision", "检查时间", "许可证", "类别覆盖",
+               "归属", "作者声明", "版本对应", "revision", "检查时间", "检查范围", "许可证", "类别覆盖",
                "不可直接比较的条件", "可跳转来源", "候选关联",
                "关联证据 ID", "关联来源与时间", "关联说明")
     lines.append("| " + " | ".join(headers) + " |")
@@ -281,7 +283,8 @@ def markdown(payload: dict) -> str:
                  f"{row['status_label']} ({row['status']})", row.get("provider_status", ""), row["access"],
                  row["verification_depth"], row.get("attribution", "unconfirmed"),
                  row.get("author_declaration", "undeclared"), row["version_match"],
-                 row.get("revision", ""), row.get("checked_at", ""), licences, coverage_text,
+                 row.get("revision", ""), row.get("checked_at", ""), row.get("scope", ""),
+                 licences, coverage_text,
                  "; ".join(row["blockers"]) or "（无）", sources,
                  row.get("association_status", ""),
                  "; ".join(row.get("association_evidence_ids") or []),

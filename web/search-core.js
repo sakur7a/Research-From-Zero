@@ -225,6 +225,7 @@ function auditRow(row, document) {
     access: row.access || 'unknown',
     revision: row.revision || '',
     checked_at: row.checked_at || '',
+    scope: row.scope || '',
     verification_depth: row.verification_depth || 'not_checked',
     version_match: row.version_match || 'unknown',
     licences: row.licences || {},
@@ -266,6 +267,7 @@ function absentRow(document) {
     access: state === 'not_found_in_scope' ? 'not_applicable' : 'unknown',
     revision: '',
     checked_at: '',
+    scope: '',
     verification_depth: 'not_checked',
     version_match: 'unknown',
     licences: {},
@@ -295,7 +297,7 @@ export function safeLink(url) {
 
 export const MATRIX_COLUMNS = ['paper_title', 'work_identifier', 'work_version', 'resource_url',
   'resource_type', 'candidate_origin', 'attribution', 'author_declaration', 'status', 'status_label',
-  'provider_status', 'access', 'verification_depth', 'version_match', 'revision', 'checked_at', 'coverage', 'licences',
+  'provider_status', 'access', 'verification_depth', 'version_match', 'revision', 'checked_at', 'scope', 'coverage', 'licences',
   'sources', 'blockers', 'limitations', 'record_kind', 'association_status', 'paper_evidence_id',
   'resource_evidence_id', 'association_evidence_ids', 'association_sources', 'association_note'];
 

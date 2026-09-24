@@ -221,12 +221,43 @@ def run(output_dir: Path):
         page.locator('#search').fill('')
         assert page.locator('.graph-paper').count()==6
         completed.append("relation_index_remains_available_when_graph_filter_is_empty")
+        target_paper=next(item for item in client.get('/api/papers').json()
+                          if 'Layered Canvas' in item['title'])
+        target_resource=target_paper['resources'][0]
+        fixture_source=target_resource['latest']
+        association_source=[
+            {'evidence_id':'ev_fixture_paper','source_url':'https://arxiv.org/abs/2501.00001',
+             'locator':'abstract paragraph 2','retrieved_at':'2026-09-24T00:00:00+00:00'},
+            {'evidence_id':'ev_fixture_resource','source_url':target_resource['url'],
+             'locator':'README candidate link','retrieved_at':'2026-09-24T00:00:00+00:00'},
+        ]
+        client.app.state.store.save_observation(target_resource['id'], {
+            **fixture_source,
+            'agent_association_approvals':[{
+                'run_id':'run_browser_fixture','paper_evidence_id':'ev_fixture_paper',
+                'resource_evidence_id':'ev_fixture_resource','resource_url':target_resource['url'],
+                'resource_checked_at':fixture_source['checked_at'],
+                'resource_scope':fixture_source['scope'],
+                'proposal_evidence_ids':['ev_fixture_paper','ev_fixture_resource'],
+                'proposal_sources':association_source,
+                'proposal_note':'<img src=x onerror=alert(1)> untrusted fixture text',
+                'decision':'confirmed_by_user','confirmed_at':'2026-09-24T00:01:00+00:00',
+            }],
+        }, owner=client.get('/api/export').json()['owner'], kind='observation', origin='fixture')
         page.locator('nav [data-nav="library"]').click()
         completed.append("graph_separates_topic_projection_from_evidence_relations")
         page.locator('.paper-title').filter(has_text='Layered Canvas').click()
         page.locator('dialog.drawer').wait_for()
         page.locator('[data-evidence]').first.click()
         page.locator('#evidence-content').wait_for()
+        association_panel=page.locator('.association-approval')
+        assert association_panel.count()==1
+        assert '用户已批准保存此候选关联' in association_panel.inner_text()
+        assert 'ev_fixture_paper' in association_panel.inner_text()
+        assert fixture_source['scope'] in association_panel.inner_text()
+        assert association_panel.locator('li').count()==2
+        assert association_panel.locator('img').count()==0, 'untrusted rationale must stay text'
+        completed.append("library_keeps_and_displays_confirmed_agent_association_sources")
         page.screenshot(path=str(output_dir/"evidence.png"),full_page=True)
         assert page.locator('#evidence-content').inner_text().find('演示')>=0
         page.keyboard.press('Escape')

@@ -99,7 +99,9 @@ def build_run_matrix(run: dict) -> dict:
             approval_candidates.append({"paper_evidence_id": paper_id,
                                         "resource_evidence_id": resource_id,
                                         "paper": paper, "audits": candidate_audits,
-                                        "relation_evidence_ids": relation_ids})
+                                        "relation_evidence_ids": relation_ids,
+                                        "association_evidence": sources,
+                                        "association_note": str(relation.get("rationale") or "")[:600]})
 
     row_metadata = []
     for evidence_id, document in papers.items():
@@ -134,8 +136,12 @@ def build_run_matrix(run: dict) -> dict:
     return payload
 
 
-def selected_import_items(payload: dict, selections: list[dict]) -> list[dict]:
-    """Resolve row selections against the run's stored report and source evidence."""
+def selected_import_items(payload: dict, selections: list[dict]) -> tuple[list[dict], list[list[dict]]]:
+    """Resolve row selections against the run's stored report and source evidence.
+
+    Return importable source records separately from the trusted association provenance. The latter
+    is produced from this owner's stored run, never from a client-supplied confirmation payload.
+    """
     wanted = {(str(item.get("paper_evidence_id") or ""),
                str(item.get("resource_evidence_id") or "")) for item in selections}
     candidates = {(item["paper_evidence_id"], item["resource_evidence_id"]): item
@@ -143,11 +149,22 @@ def selected_import_items(payload: dict, selections: list[dict]) -> list[dict]:
     if not wanted or not wanted.issubset(candidates):
         raise HTTPException(404, "所选候选关联不属于这个任务，或任务中已没有对应证据")
     by_paper: dict[str, dict] = {}
+    associations_by_paper: dict[str, list[dict]] = {}
     seen_audits: set[tuple] = set()
     for key in sorted(wanted):
         item = candidates[key]
         entry = by_paper.setdefault(item["paper_evidence_id"],
                                     {"paper": item["paper"], "audits": []})
+        associations_by_paper.setdefault(item["paper_evidence_id"], []).append({
+            "run_id": str(payload.get("run_id") or "")[:80],
+            "paper_evidence_id": item["paper_evidence_id"],
+            "resource_evidence_id": item["resource_evidence_id"],
+            "resource_urls": sorted({str(audit.get("resource_url") or "")
+                                      for audit in item["audits"] if audit.get("resource_url")}),
+            "evidence_ids": list(item.get("relation_evidence_ids") or []),
+            "sources": list(item.get("association_evidence") or []),
+            "rationale": str(item.get("association_note") or "")[:600],
+        })
         for audit in item["audits"]:
             checked = ResourceAudit.model_validate(audit).model_dump(mode="json")
             identity = (item["paper_evidence_id"], checked["resource_url"],
@@ -156,4 +173,6 @@ def selected_import_items(payload: dict, selections: list[dict]) -> list[dict]:
             if identity not in seen_audits:
                 entry["audits"].append(checked)
                 seen_audits.add(identity)
-    return list(by_paper.values())
+    items = list(by_paper.values())
+    associations = [associations_by_paper[paper_evidence_id] for paper_evidence_id in by_paper]
+    return items, associations

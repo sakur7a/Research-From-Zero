@@ -123,10 +123,12 @@ Writes `PREFIX.json`, `PREFIX.md` and `PREFIX.csv` from the rows already in the 
 **re-renders, it never re-checks**, so it costs no requests. One row per resource candidate, for
 2–6 papers; wider than that and the file says so rather than pretending to be a comparison set.
 
-Each row carries the audit state, the eight class verdicts, licence declarations, the sources its
-conclusions rest on, and a **`blockers` column**: why this row is not a drop-in baseline. Every
-blocker is a restatement of a field on the row — unchecked, gated, adapter-only weights, a version
-correspondence nobody established, an attribution still unconfirmed — never a new judgement.
+Each row carries the audit state, check time and scope, the eight class verdicts, licence
+declarations, the sources its conclusions rest on, and a **`blockers` column**: why this row is not
+a drop-in baseline. Every blocker is a restatement of a field on the row — unchecked, gated,
+adapter-only weights, a version correspondence nobody established, an attribution still
+unconfirmed — never a new judgement. The version 3 matrix contract adds `scope` to JSON, Markdown
+and CSV so readers can tell what a negative result actually covered.
 
 **A paper with no candidate still gets a row**, carrying the search's own outcome. Dropping it would
 make "searched and found nothing" and "the search failed" look identical in the only artifact a

@@ -236,7 +236,8 @@ function resourceMatrixHtml(payload) {
       + e(row.author_declaration || 'undeclared') + '</span><span>版本对应 '
       + e(row.version_match || 'unknown') + '</span>'
       + (row.checked_at ? '<span>检查时间 ' + e(row.checked_at) + '</span>' : '') + '</div>'
-      + '<details class="matrix-details"><summary>查看覆盖、限制和来源</summary><div class="matrix-coverage">'
+      + '<details class="matrix-details"><summary>查看覆盖、限制和来源</summary><p><b>检查范围</b> '
+      + e(row.scope || '结果未记录') + '</p><div class="matrix-coverage">'
       + coverage + '</div><ul>' + blockers + '</ul><p>' + (row.limitations || []).map(e).join(' · ')
       + '</p><div class="matrix-links">' + sources + '</div></details>'
       + (evidence ? '<details class="matrix-details"><summary>查看候选关联依据</summary><p>'

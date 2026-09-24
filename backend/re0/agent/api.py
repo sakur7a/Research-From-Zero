@@ -195,15 +195,19 @@ def agent_router(runtime, library_store=None):
         if library_store is None:
             raise HTTPException(503, "文献库不可用")
         payload = matrix_for_run(run_id, request)
-        items = selected_import_items(payload, [item.model_dump() for item in data.selections])
-        return library_store.import_audits(items, dry_run=True, owner=owner(request))
+        items, associations = selected_import_items(
+            payload, [item.model_dump() for item in data.selections])
+        return library_store.import_audits(items, dry_run=True, owner=owner(request),
+                                           agent_associations=associations)
 
     @router.post("/runs/{run_id}/matrix/confirm")
     def matrix_import_confirm(run_id: str, data: MatrixImportRequest, request: Request):
         if library_store is None:
             raise HTTPException(503, "文献库不可用")
         payload = matrix_for_run(run_id, request)
-        items = selected_import_items(payload, [item.model_dump() for item in data.selections])
-        return library_store.import_audits(items, dry_run=False, owner=owner(request))
+        items, associations = selected_import_items(
+            payload, [item.model_dump() for item in data.selections])
+        return library_store.import_audits(items, dry_run=False, owner=owner(request),
+                                           agent_associations=associations)
 
     return router
