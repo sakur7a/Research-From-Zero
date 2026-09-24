@@ -67,6 +67,32 @@ export function parseResult(text) {
     return {ok: false, error: '这是 `--resource-matrix` 写出的矩阵文件，不是检索结果。'
       + '这一页读的是 `--json out.json` 那一份，矩阵由同一批 documents 在这里重新渲染。'};
   }
+  if (!Array.isArray(payload.documents) || !payload.documents.every(document =>
+    document && typeof document === 'object' && !Array.isArray(document)
+    && document.paper && typeof document.paper === 'object' && !Array.isArray(document.paper)
+    && (!document.paper.authors || Array.isArray(document.paper.authors))
+    && (!document.sources || Array.isArray(document.sources))
+    && (!document.institutions || Array.isArray(document.institutions))
+    && (!document.resource_audits || (Array.isArray(document.resource_audits)
+      && document.resource_audits.every(audit => audit && typeof audit === 'object'
+        && (!audit.coverage || typeof audit.coverage === 'object')
+        && (!audit.evidence || Array.isArray(audit.evidence))
+        && (!audit.limitations || Array.isArray(audit.limitations))))))) {
+    return {ok: false, error: '结果结构不完整：需要 documents 数组，每条记录包含 paper 对象。'};
+  }
+  const coverage = payload.coverage || {};
+  const audit = payload.audit || {};
+  if ((payload.coverage && (typeof coverage !== 'object' || Array.isArray(coverage)))
+      || (coverage.sources_queried && !Array.isArray(coverage.sources_queried))
+      || (coverage.source_failures && !Array.isArray(coverage.source_failures))
+      || (coverage.attempts && !Array.isArray(coverage.attempts))
+      || (coverage.source_counts && (typeof coverage.source_counts !== 'object'
+        || Array.isArray(coverage.source_counts)))
+      || (payload.audit && (typeof audit !== 'object' || Array.isArray(audit)))
+      || (audit.failures && !Array.isArray(audit.failures))
+      || (audit.name_search?.states && typeof audit.name_search.states !== 'object')) {
+    return {ok: false, error: '检索覆盖或资源审计字段的格式不正确。'};
+  }
   if (payload.schema_version !== SCHEMA_VERSION) {
     // Still rendered: an unknown field rides along rather than being dropped, and a page that
     // refuses to open a newer file is a page that stops working the day the schema moves.

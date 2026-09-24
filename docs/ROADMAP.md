@@ -15,6 +15,14 @@ source archive the visitor has to run.
 
 ## Current baseline
 
+Frontend consolidation implementation: `scripts/build_static_demo.py` now produces the allowlisted
+`dist/static-demo/` output with a dated LoRA historical excerpt, immediate local browser workflow,
+optional JSON import, and no backend navigation or import action. The sample explicitly records that
+it is curated from the public historical README/Skill record, not the original complete search JSON.
+The local static-server browser acceptance is run by `scripts/static_demo_smoke.py`.
+Production acceptance and the final deployment identifier must be recorded after Vercel publishes
+this exact build; a pushed commit alone does not change the site.
+
 The reviewed application commit is `9062b73789f82dbc20e19b1c9e0bde5cfd621238`.
 Its [CI run 35979859151](https://github.com/sakur7a/Research-From-Zero/actions/runs/35979859151)
 passed Python 3.11/3.13, JavaScript, package installation, container, and browser checks.

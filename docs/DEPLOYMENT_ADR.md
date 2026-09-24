@@ -6,6 +6,15 @@
 
 ## Vercel static deployment · 2026-09-24
 
+The frontend-only release is built with `python scripts/build_static_demo.py` into
+`dist/static-demo/` and deployed from **that directory** to the existing `re0-skill-demo` project
+(Framework: Other). The build copies an explicit asset allowlist; `build-info.json` gives the source
+commit and UTC build time. It includes no API route, serverless function, SQLite file or model key.
+The root page opens an interactive, dated historical case; `/search.html` is the same local browser
+workbench, and `/skill.html` retains the detailed static audit. User-provided JSON stays in the
+browser. The previous deployment below is historical and remains the live version until the new
+deployment is confirmed READY and checked anonymously.
+
 - Public URL: [https://re0-skill-demo.vercel.app/](https://re0-skill-demo.vercel.app/).
 - Source snapshot: clean repository commit `54d529a91bdd83f0c6e7f60778c078f56a0fae66`; a temporary 23-file, 197.1 KB package contains the Skill page, its CSS/JS, and the static search viewer assets. No `.data`, SQLite file, `.env`, backend source or API key was uploaded.
 - Vercel project: `re0-skill-demo`; deployment `dpl_69BNpxycDAojbbPvcK9uTD3a83Hp`. The CLI reported `target=production` and assigned the stable alias because this was the project's first deployment, even though the command did not pass `--prod`. The stable URL returned HTTP 200 anonymously; the public Chromium check passed tabs, keyboard navigation, clipboard copy and theme switching with zero page errors or failed assets.

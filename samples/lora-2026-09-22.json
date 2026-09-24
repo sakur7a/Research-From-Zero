@@ -1,0 +1,62 @@
+{
+  "schema_version": "1",
+  "query": "LoRA",
+  "queries": ["LoRA"],
+  "scope": "2026-09-22 公开历史案例整理：仅呈现已记录的 LoRA 论文与 microsoft/LoRA 仓库检查。原始完整检索覆盖和运行参数未保留在此样本中。",
+  "note": "由 README.md 的 2026-09-22 真实运行摘要和 web/skill.html 的历史案例整理；不是原始完整 --json 输出，不是实时检索，也未验证训练流程或作者归属。",
+  "coverage": {
+    "documents": 1,
+    "sources_queried": [],
+    "source_counts": {},
+    "source_failures": [],
+    "incomplete_results": true,
+    "state": "historical_excerpt"
+  },
+  "documents": [{
+    "paper": {
+      "title": "LoRA: Low-Rank Adaptation of Large Language Models",
+      "arxiv_id": "2106.09685",
+      "year": 2021,
+      "paper_url": "https://arxiv.org/abs/2106.09685"
+    },
+    "sources": ["arxiv"],
+    "publication": {"state": "preprint", "label": "预印本", "source": "历史案例中的 arXiv 记录"},
+    "artifact_search": "not-run",
+    "artifact_search_detail": {"reason_not_run": "本样本只重现已记录的资源候选"},
+    "resource_audits": [{
+      "paper_title": "LoRA: Low-Rank Adaptation of Large Language Models",
+      "resource_url": "https://github.com/microsoft/LoRA",
+      "resource_type": "code",
+      "candidate_origin": "论文摘要中的链接候选",
+      "provider": "github",
+      "provider_status": "metadata_accessible",
+      "status": "partially_available",
+      "attribution": "unconfirmed",
+      "author_declaration": "released",
+      "access": "open",
+      "verification_depth": "file_listing",
+      "version_match": "unknown",
+      "revision": "c4593f0",
+      "checked_at": "2026-09-22",
+      "scope": "读取仓库元数据与固定版本文件清单，共 1189 个条目；未下载或运行代码、数据或权重。",
+      "summary": "扫描到训练、推理、评测、权重、数据与环境文件候选；权重文件名显示 LoRA adapter，需对应基础模型。",
+      "licences": {"code": "MIT（仓库声明）"},
+      "coverage": {
+        "code_training": {"state": "present", "sources": ["https://github.com/microsoft/LoRA/tree/c4593f0"]},
+        "code_inference": {"state": "present", "sources": ["https://github.com/microsoft/LoRA/tree/c4593f0"]},
+        "code_evaluation": {"state": "present", "sources": ["https://github.com/microsoft/LoRA/tree/c4593f0"]},
+        "checkpoint": {"state": "present", "sources": ["https://github.com/microsoft/LoRA/blob/c4593f0/examples/NLU/roberta_base_lora_mnli.bin", "https://github.com/microsoft/LoRA/blob/c4593f0/examples/NLU/roberta_large_lora_mnli.bin"]},
+        "dataset": {"state": "present", "sources": ["https://github.com/microsoft/LoRA/tree/c4593f0"]},
+        "data_split": {"state": "present", "sources": ["https://github.com/microsoft/LoRA/tree/c4593f0"]},
+        "preprocessing": {"state": "present", "sources": ["https://github.com/microsoft/LoRA/tree/c4593f0"]},
+        "environment": {"state": "present", "sources": ["https://github.com/microsoft/LoRA/tree/c4593f0"]}
+      },
+      "evidence": [{"category": "provider_metadata", "source_url": "https://github.com/microsoft/LoRA/tree/c4593f0"}],
+      "limitations": [
+        "adapter/LoRA 权重候选需要对应基础模型；本次未验证其对应关系。",
+        "未建立论文版本与仓库版本的对应关系。",
+        "文件清单不证明代码可运行或结果可复现。"
+      ]
+    }]
+  }]
+}

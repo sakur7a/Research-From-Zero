@@ -4,8 +4,8 @@
  * a task — and what is loaded here is the JSON that run wrote. That is deliberate: the search
  * implementation stays in one place, and a page that could not reach it cannot pretend to have run it.
  *
- * Nothing is uploaded. The file is parsed in the browser; the only request this page makes is the
- * same-origin library import the reader explicitly clicks, and that one previews first.
+ * Nothing is uploaded in the static demo. The file is parsed in the browser. In the local backend
+ * workbench only, a reader may explicitly preview and commit a same-origin library import.
  */
 import {icon} from './icons.js';
 import {initTheme} from './theme.js';
@@ -21,6 +21,8 @@ import {
 const main = document.querySelector('#workbench');
 const crumb = document.querySelector('#crumb');
 const notice = document.querySelector('#notice');
+const staticDemo = document.body.dataset.staticDemo === 'true';
+const MAX_RESULT_BYTES = 5 * 1024 * 1024;
 
 const VIEWS = [['coverage', '检索覆盖'], ['candidates', '候选论文'], ['matrix', '资源审计矩阵'],
                ['export', '导出与入库']];
@@ -46,6 +48,16 @@ function visible() { return filterSort(rows(), state.filters); }
 /* --------------------------------------------------------------------------------------- loading */
 
 function loadView() {
+  if (staticDemo) return `<section class="demo-start">
+    <div class="eyebrow">RE0 · 交互式历史案例 <span>2026-09-22</span></div>
+    <h1>从论文候选，走到可核对的资源证据。</h1>
+    <p class="lede">直接体验 LoRA 的一次历史检查：查看检索覆盖、筛选论文、展开资源矩阵，再导出结果。案例由项目公开的历史记录整理；页面不会实时检索，也不会把文件上传到服务器。</p>
+    <div class="demo-start-actions"><button type="button" class="button primary" data-action="load-sample">打开历史案例 →</button>
+    <a class="button" href="/skill.html">阅读 Skill 核验记录</a></div>
+    ${state.error ? `<div class="notice error">${e(state.error)}</div>` : ''}
+    <details class="own-result"><summary>已有 Re0 结果 JSON？在浏览器中打开</summary>${localLoader()}</details>
+    <p class="filter-note">历史样本仅整理已记录的观察，不代表完整检索结果；来源和检查边界见案例内说明。</p>
+  </section>`;
   return `<section>
     <div class="eyebrow">LOCAL RETRIEVAL WORKBENCH<span>读一份已有的检索结果</span></div>
     <h2 style="margin-top:12px">载入 <code>re0 paper search --json</code> 写出的结果</h2>
@@ -74,7 +86,18 @@ re0 paper search --query "layer decomposition" --start-year 2024 \\
   </section>`;
 }
 
+function localLoader() {
+  return `<div class="load-panel"><div class="row"><label class="file-drop">选择结果 JSON<input type="file" id="file" accept=".json,application/json"></label>
+    <span class="subtle">仅在本浏览器解析，最大 5 MB</span></div>
+    <textarea id="paste" spellcheck="false" placeholder='{"schema_version":"1","coverage":{…},"documents":[…]}'></textarea>
+    <button type="button" class="button" data-action="parse-paste">载入粘贴的 JSON</button></div>`;
+}
+
 function accept(text, fileName) {
+  if (new Blob([text]).size > MAX_RESULT_BYTES) {
+    state.result = null; state.error = '文件超过 5 MB，请缩小后再载入'; state.view = 'load';
+    render(); return;
+  }
   const parsed = parseResult(text);
   if (!parsed.ok) {
     state.result = null; state.error = parsed.error; state.warning = '';
@@ -150,6 +173,7 @@ function coverageView() {
       <span class="n">${e(String(count))} 篇</span></li>`).join('') : '';
 
   return `<section>
+    ${staticDemo ? `<div class="demo-context"><b>${state.fileName === '历史案例' ? '历史案例 · 2026-09-22' : '本地导入 · 未经页面核验'}</b><span>这是已有结果的浏览器视图，不会实时检索或保存到云端。</span><button type="button" class="quiet" data-action="back-to-load">切换结果</button></div>` : ''}
     <div class="eyebrow">检索覆盖<span>哪些来源应答了，哪些没有；分母是什么</span></div>
     ${state.warning ? `<div class="notice warn">${e(state.warning)}</div>` : ''}
     ${info.queries.length ? `<p class="lede" style="margin-top:12px"><b>检索式：</b>${
@@ -169,13 +193,18 @@ function coverageView() {
       <ul class="plain-list">${audit.failures.map(item => `<li><span class="err">${e(item)}</span></li>`).join('')}</ul>` : ''}
     ${info.note ? `<p class="lede" style="margin-top:18px"><b>结果自述：</b>${e(info.note)}</p>` : ''}
     ${unrecognised(info)}
+    ${staticDemo ? `<details class="own-result"><summary>复现说明与开发者命令</summary>${replayDetails(command)}</details>` : `
     <h2 style="margin-top:24px">复现这次检索</h2>
     <p class="lede">${command.unknowns.length
       ? `结果里没有记录${command.unknowns.map(item => `<b>${e(item)}</b>`).join('、')}，所以那几项写成占位符而不是猜一个值：一条看起来能跑、实际检索范围不同的命令，比一条承认自己不完整的命令更糟。`
       : '这些参数都来自结果文件自己记录的 <code>coverage.requested</code>，不是猜的。'}</p>
     <div class="load-panel"><pre id="command">${e(command.command)}</pre>
-      <div class="row" style="margin-top:12px"><button type="button" class="button" data-action="copy-command">${icon('note')} 复制命令</button></div></div>
+      <div class="row" style="margin-top:12px"><button type="button" class="button" data-action="copy-command">${icon('note')} 复制命令</button></div></div>`}
   </section>`;
+}
+
+function replayDetails(command) {
+  return `<p class="lede">历史样本由公开记录整理，原始运行参数没有完整保存。下面的命令含占位符，不能视为原始命令。</p><pre>${e(command.command)}</pre>`;
 }
 
 function unrecognised(info) {
@@ -371,11 +400,11 @@ function shorten(url) {
 
 function exportView() {
   const found = matrix(state.result);
-  const items = approvalItems(state.result);
+  const items = staticDemo ? [] : approvalItems(state.result);
   const selected = rows().filter(row => state.selected.has(row.key));
   const report = state.importReport;
   return `<section>
-    <div class="eyebrow">导出与入库<span>候选不进文献库，除非你在这里点一次</span></div>
+    <div class="eyebrow">${staticDemo ? '本地导出' : '导出与入库'}<span>${staticDemo ? '文件和复制内容只在当前浏览器处理' : '候选不进文献库，除非你在这里点一次'}</span></div>
     <div class="export-grid">
       <div class="export-card"><h3>BibTeX</h3>
         <p>勾选候选论文后复制；未勾选时复制当前筛选下显示的全部 ${visible().length} 篇。
@@ -395,7 +424,7 @@ function exportView() {
       <div class="export-card"><h3>原始结果</h3>
         <p>把载入的 JSON 原样下载回去。这一页不修改它：认不出的字段、正文截断的字符数、失败的来源都还在里面。</p>
         <div class="actions"><button type="button" class="button" data-action="download-json">${icon('download')} 下载 JSON</button></div></div>
-      <div class="export-card" id="import-card"><h3>入文献库</h3>
+      ${staticDemo ? '' : `<div class="export-card" id="import-card"><h3>入文献库</h3>
         <p>${items.length} 篇带有可导入的审计记录（没有候选或没有标题的不算：导入它们等于凭空造一条记录）。
           走的是既有接口 <code>POST /api/import/resource-audits</code>，<b>先预览</b>，确认后才是第二步。
           导入只建立关联，不会覆盖已有论文的笔记或字段。</p>
@@ -404,7 +433,7 @@ function exportView() {
           <button type="button" class="button primary" data-action="commit-import" ${report && report.dry_run ? '' : 'disabled'}>写入文献库</button>
         </div>
         ${report ? importReport(report) : ''}
-      </div>
+      </div>`}
     </div>
     <p class="footnote">这一页显示的是<b>检索结果</b>，不是全文，也不是结论。每条状态描述的是本次检查做到了哪一步，
       不是资源是否存在；"检查范围内未找到"与"没有发布"是两件事。要引用的东西请对着论文本身再确认一次。</p>
@@ -464,7 +493,9 @@ function bindLoad() {
     file.addEventListener('change', async () => {
       const picked = file.files && file.files[0];
       if (!picked) return;
-      accept(await picked.text(), picked.name);
+      if (picked.size > MAX_RESULT_BYTES) { state.error = '文件超过 5 MB，请缩小后再载入'; render(); return; }
+      try { accept(await picked.text(), picked.name); }
+      catch { state.error = '文件读取失败，请重新选择'; render(); }
     });
   }
 }
@@ -500,19 +531,23 @@ async function copy(text, what) {
     area.style.opacity = '0';
     document.body.append(area);
     area.select();
-    const ok = document.execCommand('copy');
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch { /* Browser denied fallback too. */ }
     area.remove();
     say(ok ? `${what}已复制到剪贴板` : '复制失败：浏览器不允许，请手动选中复制', !ok);
   }
 }
 
 function download(name, text, type) {
-  const url = URL.createObjectURL(new Blob([text], {type}));
+  let url;
+  try { url = URL.createObjectURL(new Blob([text], {type})); }
+  catch { say('下载失败：浏览器无法创建文件，请尝试复制内容', true); return; }
   const anchor = document.createElement('a');
   anchor.href = url;
   anchor.download = name;
   document.body.append(anchor);
-  anchor.click();
+  try { anchor.click(); }
+  catch { URL.revokeObjectURL(url); anchor.remove(); say('下载失败：浏览器阻止了下载', true); return; }
   anchor.remove();
   setTimeout(() => URL.revokeObjectURL(url), 4000);
   say(`已下载 ${name}`);
@@ -521,6 +556,7 @@ function download(name, text, type) {
 function baseName() { return (state.fileName || 'result').replace(/\.json$/i, ''); }
 
 async function importAudits(dryRun) {
+  if (staticDemo) return;
   const items = approvalItems(state.result);
   if (!items.length) { say('没有可导入的审计记录', true); return; }
   state.busy = true;
@@ -546,7 +582,15 @@ document.addEventListener('click', async (event) => {
     document.querySelector('.side').classList.toggle('mobile-expanded');
     return;
   }
-  if (action === 'back-to-load') { state.view = state.result ? 'coverage' : 'load'; render(); return; }
+  if (action === 'back-to-load') { if (staticDemo) state.result = null; state.view = state.result ? 'coverage' : 'load'; render(); return; }
+  if (action === 'load-sample') {
+    try {
+      const response = await fetch('/samples/lora-2026-09-22.json');
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      accept(await response.text(), '历史案例');
+    } catch { state.error = '历史案例暂时无法载入，请刷新页面重试'; render(); }
+    return;
+  }
   if (action === 'view') { state.view = node.dataset.view; render(); return; }
   if (action === 'parse-paste') {
     const text = document.querySelector('#paste').value.trim();

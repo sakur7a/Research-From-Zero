@@ -3,6 +3,17 @@
    骨架（.side / .shell / .topbar / .paper-card / .tabs / .status …）沿用 agent.css。 */
 
 .workbench{padding:26px 44px 60px;max-width:1400px}
+.demo-start{max-width:940px;padding:48px 0}
+.demo-start h1{font-size:clamp(32px,5vw,58px);letter-spacing:-.045em;line-height:1.14;margin:20px 0;max-width:760px}
+.demo-start .lede{font-size:15px;max-width:680px}
+.demo-start-actions{display:flex;gap:12px;flex-wrap:wrap;margin:28px 0 42px}
+.demo-start-actions .button{font-size:13px;padding:11px 17px;text-decoration:none}
+.own-result{max-width:820px;border-top:1px solid var(--line);padding:17px 0;margin-top:26px}
+.own-result summary{cursor:pointer;color:var(--ink-2);font-size:12px;font-weight:600}
+.own-result .load-panel,.own-result pre{margin-top:14px}
+.demo-context{display:flex;gap:12px;align-items:center;flex-wrap:wrap;border:1px solid var(--accent-line);background:var(--accent-soft);border-radius:10px;padding:12px 15px;margin-bottom:24px;font-size:12px;color:var(--ink-2)}
+.demo-context b{color:var(--accent-strong)}
+.demo-context .quiet{margin-left:auto}
 .workbench section{margin-bottom:34px}
 .workbench h2{font-size:15px;font-weight:600;margin:0 0 4px}
 .workbench h2 .count{font-weight:400;color:var(--ink-3);font-size:12px;margin-left:10px}

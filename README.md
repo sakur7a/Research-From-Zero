@@ -67,7 +67,9 @@ python run.py
 
 `compose.yaml` 只提供托管模式模板：端口仅发布到宿主机回环地址；必须配置会话密钥、HTTPS 入口、允许来源和存储策略，缺失时应用拒绝启动。它不含 TLS 终端，也没有经过真实反向代理或第二账户验收，**不能据此把服务开放到公网**。构建、开户、备份与恢复步骤见[交付说明](docs/DELIVERY.md)。
 
-Vercel 上已有一个公开的静态 Skill 页面，**不含 Re0 API、数据库或任务 worker**；Vercel 将项目首个部署标记为 production。完整 Agent/BYOK 服务尚未部署。Render Free Docker Blueprint（[`render.yaml`](render.yaml)）仍只是全后端候选，使用临时文件系统，数据可能在重启、休眠或重部署后丢失。完整服务的宿主、存储策略、费用上限及竞赛规则仍须由项目所有者确认，见[部署决策记录](docs/DEPLOYMENT_ADR.md)。
+本轮参赛交付范围已收敛为 **Vercel 静态前端 Demo**：打开 `/` 即可体验 2026-09-22 的 LoRA 历史案例，在浏览器里筛选候选、查看资源审计矩阵和来源、复制 BibTeX、下载 CSV/JSON；`/skill.html` 保留原有核验说明。也可在本地浏览器载入自己的 Re0 结果 JSON（上限 5 MB）；页面不会上传它或发起实时检索。样本由本 README 的历史运行摘要整理，**不是原始完整 JSON**，未知的原始覆盖/参数没有补造。完整 Agent/BYOK 服务尚未部署。静态站点更新和边界见[部署决策记录](docs/DEPLOYMENT_ADR.md)。
+
+静态发布包由 `python scripts/build_static_demo.py` 生成在 `dist/static-demo/`，仅包含审定的页面、浏览器模块、样本和 `build-info.json`；Vercel 项目框架设为 Other，以此目录作为项目根目录发布。仓库推送不会自动更新站点。发布后应在匿名浏览器核对 `/`、`/search.html`、`/skill.html`、`/build-info.json`、404 和下载等路径，不能将代码提交当成部署成功。
 
 ## v0.2 已实现的架构
 
