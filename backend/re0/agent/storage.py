@@ -502,7 +502,9 @@ class TaskStore:
                 return json.loads(row[0])
             result = {k: v for k, v in payload.items() if k != "documents"}
             result["evidence"] = []
-            for doc in payload.get("documents", [])[:12]:
+            # Keep every bounded retrieval candidate here; context compaction happens in the
+            # runtime view, while reports and later read-back need the source-backed IDs intact.
+            for doc in payload.get("documents", []):
                 eid = "ev_" + uuid4().hex[:16]
                 evidence = {**doc, "tool": tool, "retrieved_at": now()}
                 con.execute("INSERT INTO agent_evidence VALUES (?,?,?,?)", (eid, rid, cid, encode(evidence)))

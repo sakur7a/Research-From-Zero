@@ -320,14 +320,23 @@ class ChatModel:
         """Install a task-owned request/deadline budget, separate from model-call count."""
         self._request_authorizer = callback
 
+    def _request_payload(self, messages: list[dict], tools: list[dict], *, force_tool=None) -> dict:
+        payload = {"model": self.config.model, "messages": messages, "tools": tools,
+                   self.config.token_parameter: self.config.max_output_tokens,
+                   "tool_choice": {"type": "function", "function": {"name": force_tool}}
+                   if force_tool else "auto", "stream": False}
+        return payload
+
+    def measure_request_chars(self, messages: list[dict], tools: list[dict], *, force_tool=None) -> int:
+        """Measure the same serialized request that `complete` will send."""
+        payload = self._request_payload(messages, tools, force_tool=force_tool)
+        return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+
     def complete(self, messages: list[dict], tools: list[dict], *, timeout=60, force_tool=None) -> dict:
         if self._call_authorizer is not None:
             self._call_authorizer()
         self.config = validate_endpoint(self.config, hosted=self.hosted)
-        payload = {"model": self.config.model, "messages": messages, "tools": tools,
-                   self.config.token_parameter: self.config.max_output_tokens,
-                   "tool_choice": {"type": "function", "function": {"name": force_tool}} if force_tool else "auto",
-                   "stream": False}
+        payload = self._request_payload(messages, tools, force_tool=force_tool)
         serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         request_chars, request_body = len(serialized), serialized.encode("utf-8")
         if request_chars > 150000:

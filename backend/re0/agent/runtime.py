@@ -38,7 +38,7 @@ SESSION_KEY = "session_defaults"
 # result is re-sent on every later model call, so its size multiplies by turn count.
 EVIDENCE_EXCERPT_CHARS = 6000   # one evidence item may claim the whole per-call budget
 TOOL_EXCERPT_BUDGET = 6000      # excerpt characters one tool result may add to the conversation
-CONTEXT_COMPACT_CHARS = 110000  # elide older excerpts before the 150k serialized hard cap
+CONTEXT_COMPACT_CHARS = 110000  # full request target, including tool schemas, before the 150k hard cap
 KEEP_RECENT_TOOL_MESSAGES = 2   # recent tool results whose excerpts survive compaction
 RESEARCH_SCOPE_INSTRUCTIONS = {
     "focused": ("先用一条聚焦查询、约 3 篇候选、少量相关来源和 1 页建立证据；根据问题和实际缺口再补查。"
@@ -366,7 +366,7 @@ class AgentRuntime:
                 "truncated": end < len(body),
                 "note": "这是证据库保存的来源摘录切片，不是原始文献全文；需要后续内容时用 offset 继续。"}
 
-    def compact_context(self, rid, state) -> int:
+    def compact_context(self, rid, state, *, preserve_recent=KEEP_RECENT_TOOL_MESSAGES) -> int:
         """Drop excerpts from older tool results once the context grows large.
 
         Evidence rows are never deleted and the model is told how to fetch a body
@@ -374,26 +374,34 @@ class AgentRuntime:
         context. The most recent tool results keep their excerpts.
         """
         positions = [index for index, message in enumerate(state["messages"]) if message.get("role") == "tool"]
-        older = positions[:-KEEP_RECENT_TOOL_MESSAGES] if KEEP_RECENT_TOOL_MESSAGES > 0 else positions
+        older = positions[:-preserve_recent] if preserve_recent > 0 else positions
         elided = 0
         for index in older:
             try:
                 body = json.loads(state["messages"][index]["content"])
             except (TypeError, ValueError):
                 continue
-            dropped = [item for item in body.get("evidence", []) if item.get("excerpt")]
-            for item in dropped:
-                item["excerpt"] = ""
-                item["elided"] = True
+            dropped = 0
+            for item in body.get("evidence", []):
+                changed = False
+                if item.get("excerpt"):
+                    item["excerpt"] = ""
+                    item["elided"] = True
+                    changed = True
                 if isinstance(item.get("paper"), dict):
+                    abstract = str(item["paper"].get("abstract") or "")
                     self._compact_paper(item["paper"], abstract_limit=0)
+                    changed = changed or bool(abstract)
                 if isinstance(item.get("resource_audits"), list):
-                    item["resource_audits"] = [self._compact_audit(audit, detail=False)
-                                                for audit in item["resource_audits"]]
+                    audits = item["resource_audits"]
+                    compacted = [self._compact_audit(audit, detail=False) for audit in audits]
+                    item["resource_audits"] = compacted
+                    changed = changed or compacted != audits
+                dropped += int(changed)
             if dropped:
                 body["evidence_note"] = "较早的摘录已从上下文移除以控制体积；证据未删除，用 read_evidence 按 id 取回。"
                 state["messages"][index]["content"] = json.dumps(body, ensure_ascii=False)
-                elided += len(dropped)
+                elided += dropped
         if elided:
             state["messages"].append({"role": "user", "content": "为控制上下文体积，较早的工具结果摘录已移除（证据本身未删除）。需要正文时调用 read_evidence 并传入证据 id。"})
             self.tasks.checkpoint(rid, state)
@@ -1007,8 +1015,16 @@ class AgentRuntime:
                     tools = [x for x in tools if x["function"]["name"] == "finish_report"]
                 state["offered_tools"] = [x["function"]["name"] for x in tools]
                 self.tasks.checkpoint(rid, state)
-                # Elide older excerpts well before the serialized hard cap in ChatModel.
-                if len(json.dumps(state["messages"], ensure_ascii=False)) > CONTEXT_COMPACT_CHARS:
+                # Measure the same serialized shape the provider receives, including tool schemas.
+                # Preserve recent excerpts when possible, then elide them too if the full request
+                # would otherwise exceed the model budget. Complete evidence remains in storage.
+                measure_request = getattr(model, "measure_request_chars", None)
+                if callable(measure_request):
+                    for preserve_recent in (KEEP_RECENT_TOOL_MESSAGES, 1, 0):
+                        if measure_request(state["messages"], tools) <= CONTEXT_COMPACT_CHARS:
+                            break
+                        self.compact_context(rid, state, preserve_recent=preserve_recent)
+                elif len(json.dumps(state["messages"], ensure_ascii=False)) > CONTEXT_COMPACT_CHARS:
                     self.compact_context(rid, state)
                 self._authorize_model_lease(owner, generation)
 

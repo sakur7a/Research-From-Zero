@@ -423,6 +423,7 @@ def test_chunks_are_bounded_and_carry_their_own_hash():
 
 def test_the_tool_description_carries_the_contract_a_model_has_to_obey():
     description = TOOL_TYPES["fetch_paper_text"][1]
+    assert len(description) <= 950
     for fragment in ("no url", "DOI is REFUSED", "scan_only", "back_matter", "untrusted",
                      "arxiv.org", "ACL Anthology"):
         assert fragment in description, f"the description lost: {fragment}"

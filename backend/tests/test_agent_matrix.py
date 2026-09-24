@@ -5,6 +5,7 @@ import threading
 import time
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 import re0.agent.runtime as runtime_module
@@ -33,6 +34,13 @@ def atom_feed():
     return (f'<feed xmlns="http://www.w3.org/2005/Atom">{entries}</feed>').encode()
 
 
+def inverted_index(text):
+    index = {}
+    for position, word in enumerate(text.split()):
+        index.setdefault(word, []).append(position)
+    return index
+
+
 def tool_completion(call_id, name, args):
     return {"choices": [{"finish_reason": "tool_calls", "message": {
         "role": "assistant", "content": None, "tool_calls": [{
@@ -52,10 +60,12 @@ def collect_evidence(messages):
 
 
 class MatrixFixture:
-    def __init__(self):
+    def __init__(self, *, five_queries_three_pages=False):
         self.requests = []
         self.model_calls = 0
         self.sequence = 0
+        self.five_queries_three_pages = five_queries_three_pages
+        self.queries = [f"layer decomposition wording {index}" for index in range(5)]
         self.tree_by_repo = {
             "lab/shared-baseline": ["train.py", "evaluate.py", "requirements.txt"],
             "lab/adapter-resource": ["train.py", "adapter_model.safetensors"],
@@ -66,6 +76,45 @@ class MatrixFixture:
         self.requests.append(request)
         if request.url.host == "export.arxiv.org":
             return httpx.Response(200, content=atom_feed(), headers={"Content-Type": "application/atom+xml"})
+        if request.url.host == "api.openalex.org":
+            assert self.five_queries_three_pages, request.url
+            query_index = self.queries.index(request.url.params["search"])
+            cursor = request.url.params["cursor"]
+            page_index = 0 if cursor == "*" else int(cursor)
+            if query_index == 0 and page_index == 0:
+                records = [
+                    {"id": f"https://openalex.org/W2501{index}",
+                     "doi": f"https://doi.org/10.48550/arXiv.{identifier}",
+                     "title": title, "publication_year": 2025, "type": "preprint",
+                     "authorships": [{"author": {"display_name": "Fixture Author"},
+                                      "institutions": []}],
+                     "primary_location": {"source": {"display_name": "arXiv",
+                                                        "type": "repository"}},
+                     "abstract_inverted_index": inverted_index(abstract), "cited_by_count": 1}
+                    for index, (identifier, title, abstract) in enumerate(PAPERS)
+                ]
+            else:
+                records = []
+                for item_index in range(3):
+                    serial = 3 + (query_index * 3 + page_index) * 3 + item_index
+                    identifier = f"2601.{serial:05d}"
+                    abstract = ("Long paginated abstract. " + "evidence detail " * 450
+                                + f"query {query_index} page {page_index} result {item_index}.")
+                    records.append({
+                        "id": f"https://openalex.org/W{serial:08d}",
+                        "doi": f"https://doi.org/10.48550/arXiv.{identifier}",
+                        "title": f"Paged fixture work {serial}", "publication_year": 2025,
+                        "type": "preprint",
+                        "authorships": [{"author": {"display_name": "Fixture Author"},
+                                         "institutions": []}],
+                        "primary_location": {"source": {"display_name": "arXiv",
+                                                           "type": "repository"}},
+                        "abstract_inverted_index": inverted_index(abstract), "cited_by_count": serial,
+                    })
+            return httpx.Response(200, json={
+                "results": records,
+                "meta": {"next_cursor": str(page_index + 1) if page_index < 2 else None},
+            })
         if request.url.host == "api.github.com":
             path = request.url.path.removeprefix("/repos/")
             if path == "lab/failing-resource":
@@ -101,8 +150,12 @@ class MatrixFixture:
             return httpx.Response(200, json=tool_completion(
                 call_id, "update_plan", {"steps": ["查找三篇论文", "核验公开资源", "形成带来源的比较"]}))
         if call == 2:
+            search_args = ({"query": self.queries[0], "queries": self.queries,
+                            "source": "openalex", "limit": 3, "max_pages": 3,
+                            "max_requests": 40} if self.five_queries_three_pages else
+                           {"query": "LayerKit", "source": "arxiv", "limit": 3})
             return httpx.Response(200, json=tool_completion(
-                call_id, "search_papers", {"query": "LayerKit", "source": "arxiv", "limit": 3}))
+                call_id, "search_papers", search_args))
         if call in {3, 4, 5, 6}:
             urls = ["https://github.com/lab/shared-baseline",
                     "https://github.com/lab/adapter-resource",
@@ -112,6 +165,8 @@ class MatrixFixture:
                 call_id, "inspect_resource", {"url": urls[call - 3]}))
         if call == 7:
             evidence = collect_evidence(data["messages"])
+            if self.five_queries_three_pages:
+                assert sum(item.get("kind") == "paper" for item in evidence) == 45
             papers = {item["paper"]["arxiv_id"]: item for item in evidence
                       if item.get("kind") == "paper" and item.get("paper")}
             resources = {item["source_url"]: item for item in evidence
@@ -408,11 +463,14 @@ def test_live_agent_run_builds_evidence_linked_matrix_and_batches_human_approval
         assert len(second_page["evidence"]) == 10 and second_page["has_more_evidence"] is False
 
 
-def test_long_papers_and_resource_audits_fit_the_measured_model_request_budget(tmp_path, monkeypatch):
+@pytest.mark.parametrize("five_queries_three_pages", [False, True],
+                         ids=["one-query", "five-queries-three-pages"])
+def test_long_papers_and_resource_audits_fit_the_measured_model_request_budget(
+        tmp_path, monkeypatch, five_queries_three_pages):
     monkeypatch.setattr(__import__(__name__), "PAPERS", [
         (identifier, title, "Long fixture abstract. " + "evidence detail " * 900)
         for identifier, title, _ in PAPERS])
-    fixture = MatrixFixture()
+    fixture = MatrixFixture(five_queries_three_pages=five_queries_three_pages)
     long_paths = ([f"experiments/long-path/for-evaluation-and-training-artifacts/{index:03d}_train.py"
                    for index in range(60)]
                   + [f"data/train_split_{index:03d}.parquet" for index in range(20)])
@@ -423,17 +481,44 @@ def test_long_papers_and_resource_audits_fit_the_measured_model_request_budget(t
         started = client.post("/api/agent/runs", json=GOAL)
         assert started.status_code == 202, started.text
         run = wait_done(client, started.json()["id"])
-        assert run["status"] == "completed", run
+        assert run["status"] == "completed", {"error": run.get("error"),
+                                               "model_calls": run.get("model_calls"),
+                                               "tool_calls": run.get("tool_calls"),
+                                               "upstream_requests": run.get("upstream_requests")}
         model_requests = [item for item in fixture.requests if item.url.path.endswith("/chat/completions")]
         request_chars = [len(item.content.decode("utf-8")) for item in model_requests]
         request_bytes = [len(item.content) for item in model_requests]
         assert run["model_calls"] == 7 and run["tool_calls"] == 7
-        assert run["upstream_requests"] == len(fixture.requests) == 24
+        assert run["upstream_requests"] == len(fixture.requests)
         assert run["model_request_chars"] == sum(request_chars)
         assert run["model_request_bytes"] == sum(request_bytes)
         assert max(request_chars) == run["largest_model_request_chars"] < 150_000
-        assert max(request_bytes) == run["largest_model_request_bytes"]
-        assert len(run["report"]["resource_links"]) == 3 and len(run["evidence"]) == 29
+        assert max(request_bytes) == run["largest_model_request_bytes"] < 150_000
+        assert len(run["report"]["resource_links"]) == 3
+        papers = [item for item in run["evidence"] if item.get("kind") == "paper"]
+        if five_queries_three_pages:
+            openalex_requests = [item for item in fixture.requests if item.url.host == "api.openalex.org"]
+            assert len(openalex_requests) == 15
+            assert {item.url.params["search"] for item in openalex_requests} == set(fixture.queries)
+            assert all([item.url.params["cursor"] for item in openalex_requests
+                        if item.url.params["search"] == query] == ["*", "1", "2"]
+                       for query in fixture.queries)
+            assert len(papers) == 45, sorted(item["paper"].get("arxiv_id", "") for item in papers)
+            assert run["upstream_requests"] == len(fixture.requests)
+            source_host, locator_source = "https://doi.org/10.48550/arXiv.", "openalex"
+        else:
+            assert run["upstream_requests"] == len(fixture.requests) == 24
+            assert len(papers) == 3 and len(run["evidence"]) == 29
+            source_host, locator_source = "https://arxiv.org/abs/", "arxiv"
+        all_ids = {item["id"] for item in run["evidence"]}
+        cited_ids = {evidence_id for finding in run["report"]["findings"]
+                     for evidence_id in finding["evidence_ids"]}
+        assert cited_ids and cited_ids <= all_ids
+        cited_papers = [item for item in papers if item["id"] in cited_ids]
+        assert cited_papers and all(item["source_url"].startswith(source_host)
+                                    and item["locator"].startswith(f"metadata from {locator_source}")
+                                    for item in cited_papers)
+        assert max(len(item["paper"]["abstract"]) for item in papers) > 7_500
 
 
 def test_task_wide_upstream_budget_spans_model_and_tools_and_reserves_a_report_call(tmp_path):

@@ -485,6 +485,24 @@ def test_only_the_destination_being_down_opens_it_for_everybody(tmp_path):
         release(down)
 
 
+@pytest.mark.parametrize("status", [401, 402, 403, 404])
+def test_user_correctable_provider_statuses_do_not_open_destination_breaker(tmp_path, status):
+    class UserError:
+        def complete(self, messages, tools, timeout=None):
+            raise ModelError(f"fixture HTTP {status}", destination=False, status=status)
+
+    model = UserError()
+    app = local_app(tmp_path, quota=generous(), model=model, name=f"user-error-{status}")
+    with TestClient(app, headers=WRITE) as client:
+        assert client.put("/api/agent/config", json=CONFIG).status_code == 200
+        started = client.post("/api/agent/runs", json=GOAL)
+        assert started.status_code == 202
+        assert release(app)
+        run = client.get(f"/api/agent/runs/{started.json()['id']}").json()
+        assert run["status"] == "failed" and f"{status}" in run["error"]
+        assert breaker_state(client) == "closed"
+
+
 def test_provider_one_outage_does_not_block_provider_two_or_let_its_probe_clear_provider_one(tmp_path):
     requests, deepseek_calls = [], 0
     atom = b'''<feed xmlns="http://www.w3.org/2005/Atom"><entry>

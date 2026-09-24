@@ -34,6 +34,12 @@
 - Replace paired detail/event polling with an owner-scoped progress cursor for bounded event and
   evidence pages. The browser updates incrementally, preserves current interaction state, stops on
   401/completion, honors 429 Retry-After and backs off during network errors.
+- Persist all bounded search candidates for the task, while compacting old excerpts and abstracts
+  based on the serialized request size including tool schemas. The wide regression covers five
+  queries over three OpenAlex pages, keeps all 45 evidence records and their source IDs/locators,
+  and remains under the request hard cap.
+- Shorten the repeated search, resource-inspection and full-text model descriptions to their
+  operating limits and safety rules; detailed procedures remain in the Skill references and docs.
 - Offline fixed-fixture A/B kept the same 7 model calls, 7 tool calls, 24 upstream requests, 29
   evidence records, 3 resource links and report output. Three-run body totals fell from 453,427 to
   340,473 bytes (24.9%); median harness time was 1.10s vs 1.62s, so this fixture shows no latency

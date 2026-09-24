@@ -456,6 +456,7 @@ def test_the_retrieval_rules_reach_every_consumer_that_reads_them():
     from re0.agent.tools import TOOL_TYPES
 
     description = TOOL_TYPES["search_papers"][1]
+    assert len(description) <= 1200, "keep the repeated model-call description compact"
     assert "recall ceiling" in description, "the model cannot know limit bounds recall"
     assert "short queries" in description, "the model cannot know how to phrase a query"
     assert "every identifier" in description
@@ -827,6 +828,7 @@ def test_the_documented_flag_contract_matches_the_parser():
     assert "candidate files: training=" not in skill
 
     description = TOOL_TYPES["inspect_resource"][1]
+    assert len(description) <= 700
     assert "not_found_in_scope" in description and "provider_status" in description
     assert "adapter" in description and "attribution" in description
 
