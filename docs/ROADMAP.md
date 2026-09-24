@@ -21,10 +21,12 @@ optional JSON import, and no backend navigation or import action. The sample exp
 it is curated from the public historical README/Skill record, not the original complete search JSON.
 The local static-server browser acceptance is run by `scripts/static_demo_smoke.py`.
 The stable [public HTTPS alias](https://re0-skill-demo.vercel.app/) now points to deployment
-`dpl_EPiM6tSoty5nQXABpJkHvPkg18Cf` (READY, production). Public `build-info.json` records source
-commit `8307d0925ef1348388b43a715a689646e9c3b1f0` and UTC build time
-`2026-09-24T11:20:58.819202+00:00`. The built-directory and anonymous HTTPS browser checks passed
-sample loading, filtering, matrix/source expansion, copy/download, malformed/oversized/hostile JSON,
+`dpl_HLVV2ixC5EEBKrVWde47y88vEzAr` (READY, production). Public `build-info.json` records source
+commit `e5850b80ff886dee060c45a71588735eea1a6bda` and UTC build time
+`2026-09-24T14:46:29.901316+00:00`. This update presents candidates as cards with clickable
+metadata previews and concise dialogs; the previews are not PDF page images. The built-directory
+and anonymous HTTPS browser checks passed sample loading, card/detail interactions, filtering,
+matrix/source expansion, copy/download, malformed/oversized/hostile JSON,
 clipboard/download failure, mobile navigation, keyboard use and refresh. No page errors, missing
 assets or unexpected external/API requests were observed. `/api/health` and unknown pages returned
 404. Publishing remains manual; a Git push alone does not change the site.

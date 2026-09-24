@@ -12,11 +12,12 @@ The frontend-only release is built with `python scripts/build_static_demo.py` in
 commit and UTC build time. It includes no API route, serverless function, SQLite file or model key.
 The root page opens an interactive, dated historical case; `/search.html` is the same local browser
 workbench, and `/skill.html` retains the detailed static audit. User-provided JSON stays in the
-browser. The current production deployment is `dpl_EPiM6tSoty5nQXABpJkHvPkg18Cf` at
+browser. The current production deployment is `dpl_HLVV2ixC5EEBKrVWde47y88vEzAr` at
 [https://re0-skill-demo.vercel.app/](https://re0-skill-demo.vercel.app/). Vercel reported READY;
 anonymous Chromium passed `scripts/static_demo_smoke.py` against the stable alias. The public
-`build-info.json` reports source commit `8307d0925ef1348388b43a715a689646e9c3b1f0` and
-UTC build time `2026-09-24T11:20:58.819202+00:00`. Root, `/search.html`, `/skill.html`,
+`build-info.json` reports source commit `e5850b80ff886dee060c45a71588735eea1a6bda` and
+UTC build time `2026-09-24T14:46:29.901316+00:00`. Candidate cards have clickable metadata
+previews that open concise details; these are not captured PDF pages. Root, `/search.html`, `/skill.html`,
 old `/static/search.html` and `/static/skill.html` routes work. `/api/health` and unknown pages
 return 404. The check found no missing assets, unexpected external/API requests or page errors.
 

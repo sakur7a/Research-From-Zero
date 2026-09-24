@@ -114,13 +114,13 @@ def run(origin: str) -> None:
         page.locator(".candidate-preview").first.click()
         assert page.locator("#paper-detail").is_visible()
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-        assert context.request.get(origin + "/static/search.html").status == 200
-        assert context.request.get(origin + "/static/skill.html").status == 200
+        assert page.goto(origin + "/static/search.html", wait_until="networkidle").status == 200
+        assert page.goto(origin + "/static/skill.html", wait_until="networkidle").status == 200
         assert not errors, errors
         assert not forbidden, forbidden
         assert not [item for item in bad_responses if item[1].endswith((".js", ".css", ".svg", ".json"))], bad_responses
-        assert context.request.get(origin + "/api/health").status == 404
-        assert context.request.get(origin + "/missing-page").status == 404
+        assert page.goto(origin + "/api/health", wait_until="domcontentloaded").status == 404
+        assert page.goto(origin + "/missing-page", wait_until="domcontentloaded").status == 404
         print(f"PASS static browser flow: {origin}; no page errors or forbidden requests")
         browser.close()
 

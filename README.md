@@ -6,7 +6,7 @@
 
 ## 快速入口
 
-- **打开 Demo** — [Vercel 交互式前端](https://re0-skill-demo.vercel.app/)：可直接体验有日期的历史案例、筛选、资源矩阵和导出；不调用后端或模型。当前页面源码为 `8307d09`，不会随 GitHub 推送自动更新；它不是实时在线 Agent。
+- **打开 Demo** — [Vercel 交互式前端](https://re0-skill-demo.vercel.app/)：可直接体验有日期的历史案例、论文卡片与详情、筛选、资源矩阵和导出；不调用后端或模型。当前页面源码为 `e5850b8`，不会随 GitHub 推送自动更新；它不是实时在线 Agent。
 - **本地使用** — [启动 Re0](#启动)，配置自己的工具调用模型后运行任务。
 - **当前能力与限制** — 查看[路线图](docs/ROADMAP.md)、[安全边界](SECURITY.md)和[部署说明](docs/DEPLOYMENT_ADR.md)。
 
