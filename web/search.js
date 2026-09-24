@@ -25,7 +25,7 @@ const staticDemo = document.body.dataset.staticDemo === 'true';
 const MAX_RESULT_BYTES = 5 * 1024 * 1024;
 
 const VIEWS = [['coverage', '检索覆盖'], ['candidates', '候选论文'], ['matrix', '资源审计矩阵'],
-               ['export', '导出与入库']];
+               ['export', staticDemo ? '本地导出' : '导出与入库']];
 
 const state = {
   fileName: '', result: null, warning: '', error: '', view: 'load',
@@ -472,6 +472,7 @@ function tabs() {
 
 function render() {
   initTheme();
+  if (staticDemo) document.querySelector('.topbar [data-action="back-to-load"]').hidden = !state.result;
   if (!state.result) {
     crumb.textContent = state.fileName ? `${state.fileName} · 未能载入` : '尚未载入结果';
     main.innerHTML = loadView();

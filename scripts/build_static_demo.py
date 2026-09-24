@@ -45,6 +45,7 @@ def main() -> None:
     search = search.replace('Re0 · 检索工作台', 'Re0 · 交互式历史案例')
     (OUT / "index.html").write_text(search, encoding="utf-8")
     (OUT / "search.html").write_text(search, encoding="utf-8")
+    (OUT / "static" / "search.html").write_text(search, encoding="utf-8")
 
     skill = (WEB / "skill.html").read_text(encoding="utf-8")
     skill = skill.replace('./search.html', '/search.html').replace('./skill.html', '/skill.html')
@@ -52,6 +53,7 @@ def main() -> None:
         skill = skill.replace(f'./{name}', f'/static/{name}')
     skill = skill.replace('检索结果工作台 <span>JSON</span>', '交互式历史案例 <span>体验</span>')
     (OUT / "skill.html").write_text(skill, encoding="utf-8")
+    (OUT / "static" / "skill.html").write_text(skill, encoding="utf-8")
     (OUT / "404.html").write_text('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>页面不存在 · Re0</title><h1>页面不存在</h1><p><a href="/">返回演示首页</a></p></html>', encoding="utf-8")
     (OUT / "vercel.json").write_text(json.dumps({"framework": None, "cleanUrls": False}, ensure_ascii=False), encoding="utf-8")
 
@@ -60,7 +62,6 @@ def main() -> None:
             "scope": "static frontend demo; no API or backend"}
     (OUT / "build-info.json").write_text(json.dumps(info, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"Built {OUT} from {commit}: {sum(1 for file in OUT.rglob('*') if file.is_file())} allowlisted files")
-
 
 if __name__ == "__main__":
     main()

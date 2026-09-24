@@ -29,6 +29,11 @@ def run(origin: str) -> None:
                 if response.status >= 400 else None)
         assert page.goto(origin + "/", wait_until="networkidle").status == 200
         assert "从论文候选" in page.locator("h1").inner_text()
+        page.locator('[data-theme-toggle]').click()
+        assert page.locator("html").get_attribute("data-theme") == "dark"
+        page.reload(wait_until="networkidle")
+        assert page.locator("html").get_attribute("data-theme") == "dark"
+        page.locator('[data-theme-toggle]').click()
         page.get_by_role("button", name="打开历史案例").click()
         page.get_by_role("button", name="候选论文").click()
         assert "LoRA: Low-Rank" in page.locator("#candidate-list").inner_text()
@@ -71,6 +76,11 @@ def run(origin: str) -> None:
         assert page.locator("#candidate-list img").count() == 0
         assert page.evaluate("window.xss === undefined")
         assert page.locator('#candidate-list a[href^="javascript:"]').count() == 0
+        page.locator('[data-action="back-to-load"]').click()
+        page.locator("details.own-result summary").click()
+        page.locator("#file").set_input_files(str(Path(__file__).resolve().parents[1] /
+                                              "samples" / "lora-2026-09-22.json"))
+        assert "历史案例" not in page.locator("#crumb").inner_text()
         assert page.goto(origin + "/skill.html", wait_until="networkidle").status == 200
         page.get_by_role("tab", name="未确认项").focus()
         page.keyboard.press("ArrowLeft")
@@ -80,6 +90,10 @@ def run(origin: str) -> None:
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         assert page.goto(origin + "/search.html", wait_until="networkidle").status == 200
         assert "从论文候选" in page.locator("h1").inner_text()
+        page.locator('[data-action="menu"]').click()
+        assert "mobile-expanded" in page.locator(".side").get_attribute("class")
+        assert context.request.get(origin + "/static/search.html").status == 200
+        assert context.request.get(origin + "/static/skill.html").status == 200
         assert not errors, errors
         assert not forbidden, forbidden
         assert not [item for item in bad_responses if item[1].endswith((".js", ".css", ".svg", ".json"))], bad_responses
