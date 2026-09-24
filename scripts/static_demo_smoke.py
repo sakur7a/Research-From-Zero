@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from playwright.sync_api import sync_playwright
 
@@ -22,9 +23,8 @@ def run(origin: str) -> None:
         page = context.new_page()
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.on("request", lambda request: forbidden.append(request.url) if
-                (request.url.startswith(("http://127.0.0.1", "http://localhost")) and
-                 not origin.startswith(("http://127.0.0.1", "http://localhost"))) or
-                "/api/" in request.url or "openai.com" in request.url else None)
+                urlsplit(request.url).netloc != urlsplit(origin).netloc or
+                "/api/" in request.url else None)
         page.on("response", lambda response: bad_responses.append((response.status, response.url))
                 if response.status >= 400 else None)
         assert page.goto(origin + "/", wait_until="networkidle").status == 200
@@ -65,6 +65,10 @@ def run(origin: str) -> None:
         page.locator("#paste").fill("{bad")
         page.locator('[data-action="parse-paste"]').click()
         assert "不是合法 JSON" in page.locator(".demo-start .notice.error").inner_text()
+        page.locator("details.own-result summary").click()
+        page.locator("#file").set_input_files({"name": "large.json", "mimeType": "application/json",
+                                                 "buffer": b"x" * (5 * 1024 * 1024 + 1)})
+        assert "超过 5 MB" in page.locator(".demo-start .notice.error").inner_text()
         hostile = json.loads((Path(__file__).resolve().parents[1] / "samples" /
                               "lora-2026-09-22.json").read_text(encoding="utf-8"))
         hostile["documents"][0]["paper"]["title"] = '<img src=x onerror="window.xss=1">'

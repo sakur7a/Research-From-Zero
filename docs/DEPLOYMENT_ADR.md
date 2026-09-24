@@ -1,7 +1,7 @@
 # ADR: Hosted Re0 Web Demo
 
-- **Status:** the static Skill demo is live on Vercel; host/storage for the full backend remains undecided.
-- **Decision:** use Vercel for the read-only Skill demo. Keep the Render Free Docker template as an unelected candidate for the full FastAPI service.
+- **Status:** the interactive static frontend demo is live on Vercel; host/storage for the full backend remains undecided.
+- **Decision:** use Vercel for this frontend release. Keep the Render Free Docker template as an unelected candidate for the full FastAPI service.
 - **Scope:** the Vercel deployment is a static UI snapshot. It does not deploy the API, database, task worker or model configuration.
 
 ## Vercel static deployment · 2026-09-24
@@ -12,8 +12,21 @@ The frontend-only release is built with `python scripts/build_static_demo.py` in
 commit and UTC build time. It includes no API route, serverless function, SQLite file or model key.
 The root page opens an interactive, dated historical case; `/search.html` is the same local browser
 workbench, and `/skill.html` retains the detailed static audit. User-provided JSON stays in the
-browser. The previous deployment below is historical and remains the live version until the new
-deployment is confirmed READY and checked anonymously.
+browser. The current production deployment is `dpl_EPiM6tSoty5nQXABpJkHvPkg18Cf` at
+[https://re0-skill-demo.vercel.app/](https://re0-skill-demo.vercel.app/). Vercel reported READY;
+anonymous Chromium passed `scripts/static_demo_smoke.py` against the stable alias. The public
+`build-info.json` reports source commit `8307d0925ef1348388b43a715a689646e9c3b1f0` and
+UTC build time `2026-09-24T11:20:58.819202+00:00`. Root, `/search.html`, `/skill.html`,
+old `/static/search.html` and `/static/skill.html` routes work. `/api/health` and unknown pages
+return 404. The check found no missing assets, unexpected external/API requests or page errors.
+
+To update manually: run `python scripts/build_static_demo.py`, link `dist/static-demo/` to the
+existing project with `vercel link --project re0-skill-demo --cwd dist/static-demo`, then run
+`vercel deploy --prod --cwd dist/static-demo`. Recheck READY, the stable alias, public
+`build-info.json`, and `python scripts/static_demo_smoke.py https://re0-skill-demo.vercel.app`
+with Playwright Chromium available. A Git push alone does not publish a new version.
+
+### Previous static Skill snapshot
 
 - Public URL: [https://re0-skill-demo.vercel.app/](https://re0-skill-demo.vercel.app/).
 - Source snapshot: clean repository commit `54d529a91bdd83f0c6e7f60778c078f56a0fae66`; a temporary 23-file, 197.1 KB package contains the Skill page, its CSS/JS, and the static search viewer assets. No `.data`, SQLite file, `.env`, backend source or API key was uploaded.
@@ -81,7 +94,7 @@ backup/restore path is verified. The Render Free template intentionally does not
 4. Complete issue #18 guest/BYOK work, then verify a real HTTPS login/guest session, a second isolated
    browser, restart behavior, and the complete agent → resource review → export flow.
 5. Record the actual URL, current deployment commit, restoration limitations and remaining failures
-   before marking issue #23 complete.
+   before treating any future full-backend release as complete. Issue #23 covers only the static frontend.
 
 Render's current limits are documented in [Free instances](https://render.com/docs/free),
 [web services](https://render.com/docs/web-services),

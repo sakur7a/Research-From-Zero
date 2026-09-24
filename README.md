@@ -6,7 +6,7 @@
 
 ## 快速入口
 
-- **打开 Demo** — [Vercel 静态 Skill 展示](https://re0-skill-demo.vercel.app/)：只读历史案例，不调用后端或模型。此公开快照来自 `54d529a`，不会随 GitHub 推送自动更新；它不是可运行的在线 Agent。
+- **打开 Demo** — [Vercel 交互式前端](https://re0-skill-demo.vercel.app/)：可直接体验有日期的历史案例、筛选、资源矩阵和导出；不调用后端或模型。当前页面源码为 `8307d09`，不会随 GitHub 推送自动更新；它不是实时在线 Agent。
 - **本地使用** — [启动 Re0](#启动)，配置自己的工具调用模型后运行任务。
 - **当前能力与限制** — 查看[路线图](docs/ROADMAP.md)、[安全边界](SECURITY.md)和[部署说明](docs/DEPLOYMENT_ADR.md)。
 
@@ -67,7 +67,7 @@ python run.py
 
 `compose.yaml` 只提供托管模式模板：端口仅发布到宿主机回环地址；必须配置会话密钥、HTTPS 入口、允许来源和存储策略，缺失时应用拒绝启动。它不含 TLS 终端，也没有经过真实反向代理或第二账户验收，**不能据此把服务开放到公网**。构建、开户、备份与恢复步骤见[交付说明](docs/DELIVERY.md)。
 
-本轮参赛交付范围已收敛为 **Vercel 静态前端 Demo**：打开 `/` 即可体验 2026-09-22 的 LoRA 历史案例，在浏览器里筛选候选、查看资源审计矩阵和来源、复制 BibTeX、下载 CSV/JSON；`/skill.html` 保留原有核验说明。也可在本地浏览器载入自己的 Re0 结果 JSON（上限 5 MB）；页面不会上传它或发起实时检索。样本由本 README 的历史运行摘要整理，**不是原始完整 JSON**，未知的原始覆盖/参数没有补造。完整 Agent/BYOK 服务尚未部署。静态站点更新和边界见[部署决策记录](docs/DEPLOYMENT_ADR.md)。
+本轮参赛交付范围已收敛为 **[Vercel 静态前端 Demo](https://re0-skill-demo.vercel.app/)**：打开 `/` 即可体验 2026-09-22 的 LoRA 历史案例，在浏览器里筛选候选、查看资源审计矩阵和来源、复制 BibTeX、下载 CSV/JSON；`/skill.html` 保留原有核验说明。也可在本地浏览器载入自己的 Re0 结果 JSON（上限 5 MB）；页面不会上传它或发起实时检索。样本由本 README 的历史运行摘要整理，**不是原始完整 JSON**，未知的原始覆盖/参数没有补造。完整 Agent/BYOK 服务尚未部署。静态站点更新和边界见[部署决策记录](docs/DEPLOYMENT_ADR.md)。
 
 静态发布包由 `python scripts/build_static_demo.py` 生成在 `dist/static-demo/`，仅包含审定的页面、浏览器模块、样本和 `build-info.json`；Vercel 项目框架设为 Other，以此目录作为项目根目录发布。仓库推送不会自动更新站点。发布后应在匿名浏览器核对 `/`、`/search.html`、`/skill.html`、`/build-info.json`、404 和下载等路径，不能将代码提交当成部署成功。
 
