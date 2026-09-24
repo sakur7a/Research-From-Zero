@@ -1448,7 +1448,7 @@ URL，Cookie 由**浏览器**保存并回传（`Set-Cookie` 原样转发，只�
 - The same long-paper/resource fixture now also runs a wide case with **5 queries × 3 OpenAlex pages** (15 paged requests, 45 paper candidates). All 45 source records survive storage and are present in the report-generation context; cited IDs, DOI source URLs and locators remain valid. The measured full model request, including tool schemas, stays below **150,000 characters and bytes** after compaction. Full abstracts remain in evidence storage for read-back.
 - The model-call descriptions for `search_papers`, `inspect_resource` and `fetch_paper_text` are now 1,166, 656 and 883 characters. Their schemas remain shared with MCP; regressions pin the recall, pagination, failure, attribution, DOI refusal, locator and untrusted-text rules, while the Skill references keep the longer walkthroughs.
 - Targeted regressions cover the task-wide request ledger, report-call reserve, cancellation and fake-clock deadline between sources, long serialized bodies, all candidates retained under a wide query/page run, compact views with evidence read-back, bounded progress cursors, endpoint-specific breakers, per-owner 429 cooldowns, probe concurrency/budgets, half-open admission, restart persistence, and one provider outage not blocking a second endpoint.
-- The local implementation and fixture checklist for #20/#21 is complete; real-provider behavior, live research quality and hosted deployment remain in #22/#23. This local work does not approve a real-model/paid test or a public demo; those decisions remain `未定` in the owner response.
+- The local implementation and fixture checklist for #20/#21 is complete; real-provider behavior and live research quality remain in #22/#23. The fixture run did not approve a real-model/paid test or by itself accept a public demo. The later Vercel static Skill deployment is recorded below and does not close #22/#23.
 - Commit `95bf2d2` passed GitHub Actions run [35962937313](https://github.com/sakur7a/Research-From-Zero/actions/runs/35962937313): Python 3.11/3.13, browser smoke, container smoke, and package-install smoke.
 
 ## 2026-09-24 R2 #22 A：真实 HTTP 浏览器 Agent 烟测
@@ -1467,3 +1467,10 @@ URL，Cookie 由**浏览器**保存并回传（`Set-Cookie` 原样转发，只�
 - The task's matrix JSON, Markdown and CSV use the same row model. The web result lets the reader select multiple links, preview without writes, confirm into the owner-scoped library, and repeat safely without duplicating observations or replacing notes. A guessed evidence ID is refused.
 - Verification: `backend/tests/test_agent_matrix.py` and the extended Agent Chromium smoke pass, including the visible preview/confirm path at 390px. All provider/model traffic in this check was fixture-backed; it is not a real-model quality or relationship-accuracy evaluation.
 - Issue #19 remains open until a real-model run is manually reviewed under #22's unified acceptance record. No model key or spend was authorized, so none was used.
+
+## 2026-09-24 Vercel static Skill demo
+
+- Vercel project `re0-skill-demo` deployed the static Skill page from clean commit `54d529a91bdd83f0c6e7f60778c078f56a0fae66`. The upload contained 23 static files (197.1 KB), not the backend, SQLite data, `.env` or model credentials.
+- Vercel returned `target=production` because this was the project's first deployment and assigned `https://re0-skill-demo.vercel.app/`, despite no `--prod` flag. Anonymous GETs for `/`, `/skill.js`, `/theme.css`, `/search.html` and `/static/search.js` all returned HTTP 200.
+- Public Chromium smoke checked the page title, resource/unknown tabs, arrow-key tab navigation, command clipboard copy and theme toggle. It reported **0 page errors** and **0 failed asset responses**.
+- The page is a historical, read-only Skill example. Server-side library writes and real Agent/BYOK research are unavailable; this deployment does not satisfy #17/#22/#23. No real model or paid provider request was made.

@@ -1,22 +1,29 @@
-# ADR: one hosted Web Demo path
+# ADR: Hosted Re0 Web Demo
 
-- **Status:** proposed; owner acceptance and deployment are pending.
-- **Decision:** prepare one Render Free Docker web service from `render.yaml`.
-- **Scope:** a reviewable hosted demo configuration; this does not create a Render service or URL.
+- **Status:** the static Skill demo is live on Vercel; host/storage for the full backend remains undecided.
+- **Decision:** use Vercel for the read-only Skill demo. Keep the Render Free Docker template as an unelected candidate for the full FastAPI service.
+- **Scope:** the Vercel deployment is a static UI snapshot. It does not deploy the API, database, task worker or model configuration.
 
-## Why this path
+## Vercel static deployment · 2026-09-24
+
+- Public URL: [https://re0-skill-demo.vercel.app/](https://re0-skill-demo.vercel.app/).
+- Source snapshot: clean repository commit `54d529a91bdd83f0c6e7f60778c078f56a0fae66`; a temporary 23-file, 197.1 KB package contains the Skill page, its CSS/JS, and the static search viewer assets. No `.data`, SQLite file, `.env`, backend source or API key was uploaded.
+- Vercel project: `re0-skill-demo`; deployment `dpl_69BNpxycDAojbbPvcK9uTD3a83Hp`. The CLI reported `target=production` and assigned the stable alias because this was the project's first deployment, even though the command did not pass `--prod`. The stable URL returned HTTP 200 anonymously; the public Chromium check passed tabs, keyboard navigation, clipboard copy and theme switching with zero page errors or failed assets.
+- This only proves that the static page is reachable. It does not provide a real Agent/BYOK backend. Actions that require the API, such as saving an imported audit into the research library, are unavailable on this static site. It does not satisfy issues #17, #22 or #23.
+
+## Full-backend hosting analysis
 
 Re0 is a native Python/FastAPI process with SQLite, static ES modules, one worker and a durable task
 loop. A Docker web service can run that existing shape with one process. A static host would need a
-separate API service and external database, so it is not a smaller demo path. The repo keeps only the
-Render template to avoid maintaining multiple unverified hosting recipes.
+separate API service and external database, so it cannot replace the full backend. The Render template
+remains an unselected candidate; no Render service or API deployment has been created.
 
-Vercel is a real FastAPI option, but it packages the app as a Function. Its Hobby duration ceiling is
+Vercel can run FastAPI, but it packages the app as a Function. Its Hobby duration ceiling is
 300 seconds while Re0's default per-task window is 360 seconds; after a `202` response, this app keeps
 work in a process thread and its sessions/quotas/tasks depend on that process and local SQLite. Vercel
 does not promise durable/shared local-file storage or shared instance memory, so a `vercel.json` alone
-would not satisfy this runtime. Selecting Vercel would require a different execution and shared-storage
-design, which the master issue tracks only if it becomes a hard competition requirement.
+would not satisfy this runtime. A full Vercel deployment would require a different execution and
+shared-storage design; the static Skill deployment does not supply that design.
 
 The container listens on `0.0.0.0` and uses the platform-provided `PORT` when present. Render's
 `RENDER=true`, `RENDER_EXTERNAL_URL` and `RENDER_EXTERNAL_HOSTNAME` provide defaults for the public
@@ -34,16 +41,17 @@ logout or process stop; they are never in the task export.
 ## Data and runtime limits
 
 The template sets `RE0_STORAGE_MODE=ephemeral-demo`, uses one free instance, and does not add a disk.
-Render Free services sleep after 15 minutes without inbound traffic; waking typically takes about a
+These limits describe the Render candidate, not the current Vercel static page. Render Free services
+sleep after 15 minutes without inbound traffic; waking typically takes about a
 minute. Their filesystem can be cleared on restart, deploy or spin-down, and Free web services cannot
 attach persistent disks. Therefore accounts, SQLite research records and workspace source files under
-`/app/.data` can disappear. The public login page makes this visible. This is only suitable for an
+`/app/.data` can disappear. In that mode, the hosted login page makes this visible. This is only suitable for an
 owner-approved demo that does not hold the only copy of research material.
 
 Render documents 750 free instance hours per workspace each month. Outbound bandwidth beyond any
 included allowance can be chargeable. The free plan's limits and the bandwidth/cost policy must be
-rechecked before deployment. No paid model call, API-key test or hosting account operation is part of
-this repository change.
+rechecked before using that candidate. No paid model call or API-key test was run; Vercel plan limits
+and cost caps have not been reviewed.
 
 The generated `onrender.com` hostname is sufficient; no purchased domain is assumed. The template
 does not send periodic pings to prevent sleep. A free service can therefore have a cold first request
@@ -53,7 +61,7 @@ and should not be described as always-on.
 deployment is valid only after a real persistent volume covers both SQLite and workspace files and a
 backup/restore path is verified. The Render Free template intentionally does not claim persistence.
 
-## Deploy acceptance
+## Full-backend deployment acceptance
 
 1. The owner accepts the host, storage-loss behavior, account, competition URL requirement and any
    bandwidth/cost exposure.
