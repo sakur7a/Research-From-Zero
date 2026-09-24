@@ -1449,6 +1449,7 @@ URL，Cookie 由**浏览器**保存并回传（`Set-Cookie` 原样转发，只�
 - The model-call descriptions for `search_papers`, `inspect_resource` and `fetch_paper_text` are now 1,166, 656 and 883 characters. Their schemas remain shared with MCP; regressions pin the recall, pagination, failure, attribution, DOI refusal, locator and untrusted-text rules, while the Skill references keep the longer walkthroughs.
 - Targeted regressions cover the task-wide request ledger, report-call reserve, cancellation and fake-clock deadline between sources, long serialized bodies, all candidates retained under a wide query/page run, compact views with evidence read-back, bounded progress cursors, endpoint-specific breakers, per-owner 429 cooldowns, probe concurrency/budgets, half-open admission, restart persistence, and one provider outage not blocking a second endpoint.
 - The local implementation and fixture checklist for #20/#21 is complete; real-provider behavior, live research quality and hosted deployment remain in #22/#23. This local work does not approve a real-model/paid test or a public demo; those decisions remain `未定` in the owner response.
+- Commit `95bf2d2` passed GitHub Actions run [35962937313](https://github.com/sakur7a/Research-From-Zero/actions/runs/35962937313): Python 3.11/3.13, browser smoke, container smoke, and package-install smoke.
 
 ## 2026-09-24 R2 #22 A：真实 HTTP 浏览器 Agent 烟测
 
@@ -1456,7 +1457,7 @@ URL，Cookie 由**浏览器**保存并回传（`Set-Cookie` 原样转发，只�
 - Both modes use `MatrixFixture` through `httpx.MockTransport`: **10 Agent model calls** and **29 provider-shaped fixture requests** (11 OpenAI-shaped, 2 arXiv-shaped, 16 GitHub-shaped). Hosted mode recorded 91 loopback browser requests, **0 page errors** and **0 non-local requests**. The Key was a test-only sentinel, never a real credential.
 - This verifies browser-to-application TCP/HTTP and hosted cookie/owner enforcement on a private `re0.test` origin mapped to loopback. It does not prove a publicly trusted TLS certificate, independent physical devices, real-provider research quality or public deployment.
 - CI now has a dedicated Chromium job for this smoke plus existing hosted-login, two-tab Agent and Skill browser checks. Its JSON reports are added to the Actions summary; use the current workflow result rather than inferring CI success from these local runs. The container/install job is also in CI.
-- GitHub Actions run [35956495974](https://github.com/sakur7a/Research-From-Zero/actions/runs/35956495974) passed the browser, container, install and Python 3.11/3.13 jobs, including the hosted-mode loopback HTTPS smoke.
+- GitHub Actions run [35962937313](https://github.com/sakur7a/Research-From-Zero/actions/runs/35962937313) passed the browser, container, install and Python 3.11/3.13 jobs, including the hosted-mode loopback HTTPS smoke.
 - The latest connector-only evaluation snapshot is [`evals/results/connector-2026-09-24.md`](../evals/results/connector-2026-09-24.md): 2 completed, 1 partial, 3 pending human review, 0 unknown. The Stable-Layers query still misses its expected identifier; unknown attribution and usage remain unknown.
 - #22 still needs a person to review the pending public-source expectations and an owner-authorized real-model/host acceptance. The loopback certificate is self-signed; no public TLS, external model, paid API or deployment was used here.
 
