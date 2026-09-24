@@ -1448,6 +1448,14 @@ URL，Cookie 由**浏览器**保存并回传（`Set-Cookie` 原样转发，只�
 - Targeted regressions cover the task-wide request ledger, report-call reserve, cancellation and fake-clock deadline between sources, long serialized bodies, compact views with evidence read-back, bounded progress cursors, endpoint-specific breakers, per-owner 429 cooldowns, probe concurrency/budgets, half-open admission, restart persistence, and one provider outage not blocking a second endpoint.
 - GitHub issues #20/#21 remain open for the broader acceptance record. This local work does not approve hosted deployment, a real-model/paid test or a public demo; those decisions remain `未定` in the owner response.
 
+## 2026-09-24 R2 #22 A：真实 HTTP 浏览器 Agent 烟测
+
+- `scripts/agent_real_http_browser_smoke.py`: local HTTP mode passed **10 stages**; hosted test mode passed **14 stages** in Chromium with a one-run self-signed certificate. The hosted flow creates two distinct guests, verifies Secure/HttpOnly/SameSite cookies, denies the second guest access/export/cancel of the first guest's task, then completes matrix review, evidence reuse, explicit approval and exports.
+- Both modes use `MatrixFixture` through `httpx.MockTransport`: **10 Agent model calls** and **29 provider-shaped fixture requests** (11 OpenAI-shaped, 2 arXiv-shaped, 16 GitHub-shaped). Hosted mode recorded 91 loopback browser requests, **0 page errors** and **0 non-local requests**. The Key was a test-only sentinel, never a real credential.
+- This verifies browser-to-application TCP/HTTP and hosted cookie/owner enforcement on a private `re0.test` origin mapped to loopback. It does not prove a publicly trusted TLS certificate, independent physical devices, real-provider research quality or public deployment.
+- CI now has a dedicated Chromium job for this smoke plus existing hosted-login, two-tab Agent and Skill browser checks. Its JSON reports are added to the Actions summary; use the current workflow result rather than inferring CI success from these local runs. The container/install job is also in CI.
+- #22 still needs a person to review the pending public-source expectations and an owner-authorized real-model/host acceptance. No external model, paid API or deployment was used here.
+
 ## 2026-09-24 R2 #19：Agent 结果到论文—资源矩阵
 
 - A real Agent task loop with mocked model/provider HTTP searches three source-derived arXiv records and inspects four GitHub candidates. Its report links two papers to the same baseline and links an adapter candidate to one paper. Another same-name repository remains unlinked, and a 404 stays in the failure/unlinked-check list. The resulting matrix preserves `attribution=unconfirmed`, `version_match=unknown`, provider status, fixed commit, per-class file coverage, source IDs and retrieval times.

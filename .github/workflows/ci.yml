@@ -28,6 +28,44 @@ jobs:
       - run: npm run check
       # The smoke builds, inspects and installs both public artifact formats from a clean checkout.
       - run: python scripts/install_smoke.py .data/ci-install-smoke
+  browser-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, verified 2026-09-15
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -e '.[test,browser-smoke]'
+      - run: python -m playwright install --with-deps chromium
+      - name: Create a one-run certificate for the loopback-only hosted smoke
+        run: |
+          mkdir -p .data
+          openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 \
+            -keyout .data/agent-smoke.key -out .data/agent-smoke.crt \
+            -subj "/CN=re0.test" -addext "subjectAltName=DNS:re0.test"
+      - name: Run hosted identity and guest-facing browser checks
+        run: python scripts/login_browser_smoke.py .data/login-browser-smoke
+      - name: Run Agent UI and two-tab progress checks
+        run: python scripts/agent_browser_smoke.py .data/agent-browser-smoke
+      - name: Run the static Skill history-page checks
+        run: python scripts/skill_browser_smoke.py .data/skill-browser-smoke
+      - name: Run Skill workbench through real loopback HTTP
+        run: python scripts/real_http_browser_smoke.py .data/skill-real-http-browser-smoke.json
+      - name: Run Chromium through real loopback HTTP/HTTPS with fixture providers
+        env:
+          AGENT_SMOKE_TLS_CERT: ${{ github.workspace }}/.data/agent-smoke.crt
+          AGENT_SMOKE_TLS_KEY: ${{ github.workspace }}/.data/agent-smoke.key
+        run: python scripts/agent_real_http_browser_smoke.py .data/agent-real-http-browser-smoke.json
+      - name: Add smoke evidence to the workflow summary
+        run: |
+          cat .data/login-browser-smoke/login-report.json >> "$GITHUB_STEP_SUMMARY"
+          cat .data/agent-browser-smoke/agent-browser-report.json >> "$GITHUB_STEP_SUMMARY"
+          cat .data/skill-browser-smoke/skill-browser-report.json >> "$GITHUB_STEP_SUMMARY"
+          cat .data/skill-real-http-browser-smoke.json >> "$GITHUB_STEP_SUMMARY"
+          cat .data/agent-real-http-browser-smoke.json >> "$GITHUB_STEP_SUMMARY"
   container-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 10

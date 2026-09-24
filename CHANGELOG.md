@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Real-HTTP Agent browser acceptance path (#22)
+
+- Add a separate Chromium smoke that starts FastAPI as a real loopback HTTP process and completes
+  local identity → model settings → fixture-backed research → resource matrix → source read-back →
+  follow-up with evidence reuse → preview/confirm → CSV and task exports.
+- The CI variant generates a one-run self-signed certificate and checks two hosted guest cookies
+  cannot read or cancel each other's work; the synthetic host resolves to loopback only.
+- Only the provider transport is mocked. The test certificate does not prove public TLS, and the
+  loopback sessions do not replace two independent devices on the selected host. A real model and
+  public deployment remain untested; those require the owner decisions in #1 and evidence in #22/#23.
+- Add a dedicated CI browser job for the real-HTTP Agent smoke plus the existing hosted-login,
+  two-tab Agent and Skill workbench Chromium checks.
+
 ### Agent execution budgets, compact context and incremental progress (#20)
 
 - Carry one per-task upstream HTTP request allowance, cancellation signal and deadline through

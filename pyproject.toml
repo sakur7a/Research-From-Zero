@@ -21,6 +21,7 @@ re0 = "re0.cli:main"
 
 [project.optional-dependencies]
 test = ["pytest==9.0.2", "build==1.6.1"]
+browser-smoke = ["playwright==1.63.0"]
 # PDF text extraction. Optional on purpose: an HTML-only read needs nothing beyond the standard
 # library, and a PDF backend should be a choice the installer makes rather than a dependency every
 # user inherits. pypdf is BSD-3-Clause and pure Python, so it adds no compiled extension. Without
