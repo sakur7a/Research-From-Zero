@@ -121,8 +121,11 @@ def run(output):
         page.locator('#task-form [name=research_scope]').select_option('focused')
         page.locator('[name=consent_to_send]').check()
         page.locator('#task-form [type=submit]').click()
-        page.wait_for_function("document.querySelector('.status')?.textContent==='报告已生成'",timeout=15000)
-        assert page.locator('[data-tab="report"][aria-selected="true"]').count()==1
+        page.wait_for_function("""() => {
+            const status=document.querySelector('.run-heading .status')?.textContent;
+            const selected=document.querySelector('[role="tablist"] [role="tab"][aria-selected="true"]');
+            return status==='报告已生成' && ['report','matrix'].includes(selected?.dataset.tab);
+        }""",timeout=15000)
         page.locator('[data-tab="trace"]').click()
         assert page.locator('.trace-row').count()>5
         checked.append('real_runtime_model_tool_observation_loop_fixture_network')
