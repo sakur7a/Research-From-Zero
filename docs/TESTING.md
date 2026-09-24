@@ -1454,7 +1454,9 @@ URL，Cookie 由**浏览器**保存并回传（`Set-Cookie` 原样转发，只�
 - Both modes use `MatrixFixture` through `httpx.MockTransport`: **10 Agent model calls** and **29 provider-shaped fixture requests** (11 OpenAI-shaped, 2 arXiv-shaped, 16 GitHub-shaped). Hosted mode recorded 91 loopback browser requests, **0 page errors** and **0 non-local requests**. The Key was a test-only sentinel, never a real credential.
 - This verifies browser-to-application TCP/HTTP and hosted cookie/owner enforcement on a private `re0.test` origin mapped to loopback. It does not prove a publicly trusted TLS certificate, independent physical devices, real-provider research quality or public deployment.
 - CI now has a dedicated Chromium job for this smoke plus existing hosted-login, two-tab Agent and Skill browser checks. Its JSON reports are added to the Actions summary; use the current workflow result rather than inferring CI success from these local runs. The container/install job is also in CI.
-- #22 still needs a person to review the pending public-source expectations and an owner-authorized real-model/host acceptance. No external model, paid API or deployment was used here.
+- GitHub Actions run [35956495974](https://github.com/sakur7a/Research-From-Zero/actions/runs/35956495974) passed the browser, container, install and Python 3.11/3.13 jobs, including the hosted-mode loopback HTTPS smoke.
+- The latest connector-only evaluation snapshot is [`evals/results/connector-2026-09-24.md`](../evals/results/connector-2026-09-24.md): 2 completed, 1 partial, 3 pending human review, 0 unknown. The Stable-Layers query still misses its expected identifier; unknown attribution and usage remain unknown.
+- #22 still needs a person to review the pending public-source expectations and an owner-authorized real-model/host acceptance. The loopback certificate is self-signed; no public TLS, external model, paid API or deployment was used here.
 
 ## 2026-09-24 R2 #19：Agent 结果到论文—资源矩阵
 

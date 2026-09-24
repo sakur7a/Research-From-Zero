@@ -7,7 +7,7 @@ Two rules from the issue are enforced here rather than left to prose:
   kind of number that makes a weak evaluation look finished.
 * **Channels never mix.** `score()` takes one channel and reads only that channel's records, so a
   fixture result cannot reach a live metric and a live result cannot be averaged with a connector
-  one.
+  one. A one-channel run replaces only that channel's section in the public summary.
 
 Usage the provider did not report stays `unknown`, never zero. An untested mode is `blocked`, never
 `passed`. Run it as
@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import re
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -145,6 +146,34 @@ def render_summary(metrics: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def merge_summaries(existing: str, replacements: list[str]) -> str:
+    """Replace only the channel sections that were scored in this invocation."""
+    heading = re.compile(r"(?=^# Evaluation summary — channel `[^`]+`$)", re.MULTILINE)
+    sections = [part.strip() for part in heading.split(existing) if part.strip()]
+    replacement_by_channel = {}
+    for summary in replacements:
+        match = re.match(r"# Evaluation summary — channel `([^`]+)`", summary)
+        if match:
+            replacement_by_channel[match.group(1)] = summary.strip()
+
+    merged = []
+    replaced = set()
+    for section in sections:
+        match = re.match(r"# Evaluation summary — channel `([^`]+)`", section)
+        channel = match.group(1) if match else None
+        if channel in replacement_by_channel:
+            merged.append(replacement_by_channel[channel])
+            replaced.add(channel)
+        else:
+            merged.append(section)
+    for summary in replacements:
+        match = re.match(r"# Evaluation summary — channel `([^`]+)`", summary)
+        if match and match.group(1) not in replaced:
+            merged.append(summary.strip())
+            replaced.add(match.group(1))
+    return "\n\n".join(merged) + ("\n" if merged else "")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -167,8 +196,9 @@ def main(argv=None) -> int:
                                                     encoding="utf-8")
     if not summaries:
         return 1
-    combined = "\n".join(summaries)
     SUMMARY_FILE.parent.mkdir(exist_ok=True)
+    existing = SUMMARY_FILE.read_text(encoding="utf-8") if SUMMARY_FILE.exists() else ""
+    combined = merge_summaries(existing, summaries)
     SUMMARY_FILE.write_text(combined, encoding="utf-8")
     print(combined)
     print(f"written to {SUMMARY_FILE}")

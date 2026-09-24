@@ -140,3 +140,17 @@ def test_the_summary_states_a_null_instead_of_printing_a_number():
     rendered = scorer.render_summary(scorer.score([], {"task_set_version": "1", "tasks": []}, "live"))
     assert "no value" in rendered
     assert "not a zero and not a one" in rendered
+
+
+def test_scoring_one_channel_preserves_the_other_channel_summary():
+    scorer = load("score")
+    existing = ("# Evaluation summary — channel `connector`\n\nold connector\n\n"
+                "# Evaluation summary — channel `live`\n\nexisting live\n")
+    replacement = "# Evaluation summary — channel `connector`\n\nnew connector\n"
+
+    merged = scorer.merge_summaries(existing, [replacement])
+
+    assert "new connector" in merged
+    assert "old connector" not in merged
+    assert "existing live" in merged
+    assert merged.count("# Evaluation summary — channel") == 2

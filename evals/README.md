@@ -22,6 +22,7 @@ python evals/runner.py                         # every connector task (real netw
 python evals/runner.py --only recall-stable-layers
 python evals/runner.py --channel live          # requires RE0_LLM_BASE_URL / RE0_LLM_MODEL / key
 python evals/score.py                          # writes evals/results/SUMMARY.md
+python evals/score.py --channel connector      # updates connector, keeps other channel summaries
 ```
 
 ## What the states mean

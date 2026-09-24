@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Preserve independent evaluation summaries (#22)
+
+- Scoring one channel updates only that channel's section in `evals/results/SUMMARY.md`, preserving
+  the other channel's last recorded result.
+- Freeze the 2026-09-24 connector snapshot and a public-source human-review packet. It retains the
+  Stable-Layers recall miss, unknown attribution, pending human judgments and provider-unknown usage.
+
 ### Real-HTTP Agent browser acceptance path (#22)
 
 - Add a separate Chromium smoke that starts FastAPI as a real loopback HTTP process and completes
