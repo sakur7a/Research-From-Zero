@@ -1,7 +1,7 @@
 # Re0 — Research From Zero
 
 > 从“找到论文”继续向前：核对代码、Checkpoint、数据集和评测资源，并把结论绑定到可检查的来源。
-![Uploading image.png…]()
+<img width="1672" height="941" alt="image" src="https://github.com/user-attachments/assets/b0ef40e2-2a66-4cc6-835e-b2f921f5093e" />
 
 [**在线体验 → re0-skill-demo.vercel.app**](https://re0-skill-demo.vercel.app/) ·
 [Skill](skills/re0-paper-search/SKILL.md) ·
@@ -210,18 +210,6 @@ npm run check
 
 仓库 CI 同时覆盖 Python 3.11 / 3.13、前端检查、安装 smoke，以及当前发布流程相关的浏览器测试。历史与最新验证记录见 [docs/TESTING.md](docs/TESTING.md)。
 
-## 当前交付范围
-
-本次提交阶段已经主动停止继续扩后端功能，优先保证：
-
-- GitHub 仓库公开可读；
-- README 能快速解释项目价值和边界；
-- Vercel 地址无需账号即可打开；
-- 静态 Demo 没有死按钮和后端依赖；
-- 历史结果与实时能力明确区分；
-- 用户可以实际操作筛选、矩阵、来源和导出。
-
-后续若继续开发，再恢复 BYOK 在线 Agent、长期科研知识库和 Zotero 等完整平台能力。
 
 ## Repository status
 
