@@ -1,12 +1,9 @@
-# License not yet selected
+# License and third-party notices
 
-The project owner has not selected a license for re0. This initial delivery does
-not grant a public open-source license. Repository visibility and an open-source license are separate decisions; public
-visibility does not itself grant an open-source license.
+Re0's original code and documentation are released under the [MIT License](LICENSE).
+Copyright (c) 2026 Re0 contributors. Keep the copyright and permission notice
+when distributing copies or substantial portions of the project.
 
 The implementation was authored for this project. Referenced research tools
 inspired the product direction; their application code was not copied into this
 repository. Third-party dependencies retain their respective licenses.
-
-Do not add an author's identity, signature, copyright assignment, or a license
-on behalf of the owner without their authorization.

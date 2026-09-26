@@ -1,9 +1,15 @@
 # Re0 — Research From Zero
 
 > 从“找到论文”继续向前：核对代码、Checkpoint、数据集和评测资源，并把结论绑定到可检查的来源。
-<img width="1672" height="941" alt="image" src="https://github.com/user-attachments/assets/b0ef40e2-2a66-4cc6-835e-b2f921f5093e" />
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-c15f3c.svg)](LICENSE)
+![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3f7f62.svg)
+
+![Re0 项目展示](https://github.com/user-attachments/assets/b0ef40e2-2a66-4cc6-835e-b2f921f5093e)
 
 [**在线体验 → re0-skill-demo.vercel.app**](https://re0-skill-demo.vercel.app/) ·
+[交互式历史案例](https://re0-skill-demo.vercel.app/search.html) ·
+[资源核验记录](https://re0-skill-demo.vercel.app/skill.html) ·
 [Skill](skills/re0-paper-search/SKILL.md) ·
 [测试记录](docs/TESTING.md) ·
 [项目路线](docs/ROADMAP.md)
@@ -24,11 +30,11 @@ Re0 的核心设计不是给论文简单打一个“已开源”标签，而是�
 
 ## 在线 Demo
 
-当前比赛交付是一个部署在 **Vercel** 的纯前端交互式 Demo：
+当前比赛交付是一个部署在 **Vercel** 的纯前端网站：首页介绍项目，交互式历史案例位于 `/search.html`：
 
 ### https://re0-skill-demo.vercel.app/
 
-打开后无需安装、登录或配置 API Key，可以直接体验：
+无需安装、登录或配置 API Key，进入[历史案例](https://re0-skill-demo.vercel.app/search.html)后可以：
 
 1. 查看一条带日期的历史论文资源核验案例；
 2. 浏览论文卡片、摘要与来源；
@@ -48,7 +54,7 @@ Re0 的核心设计不是给论文简单打一个“已开源”标签，而是�
 - 不把浏览器数据保存到服务器；
 - 页面中的案例保留原检查日期，不会伪装成今天重新核验的结果。
 
-仓库内仍保留完整的 Skill、CLI、MCP、Agent、文献库等研究实现，供后续继续迭代；它们不是本次 Vercel 静态部署的一部分。
+仓库内仍保留 Skill、CLI、MCP、本地 Agent、文献库等研究实现；它们不是本次 Vercel 静态部署的一部分。本地服务默认是单人 Alpha，托管模式尚未完成真实部署验收。
 
 ## 为什么做 Re0
 
@@ -208,7 +214,7 @@ npm test
 npm run check
 ```
 
-仓库 CI 同时覆盖 Python 3.11 / 3.13、前端检查、安装 smoke，以及当前发布流程相关的浏览器测试。历史与最新验证记录见 [docs/TESTING.md](docs/TESTING.md)。
+仓库 CI 覆盖 Python 3.11 / 3.13、前端检查、安装 smoke 和浏览器测试。协议测试使用 fixture，不等于真实模型的科研质量验收；历史与最新验证记录见 [docs/TESTING.md](docs/TESTING.md)。
 
 
 ## Repository status
@@ -218,12 +224,11 @@ npm run check
 - Online LLM/API backend: **not deployed**
 - Demo data: **dated historical audit**
 - Cloud persistence: **none**
+- Project license: **MIT**
 
 ## License
 
-仓库目前公开可见，但项目所有者尚未选择正式开源许可证。
-
-**公开源码与授予开源许可证是两件不同的事。** 在许可证确定前，请参阅 [LICENSE-NOTICE.md](LICENSE-NOTICE.md)。
+Re0 原创代码与文档采用 [MIT License](LICENSE)。第三方资产与依赖保留各自的许可证；详见 [LICENSE-NOTICE.md](LICENSE-NOTICE.md)。
 
 ---
 

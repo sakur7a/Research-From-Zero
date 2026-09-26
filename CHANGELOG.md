@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### README and MIT license
+
+- Update the GitHub README for the current Vercel homepage, historical case and local/online boundary.
+- Release the project's original code and documentation under MIT; keep third-party licenses separate.
+
 ### Preserve Agent association evidence through library approval (#19)
 
 - Add each resource check's `scope` to the shared matrix row model and carry it into JSON, Markdown,
