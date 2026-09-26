@@ -1,6 +1,7 @@
 # Re0 — Research From Zero
 
 > 从“找到论文”继续向前：核对代码、Checkpoint、数据集和评测资源，并把结论绑定到可检查的来源。
+<img width="2048" height="682" alt="image" src="https://github.com/user-attachments/assets/9878c410-3eef-46d0-94f7-e598e4359a0d" />
 
 [**在线体验 → re0-skill-demo.vercel.app**](https://re0-skill-demo.vercel.app/) ·
 [Skill](skills/re0-paper-search/SKILL.md) ·
